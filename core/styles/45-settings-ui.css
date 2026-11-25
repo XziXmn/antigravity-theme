@@ -96,11 +96,23 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
 
 /* Native Settings Modal Integration */
 #ag-settings-nav-divider {
-  margin: 8px 16px 6px 16px;
+  margin: 8px 8px 6px 8px;
   border-top: 1px solid var(--sidebar-border, var(--border, rgba(0, 0, 0, 0.06)));
 }
 
+#ag-settings-nav-divider[data-ag-nav-padded="0"] {
+  margin: 8px 16px 6px 16px;
+}
+
 #ag-settings-nav-wrap {
+  margin: 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#ag-settings-nav-wrap[data-ag-nav-padded="0"] {
+  width: auto;
   margin: 0 8px;
 }
 
@@ -109,8 +121,11 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  box-sizing: border-box;
   width: 100%;
-  padding: 4px 8px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 5px 8px;
   border: none;
   border-radius: 8px;
   background: transparent;
@@ -141,6 +156,15 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   align-items: center;
   gap: 7px;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+#ag-settings-nav-btn .ag-s-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #ag-settings-nav-btn .ag-s-nav-ver {
@@ -163,17 +187,36 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   font-weight: 400 !important;
 }
 
-/* Swap right content pane cleanly without mutating React children or hiding the modal close button */
-[data-ag-codex-settings-open="1"] [data-ag-settings-right-pane="1"] > :not(#ag-settings-pane):not(button):not([data-testid*="close"]) {
+/* Constrain flex split row & right content pane so opening Codex tab never stretches or distorts the settings modal */
+[data-ag-codex-settings-open="1"] [data-ag-settings-split-row="1"] {
+  min-height: 0 !important;
+  min-width: 0 !important;
+}
+
+[data-ag-codex-settings-open="1"] [data-ag-settings-right-pane="1"] {
+  min-width: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Swap right content pane cleanly without mutating React children or hiding the modal close button (EN/ZH/TW) */
+[data-ag-codex-settings-open="1"] [data-ag-settings-right-pane="1"] > :not(#ag-settings-pane):not(button):not(style):not([data-testid*="close"]):not([aria-label*="Close" i]):not([aria-label*="关闭"]):not([aria-label*="關閉"]) {
   display: none !important;
 }
 
 #ag-settings-pane {
   display: none;
+  position: relative;
   box-sizing: border-box;
+  flex: 1 1 0%;
+  min-width: 0;
+  min-height: 0;
   width: 100%;
   height: 100%;
+  max-height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 36px 24px 48px 24px;
   background-color: transparent;
   color: var(--ag-s-fg);
@@ -403,11 +446,111 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px 16px;
 }
 
-#ag-settings-pane .ag-s-subrow[hidden] {
+#ag-settings-pane .ag-s-subrow-stack {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--ag-s-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#ag-settings-pane .ag-s-subrow[hidden],
+#ag-settings-pane .ag-s-subrow-stack[hidden] {
   display: none !important;
+}
+
+#ag-settings-pane .ag-s-sub-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+#ag-settings-pane .ag-s-preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+#ag-settings-pane .ag-s-preset-lbl {
+  font-size: 11px !important;
+  color: var(--ag-s-fg-3) !important;
+  margin-right: 2px;
+}
+
+#ag-settings-pane .ag-s-preset-btn {
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ag-s-border);
+  background-color: var(--ag-s-surface) !important;
+  color: var(--ag-s-fg-2) !important;
+  font-family: var(--ag-s-font) !important;
+  font-size: 11px !important;
+  line-height: 17px !important;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+#ag-settings-pane .ag-s-preset-btn:hover {
+  background-color: var(--ag-s-selected) !important;
+  color: var(--ag-s-fg) !important;
+}
+
+#ag-settings-pane .ag-s-textarea {
+  width: 100%;
+  min-height: 108px;
+  max-height: 280px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--ag-s-border);
+  background-color: var(--ag-s-surface) !important;
+  color: var(--ag-s-fg) !important;
+  font-family: var(--ag-s-font) !important;
+  font-size: 12px !important;
+  line-height: 1.55 !important;
+  resize: vertical;
+  outline: none;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+#ag-settings-pane .ag-s-textarea:focus {
+  border-color: var(--ag-s-focus);
+  background-color: var(--ag-s-bg) !important;
+}
+
+#ag-settings-pane .ag-s-prompt-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#ag-settings-pane .ag-s-prompt-meta {
+  font-size: 11px !important;
+  color: var(--ag-s-fg-3) !important;
+}
+
+#ag-settings-pane .ag-s-prompt-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#ag-settings-pane .ag-s-warn-note {
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(217, 119, 6, 0.25);
+  background-color: rgba(245, 158, 11, 0.08);
+  color: var(--ag-s-warn) !important;
+  font-size: 11px !important;
+  line-height: 16px !important;
 }
 
 #ag-settings-pane .ag-s-sub-label {
@@ -590,8 +733,12 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
 /* Segmented Controls */
 #ag-settings-pane .ag-s-seg {
   display: inline-flex;
-  padding: 2px;
-  border-radius: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-width: 100%;
+  padding: 3px;
+  border-radius: 9px;
   background-color: var(--ag-s-seg-bg);
   flex-shrink: 0;
 }
@@ -606,6 +753,7 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   font-size: 12px !important;
   line-height: 16px !important;
   font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
@@ -966,6 +1114,42 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   flex-shrink: 0;
 }
 
+#ag-settings-pane .ag-s-menu-row-check,
 .ag-s-menu-row-check {
   color: var(--ag-s-fg) !important;
+}
+
+#ag-settings-pane .ag-s-target-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background-color: var(--ag-s-surface);
+  border: 1px solid var(--ag-s-hairline);
+  font-size: 11.5px !important;
+  line-height: 16px !important;
+  color: var(--ag-s-fg-2) !important;
+}
+
+#ag-settings-pane .ag-s-target-path {
+  font-family: var(--ag-s-mono) !important;
+  color: var(--ag-s-fg) !important;
+  word-break: break-all;
+}
+
+#ag-settings-pane .ag-s-inline-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background-color: var(--ag-s-surface);
+  border: 1px solid var(--ag-s-hairline);
+}
+
+#ag-settings-pane .ag-s-inline-toggle[hidden] {
+  display: none !important;
 }

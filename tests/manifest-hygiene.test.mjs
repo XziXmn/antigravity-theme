@@ -32,16 +32,27 @@ test('core/manifest.json matches every file under core/ with zero drift', () => 
   assert.equal(res.ok, true, `Core manifest drift detected: ${JSON.stringify(res.modified)}`);
 });
 
-test('core/i18n.json is valid JSON with substantial localization coverage', () => {
-  const dictPath = path.join(ROOT_DIR, 'core', 'i18n.json');
-  const raw = fs.readFileSync(dictPath, 'utf8');
-  const dict = JSON.parse(raw);
-  const keys = Object.keys(dict);
-  assert.ok(keys.length >= 800, `Expected >= 800 i18n entries, found ${keys.length}`);
-  assert.equal(dict.Settings || dict['Settings'] ? typeof dict['Settings'] : 'string', 'string');
-  for (const keepEn of ['Minimal', 'Low', 'Medium', 'High', 'Extra', 'Extra High', 'XHigh', 'Max', 'Orchestrator', 'Orchestrator (Carbon)', 'Orchestrator (Argon)']) {
-    assert.equal(Object.prototype.hasOwnProperty.call(dict, keepEn), false, `Model/effort label "${keepEn}" should stay untranslated`);
+test('core/i18n.json and zh-CN/zh-SG/zh-TW packs are valid JSON with clean localization coverage and tracked upstreams', () => {
+  const expectedLocales = [
+    path.join(ROOT_DIR, 'core', 'i18n.json'),
+    path.join(ROOT_DIR, 'core', 'i18n', 'zh-CN.json'),
+    path.join(ROOT_DIR, 'core', 'i18n', 'zh-SG.json'),
+    path.join(ROOT_DIR, 'core', 'i18n', 'zh-TW.json')
+  ];
+  for (const dictPath of expectedLocales) {
+    const raw = fs.readFileSync(dictPath, 'utf8');
+    const dict = JSON.parse(raw);
+    const keys = Object.keys(dict);
+    assert.ok(keys.length >= 2000, `Expected >= 2000 i18n entries in ${path.basename(dictPath)}, found ${keys.length}`);
+    assert.equal(typeof dict['Settings'], 'string');
+    for (const keepEn of ['Minimal', 'Low', 'Medium', 'High', 'Extra', 'Extra High', 'XHigh', 'Max', 'Orchestrator', 'Orchestrator (Carbon)', 'Orchestrator (Argon)', 'Orchestrator (Neon)']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(dict, keepEn), false, `Model/effort label "${keepEn}" should stay untranslated in ${path.basename(dictPath)}`);
+    }
   }
+  const upstreams = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'core', 'upstreams.json'), 'utf8'));
+  assert.equal(upstreams.upstreams.langpack.repo, 'CHANPAJN/antigravity-langpack');
+  assert.equal(upstreams.upstreams.zhLauncher.repo, 'guuguo/antigravity-zh-launcher');
+  assert.equal(upstreams.upstreams.theme.repo, 'nkjDSLcvanv/antigravity-codex-theme');
 });
 
 test('Assembled runtime JS and CSS parts pass syntax validation and define Codex presets', () => {
@@ -121,7 +132,7 @@ test('Repository contains zero upstream branding, removed warm presets, or Drive
   const allFiles = walkAllFiles(ROOT_DIR);
   const violations = [];
   for (const full of allFiles) {
-    const rel = path.relative(ROOT_DIR, full);
+    const rel = path.relative(ROOT_DIR, full).replace(/\\/g, '/');
     if (rel === 'tests/manifest-hygiene.test.mjs' || rel.startsWith('assets/')) continue;
     const text = fs.readFileSync(full, 'utf8');
     // Allow explicit upstream attribution only inside README.md while keeping code/configs/scripts clean
@@ -138,7 +149,10 @@ test('Repository contains zero upstream branding, removed warm presets, or Drive
   assert.deepEqual(violations, []);
 
   const readme = fs.readFileSync(path.join(ROOT_DIR, 'README.md'), 'utf8');
-  assert.ok(readme.includes('https://github.com/nkjDSLcvanv/antigravity-codex-theme.git'));
+  assert.ok(
+    readme.includes('https://github.com/XziXmn/antigravity-theme') ||
+      readme.includes('https://github.com/nkjDSLcvanv/antigravity-codex-theme.git')
+  );
   assert.ok(!readme.includes('<your-username>'));
   assert.ok(!readme.includes('状态灯'));
   assert.ok(!readme.includes('琥珀'));

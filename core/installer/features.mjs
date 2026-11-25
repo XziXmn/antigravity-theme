@@ -15,6 +15,8 @@ export const BASE_SPARSE_PATHS = Object.freeze([
   '/core/manifest.json',
   '/core/installer',
   '/core/daemon/paths.mjs',
+  '/core/daemon/hook-runner.mjs',
+  '/core/daemon/hooks-sync.mjs',
   '/core/daemon/cdp-bridge.mjs',
   '/core/daemon/cdp-relaunch.mjs',
   '/core/daemon/updater.mjs',
@@ -45,15 +47,23 @@ export const FEATURE_GROUPS = Object.freeze({
   },
   i18n: {
     id: 'i18n',
-    label: '中文界面本地化 (900+ 词条)',
+    label: '中文系界面本地化（2,300+ 词条，支持简中 / 英文术语简中 / 繁體）',
     configKeys: ['i18n'],
     sparsePaths: [
       '/core/i18n.json',
+      '/core/i18n/zh-CN.json',
+      '/core/i18n/zh-SG.json',
+      '/core/i18n/zh-TW.json',
+      '/core/upstreams.json',
       '/core/runtime/60-i18n-engine.js',
       '/user/i18n.override.json'
     ],
     coreRelPaths: [
       'i18n.json',
+      'i18n/zh-CN.json',
+      'i18n/zh-SG.json',
+      'i18n/zh-TW.json',
+      'upstreams.json',
       'runtime/60-i18n-engine.js'
     ],
     aliases: ['i18n', 'zh', 'cn', 'chinese', 'locale', 'l10n', 'translate']

@@ -2,6 +2,18 @@
   "enabled": true,
   "channel": "auto",
   "preset": "codex-pure-white",
+  "i18nLocale": "zh-CN",
+  "syncAiOutputLang": false,
+  "customSystemPrompt": {
+    "enabled": false,
+    "mode": "system-dual",
+    "text": "",
+    "everyInvocation": false
+  },
+  "hookAutoAllow": {
+    "enabled": false,
+    "mode": "files"
+  },
   "telemetryLayout": "compact",
   "telemetryCacheMode": "session",
   "contextLimit": "auto",

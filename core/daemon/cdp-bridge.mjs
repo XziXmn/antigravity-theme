@@ -20,9 +20,36 @@ import { ROOT_DIR } from './paths.mjs';
 import { createCdpRelaunchController } from './cdp-relaunch.mjs';
 
 export const ALLOWED_EXTERNAL_LINKS = Object.freeze({
-  github: 'https://github.com/nkjDSLcvanv/antigravity-codex-theme',
-  feedback: 'https://x.com/shehxuhxjx66088/status/2124698149742883293?a=EQtEZD2AMCGaj9bBRIo&s=20'
+  github: 'https://github.com/XziXmn/antigravity-theme',
+  feedback: 'https://github.com/XziXmn/antigravity-theme/issues'
 });
+
+const BACKEND_ONLY_CONFIG_KEYS = new Set([
+  'customSystemPrompt',
+  'hookAutoAllow',
+  'syncAiOutputLang',
+  'sshHosts',
+  'promptSuggestionModel'
+]);
+const BACKEND_ONLY_MODULE_KEYS = new Set(['sshRemote', 'cdpAutoRelaunch']);
+
+export function patchNeedsFullReinject(patch) {
+  if (!patch || typeof patch !== 'object') return true;
+  const keys = Object.keys(patch);
+  if (keys.length === 0) return false;
+  for (const key of keys) {
+    if (key === 'modules') {
+      const mods = patch.modules;
+      if (!mods || typeof mods !== 'object') return true;
+      for (const mk of Object.keys(mods)) {
+        if (!BACKEND_ONLY_MODULE_KEYS.has(mk)) return true;
+      }
+      continue;
+    }
+    if (!BACKEND_ONLY_CONFIG_KEYS.has(key)) return true;
+  }
+  return false;
+}
 
 export function openAllowlistedExternalLink(key, { execFileFn = execFile, platform = process.platform } = {}) {
   const url = Object.prototype.hasOwnProperty.call(ALLOWED_EXTERNAL_LINKS, key)
@@ -646,6 +673,22 @@ export function createCdpManager({
           }
         };
 
+        const syncPatchVersion = async (nextVersion) => {
+          if (!hostConfirmed || !checkLockOwnership() || !nextVersion) return false;
+          try {
+            await send('Runtime.evaluate', {
+              expression:
+                '(window.__ag_body_ready === true && document.getElementById("ag-codex-theme") && (window.__ag_patch_version = ' +
+                JSON.stringify(String(nextVersion)) +
+                '))',
+              returnByValue: false
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
         const checkAndInject = async () => {
           if (!hostConfirmed || !checkLockOwnership()) return;
           try {
@@ -938,6 +981,15 @@ export function createCdpManager({
                   version: cachedPatchVersion,
                   config: {
                     enabled: activeConfig.enabled,
+                    i18nLocale: activeConfig.i18nLocale || 'zh-CN',
+                    syncAiOutputLang: Boolean(activeConfig.syncAiOutputLang),
+                    customSystemPrompt: activeConfig.customSystemPrompt || {
+                      enabled: false,
+                      mode: 'system-dual',
+                      text: '',
+                      everyInvocation: false
+                    },
+                    hookAutoAllow: activeConfig.hookAutoAllow || { enabled: false, mode: 'files' },
                     telemetryLayout: activeConfig.telemetryLayout,
                     telemetryCacheMode: activeConfig.telemetryCacheMode,
                     promptSuggestionModel: activeConfig.promptSuggestionModel,
@@ -988,12 +1040,24 @@ export function createCdpManager({
                   if (!activeConfig.enabled) {
                     targetThemeModes.clear();
                   }
+                  const { cachedPatchVersion: nextPatchVersion } = bundleCtrl.getState();
+                  const needsFullReinject = patchNeedsFullReinject(patch);
+                  const needsMetricsRefresh =
+                    needsFullReinject ||
+                    Object.prototype.hasOwnProperty.call(patch, 'sshHosts') ||
+                    Boolean(patch?.modules && Object.prototype.hasOwnProperty.call(patch.modules, 'sshRemote'));
                   for (const entry of attachedTargets.values()) {
                     if (!entry.hostConfirmed) continue;
                     try {
                       if (entry.updateNewDocScript) await entry.updateNewDocScript();
-                      if (entry.inject) await entry.inject();
-                      if (entry.syncMetricsForSession) await entry.syncMetricsForSession(true);
+                      if (needsFullReinject) {
+                        if (entry.inject) await entry.inject();
+                      } else if (entry.syncPatchVersion) {
+                        await entry.syncPatchVersion(nextPatchVersion);
+                      }
+                      if (needsMetricsRefresh && entry.syncMetricsForSession) {
+                        await entry.syncMetricsForSession(true);
+                      }
                     } catch {}
                   }
                 }
@@ -1008,6 +1072,15 @@ export function createCdpManager({
                   version: cachedPatchVersion,
                   config: {
                     enabled: activeConfig.enabled,
+                    i18nLocale: activeConfig.i18nLocale || 'zh-CN',
+                    syncAiOutputLang: Boolean(activeConfig.syncAiOutputLang),
+                    customSystemPrompt: activeConfig.customSystemPrompt || {
+                      enabled: false,
+                      mode: 'system-dual',
+                      text: '',
+                      everyInvocation: false
+                    },
+                    hookAutoAllow: activeConfig.hookAutoAllow || { enabled: false, mode: 'files' },
                     telemetryLayout: activeConfig.telemetryLayout,
                     telemetryCacheMode: activeConfig.telemetryCacheMode,
                     promptSuggestionModel: activeConfig.promptSuggestionModel,
@@ -1070,6 +1143,7 @@ export function createCdpManager({
           send,
           updateNewDocScript,
           inject,
+          syncPatchVersion,
           checkAndInject,
           syncMetricsForSession,
           endpoint,

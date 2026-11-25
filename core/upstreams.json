@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-25T08:38:36.574Z",
+  "upstreams": {
+    "theme": {
+      "id": "antigravity-codex-theme",
+      "role": "theme-and-runtime-base",
+      "repo": "nkjDSLcvanv/antigravity-codex-theme",
+      "url": "https://github.com/nkjDSLcvanv/antigravity-codex-theme",
+      "branch": "main",
+      "license": "MIT",
+      "commit": "e3be59cbd5b5e75ea1ef6213e0c87e2aff2172fd",
+      "shortCommit": "e3be59c",
+      "commitDate": "2026-11-25"
+    },
+    "langpack": {
+      "id": "antigravity-langpack",
+      "role": "i18n-primary",
+      "repo": "CHANPAJN/antigravity-langpack",
+      "url": "https://github.com/CHANPAJN/antigravity-langpack",
+      "branch": "main",
+      "license": "GPL-3.0",
+      "files": {
+        "zh-CN": "dict/base.zh-CN.json",
+        "zh-SG": "dict/base.zh-SG.json",
+        "zh-TW": "dict/base.zh-TW.json"
+      },
+      "commit": "f1cfa1ada975a4bc16d35f7487410b1665ad14fb",
+      "shortCommit": "f1cfa1a",
+      "commitDate": "2026-11-25",
+      "commitSubject": "perf(docs): compress lossless-source demo.gif for instant loading"
+    },
+    "zhLauncher": {
+      "id": "antigravity-zh-launcher",
+      "role": "i18n-supplement-and-rules",
+      "repo": "guuguo/antigravity-zh-launcher",
+      "url": "https://github.com/guuguo/antigravity-zh-launcher",
+      "branch": "main",
+      "license": "MIT",
+      "files": {
+        "zh-CN": "locales/zh-CN.json",
+        "zh-TW": "locales/zh-TW.json"
+      },
+      "commit": "dc9cac9dcfdd08bf34957ce952a15bac443245c4",
+      "shortCommit": "dc9cac9",
+      "commitDate": "2026-11-25",
+      "commitSubject": "fix(cdp): re-inject after same-URL reload and redirect Windows app logs"
+    }
+  },
+  "locales": {
+    "zh-CN": {
+      "file": "core/i18n/zh-CN.json",
+      "entries": 2311,
+      "sha256": "6a3fec944b9629766e95b7c021959146e437961fc6956ba4a4608b4f98d4875f"
+    },
+    "zh-SG": {
+      "file": "core/i18n/zh-SG.json",
+      "entries": 2293,
+      "sha256": "d5d01ff293fa7fa788c779f9dc486a49b087e1f8f0b9622bd17ae6b54de7fd2a"
+    },
+    "zh-TW": {
+      "file": "core/i18n/zh-TW.json",
+      "entries": 2311,
+      "sha256": "10fc8042dfa536a1451db048ec30caa7f5d2b269f0e208338993edc77396418d"
+    }
+  }
+}

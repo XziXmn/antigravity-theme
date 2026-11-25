@@ -10,12 +10,97 @@ import { DEFAULT_ALLOWED_ORIGINS, extractJsoncNumberProperty, stripUtf8Bom } fro
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+let DEFAULT_CUSTOM_SYSTEM_PROMPT = { enabled: false, mode: 'system-dual', text: '', everyInvocation: false };
+let DEFAULT_HOOK_AUTO_ALLOW = { enabled: false, mode: 'files' };
+let normalizeCustomSystemPrompt = (raw) =>
+  Object.assign(
+    { enabled: false, mode: 'system-dual', text: '', everyInvocation: false },
+    raw && typeof raw === 'object' ? raw : {}
+  );
+let normalizeHookAutoAllow = (raw) => Object.assign({ enabled: false, mode: 'files' }, raw && typeof raw === 'object' ? raw : {});
+let sanitizePromptAndHooksPatch = () => {};
+let syncSystemPromptAndHooks = () => ({ rulePath: '', hooksPath: '' });
+
+if (fs.existsSync(path.join(__dirname, 'hooks-sync.mjs'))) {
+  try {
+    const hs = await import('./hooks-sync.mjs');
+    if (hs.DEFAULT_CUSTOM_SYSTEM_PROMPT) DEFAULT_CUSTOM_SYSTEM_PROMPT = hs.DEFAULT_CUSTOM_SYSTEM_PROMPT;
+    if (hs.DEFAULT_HOOK_AUTO_ALLOW) DEFAULT_HOOK_AUTO_ALLOW = hs.DEFAULT_HOOK_AUTO_ALLOW;
+    if (typeof hs.normalizeCustomSystemPrompt === 'function') normalizeCustomSystemPrompt = hs.normalizeCustomSystemPrompt;
+    if (typeof hs.normalizeHookAutoAllow === 'function') normalizeHookAutoAllow = hs.normalizeHookAutoAllow;
+    if (typeof hs.sanitizePromptAndHooksPatch === 'function') sanitizePromptAndHooksPatch = hs.sanitizePromptAndHooksPatch;
+    if (typeof hs.syncSystemPromptAndHooks === 'function') syncSystemPromptAndHooks = hs.syncSystemPromptAndHooks;
+  } catch {}
+}
 export const ROOT_DIR = path.resolve(__dirname, '../..');
 export const CORE_DIR = path.join(ROOT_DIR, 'core');
+export const I18N_DIR = path.join(CORE_DIR, 'i18n');
 export const STYLES_DIR = path.join(CORE_DIR, 'styles');
 export const RUNTIME_DIR = path.join(CORE_DIR, 'runtime');
 export const USER_DIR = path.join(ROOT_DIR, 'user');
 export const BASE_VERSION = '1.3.4';
+
+export const SUPPORTED_I18N_LOCALES = Object.freeze(['zh-CN', 'zh-SG', 'zh-TW', 'en']);
+export const AI_LANG_RULE_FILENAME = '99_antigravity_codex_lang.md';
+
+const AI_OUTPUT_RULE_COPY = Object.freeze({
+  'zh-CN':
+    '请全程使用自然简练的简体中文进行内部思考推理（Thinking）、任务规划、工具步骤摘要（`toolSummary`）、子智能体角色命名及面向用户的回复；代码标识符、API 名称、命令行参数、文件路径与原始报错保持英文原样。',
+  'zh-SG':
+    '请全程使用简体中文进行内部思考推理（Thinking）、任务规划、工具步骤摘要（`toolSummary`）与面向用户的回复，同时自然保留常见英文技术术语（如 `Agent`、`Subagent`、`Artifact`、`Workspace`、`MCP`、API 与代码标识符）。',
+  'zh-TW':
+    '請全程使用自然流暢的繁體中文（台灣開發者慣用術語）進行內部思考推理（Thinking）、任務規劃、工具步驟摘要（`toolSummary`）與面向使用者的回覆；程式碼識別字、API 名稱、命令列參數、檔案路徑與原始錯誤訊息保持英文原樣。'
+});
+
+export function normalizeI18nLocale(raw, fallback = 'zh-CN') {
+  const s = String(raw || '').trim();
+  if (!s) return fallback;
+  const low = s.toLowerCase();
+  if (low === 'en' || low === 'en-us' || low === 'english') return 'en';
+  if (low === 'zh-sg' || low === 'zh_sg' || low === 'sg') return 'zh-SG';
+  if (low === 'zh-tw' || low === 'zh_tw' || low === 'zh-hk' || low === 'zh-hant' || low === 'tw') return 'zh-TW';
+  if (low === 'zh' || low === 'zh-cn' || low === 'zh_cn' || low === 'zh-hans' || low === 'cn') return 'zh-CN';
+  return fallback;
+}
+
+export function syncAgentLanguageRule(localeCode = 'zh-CN', enabled = false, { customHome = '' } = {}) {
+  const home = customHome || os.homedir();
+  const rulesDir = path.join(home, '.gemini', 'config', 'rules');
+  const rulePath = path.join(rulesDir, AI_LANG_RULE_FILENAME);
+  const norm = normalizeI18nLocale(localeCode, 'zh-CN');
+
+  if (!enabled || norm === 'en' || !AI_OUTPUT_RULE_COPY[norm]) {
+    try {
+      if (fs.existsSync(rulePath)) fs.unlinkSync(rulePath);
+    } catch {}
+    return '';
+  }
+
+  const content = [
+    '---',
+    'trigger: always_on',
+    `description: "Enforce Antigravity AI thinking and reply language (${norm}). Managed by antigravity-theme."`,
+    '---',
+    '',
+    '<!-- antigravity-theme:syncAiOutputLang -->',
+    `# AI Thinking & Output Language (${norm})`,
+    '',
+    `- ${AI_OUTPUT_RULE_COPY[norm]}`,
+    ''
+  ].join('\n');
+
+  try {
+    fs.mkdirSync(rulesDir, { recursive: true });
+    if (fs.existsSync(rulePath) && fs.readFileSync(rulePath, 'utf8') === content) {
+      return rulePath;
+    }
+    fs.writeFileSync(rulePath, content, 'utf8');
+    return rulePath;
+  } catch {
+    return '';
+  }
+}
 
 export function parseDaemonCliArgs(argv = process.argv.slice(2)) {
   const hasFlag = (f) => argv.some((a) => a === f || a.startsWith(f + '='));
@@ -184,6 +269,25 @@ export function sanitizeConfigPatch(currentCfg, patch) {
   if (patch.telemetryCacheMode === 'session' || patch.telemetryCacheMode === 'step') {
     base.telemetryCacheMode = patch.telemetryCacheMode;
   }
+  if (typeof patch.i18nLocale === 'string') {
+    const loc = normalizeI18nLocale(patch.i18nLocale, '');
+    if (loc && SUPPORTED_I18N_LOCALES.includes(loc)) {
+      base.i18nLocale = loc;
+      if (!base.modules || typeof base.modules !== 'object') base.modules = {};
+      if (loc === 'en') {
+        base.modules.i18n = false;
+      } else {
+        base.modules.i18n = true;
+      }
+    }
+  }
+  if (typeof patch.syncAiOutputLang === 'boolean') {
+    base.syncAiOutputLang = patch.syncAiOutputLang;
+  }
+  sanitizePromptAndHooksPatch(base, patch);
+  if (patch.modules && typeof patch.modules.i18n === 'boolean' && patch.modules.i18n === true && base.i18nLocale === 'en') {
+    base.i18nLocale = 'zh-CN';
+  }
   if (typeof patch.promptSuggestionModel === 'string') {
     const m = patch.promptSuggestionModel.trim();
     if (m && !m.startsWith('-') && VALID_SUGGEST_MODEL_RE.test(m)) {
@@ -214,6 +318,10 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     enabled: true,
     channel: 'auto',
     preset: 'codex-pure-white',
+    i18nLocale: 'zh-CN',
+    syncAiOutputLang: false,
+    customSystemPrompt: { ...DEFAULT_CUSTOM_SYSTEM_PROMPT },
+    hookAutoAllow: { ...DEFAULT_HOOK_AUTO_ALLOW },
     telemetryLayout: 'compact',
     telemetryCacheMode: 'session',
     contextLimit: 'auto',
@@ -239,10 +347,19 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     endpoints: []
   };
 
+  function resolveI18nDictPath(localeCode) {
+    const loc = normalizeI18nLocale(localeCode, 'zh-CN');
+    if (loc === 'en') return '';
+    const candidate = path.join(I18N_DIR, `${loc}.json`);
+    if (fs.existsSync(candidate)) return candidate;
+    return path.join(CORE_DIR, 'i18n.json');
+  }
+
   function rebuildBundleIfNeeded(force = false) {
     const styleFiles = listSortedFiles(STYLES_DIR, '.css');
     const runtimeFiles = listSortedFiles(RUNTIME_DIR, '.js');
-    const coreFiles = [...styleFiles, path.join(CORE_DIR, 'i18n.json'), ...runtimeFiles];
+    const localeFiles = listSortedFiles(I18N_DIR, '.json');
+    const coreFiles = [...styleFiles, path.join(CORE_DIR, 'i18n.json'), ...localeFiles, ...runtimeFiles];
     const userFiles = safeMode
       ? []
       : [
@@ -304,7 +421,7 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       fs.existsSync(path.join(STYLES_DIR, '10-light-codex.css')) ||
       fs.existsSync(path.join(STYLES_DIR, '00-base.css'));
     const hasI18nFiles =
-      fs.existsSync(path.join(CORE_DIR, 'i18n.json')) &&
+      (fs.existsSync(path.join(CORE_DIR, 'i18n.json')) || fs.existsSync(path.join(I18N_DIR, 'zh-CN.json'))) &&
       fs.existsSync(path.join(RUNTIME_DIR, '60-i18n-engine.js'));
     const hasMetricsFiles =
       fs.existsSync(path.join(RUNTIME_DIR, '50-telemetry-ui.js')) &&
@@ -315,6 +432,14 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     const hasGuardsFile = fs.existsSync(path.join(RUNTIME_DIR, '10-guards.js'));
     if (!hasThemeFiles) modules.theme = false;
     if (!hasI18nFiles) modules.i18n = false;
+    const rawLocale = normalizeI18nLocale(userCfg.i18nLocale, 'zh-CN');
+    const i18nLocale = !modules.i18n || rawLocale === 'en' ? 'en' : rawLocale;
+    if (i18nLocale === 'en') modules.i18n = false;
+    const syncAiOutputLang = !safeMode && userCfg.syncAiOutputLang === true;
+    const customSystemPrompt = safeMode
+      ? { ...DEFAULT_CUSTOM_SYSTEM_PROMPT }
+      : normalizeCustomSystemPrompt(userCfg.customSystemPrompt);
+    const hookAutoAllow = safeMode ? { ...DEFAULT_HOOK_AUTO_ALLOW } : normalizeHookAutoAllow(userCfg.hookAutoAllow);
     if (!hasSqlite || !hasMetricsFiles) {
       modules.metrics = false;
       modules.sshRemote = false;
@@ -357,6 +482,10 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       enabled,
       channel,
       preset,
+      i18nLocale,
+      syncAiOutputLang,
+      customSystemPrompt,
+      hookAutoAllow,
       telemetryLayout,
       telemetryCacheMode,
       contextLimit,
@@ -371,6 +500,11 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       endpoints
     };
 
+    if (!safeMode && process.env.AG_DAEMON_LIBRARY !== '1') {
+      syncAgentLanguageRule(i18nLocale, Boolean(enabled && modules.i18n && syncAiOutputLang));
+      syncSystemPromptAndHooks({ enabled, customSystemPrompt, hookAutoAllow });
+    }
+
     const activeStyleFiles = styleFiles.filter((filePath) => {
       const base = path.basename(filePath);
       if (base === '30-telemetry.css') return Boolean(modules.metrics);
@@ -380,7 +514,8 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     });
     const baseCss = activeStyleFiles.map((f) => readTextSafe(f, '')).join('\n\n');
     const customCss = !safeMode && modules.customCss ? readTextSafe(path.join(USER_DIR, 'custom.css'), '') : '';
-    const baseDict = modules.i18n ? readJsonSafe(path.join(CORE_DIR, 'i18n.json'), {}) : {};
+    const dictPath = modules.i18n ? resolveI18nDictPath(i18nLocale) : '';
+    const baseDict = modules.i18n && dictPath ? readJsonSafe(dictPath, {}) : {};
     const rawOverrideDict =
       modules.i18n && !safeMode ? readJsonSafe(path.join(USER_DIR, 'i18n.override.json'), {}) : {};
     const mergedDict = modules.i18n ? Object.assign({}, baseDict, normalizeOverrideDict(rawOverrideDict)) : {};
@@ -398,6 +533,10 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       .update(
         JSON.stringify({
           preset,
+          i18nLocale,
+          syncAiOutputLang,
+          customSystemPrompt,
+          hookAutoAllow,
           telemetryLayout,
           telemetryCacheMode,
           promptSuggestionModel,
@@ -418,6 +557,10 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       platform: process.platform,
       enabled,
       preset,
+      i18nLocale,
+      syncAiOutputLang,
+      customSystemPrompt,
+      hookAutoAllow,
       telemetryLayout,
       telemetryCacheMode,
       cssText: baseCss,
@@ -430,6 +573,10 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
         enabled,
         channel,
         preset,
+        i18nLocale,
+        syncAiOutputLang,
+        customSystemPrompt,
+        hookAutoAllow,
         telemetryLayout,
         telemetryCacheMode,
         contextLimit,

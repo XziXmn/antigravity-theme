@@ -1,8 +1,8 @@
 <div align="center">
 
-<h1>antigravity-codex-theme</h1>
+<h1>antigravity-theme</h1>
 
-<p><strong>Google Antigravity 的 Codex 昼夜主题、中文界面、原生设置面板与实时会话统计插件</strong></p>
+<p><strong>Google Antigravity 的 Codex 昼夜主题、中文系本地化、液态玻璃用量卡、系统级提示词与 Hooks 增强插件</strong></p>
 
 <p>
   <a href="#快速安装">快速安装</a> ·
@@ -14,17 +14,17 @@
 </p>
 
 <p>
-  不修改安装包，通过本地 CDP 实时注入 Codex 昼夜主题、中文界面、嵌入式设置面板与四态用量统计。<br>
-  34 个独立模块，支持 <code>--only</code> 按需安装、面板内检查并直接更新与 Fork 自由定制。
+  不修改安装包，通过本地 CDP 实时注入 Codex 昼夜主题、中文系多变体界面、零闪烁嵌入式「增强设置」面板、Liquid Glass 用量卡与系统级提示词 / Hooks 托管。<br>
+  40 个核心文件，支持 <code>--only</code> 按需安装、面板内检查并直接更新与上游词库一键同步。
 </p>
 
 <p>
-  <a href="https://github.com/nkjDSLcvanv/antigravity-codex-theme/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nkjDSLcvanv/antigravity-codex-theme/ci.yml?branch=main&label=CI&labelColor=363636&logo=githubactions&logoColor=white" alt="CI"></a>
+  <a href="https://github.com/XziXmn/antigravity-theme/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/XziXmn/antigravity-theme/ci.yml?branch=main&label=CI&labelColor=363636&logo=githubactions&logoColor=white" alt="CI"></a>
   <img src="https://img.shields.io/static/v1?label=Antigravity&message=2.30.x%20~%202.35.1%2B&color=2B7FFF&labelColor=363636" alt="Antigravity 2.30.x ~ 2.35.1+">
   <img src="https://img.shields.io/static/v1?label=Node.js&message=%3E%3D%2022.13.0&color=339933&labelColor=363636&logo=nodedotjs&logoColor=white" alt="Node.js >= 22.13.0">
   <img src="https://img.shields.io/static/v1?label=platform&message=macOS%20%C2%B7%20Windows%20%C2%B7%20Linux&color=4B5563&labelColor=363636" alt="macOS · Windows · Linux">
   <img src="https://img.shields.io/static/v1?label=version&message=v1.3.4&color=2B7FFF&labelColor=363636" alt="version v1.3.4">
-  <a href="LICENSE"><img src="https://img.shields.io/static/v1?label=license&message=MIT&color=10B981&labelColor=363636" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/static/v1?label=license&message=GPL--3.0&color=10B981&labelColor=363636" alt="GPL-3.0 License"></a>
 </p>
 
 <p>
@@ -42,9 +42,10 @@ https://github.com/user-attachments/assets/749990f3-f2ce-48e7-8f66-3d7c88a7d49d
 | 模块 | 核心能力 | 启用方式 |
 | :--- | :--- | :--- |
 | **Codex 昼夜主题** | 纯白浅色 (`codex-pure-white`) 与中性炭灰深色 (`codex-dark`)，无外部字体依赖，随 IDE 外观自动切换 | 默认开启 |
-| **原生设置面板与更新** | 直接嵌入 **设置 → Codex 主题**，可视化管理开关、模型档位、`sshHosts`、手动刷新与 **检查并直接更新** | 默认内置 |
-| **会话状态与用量统计** | 底部四态指示与一/二级用量面板、每轮悬浮详情卡，覆盖主对话、旁路提问与可选 **SSH Remote** | 默认开启（SSH 可选） |
-| **中文界面汉化** | `1,900+` 词条与额度耗尽/AI 点数动态提示汉化，`WeakMap` 原地替换，不影响 React 交互 | 默认开启 |
+| **原生设置面板与更新** | 直接嵌入 **设置 → 增强设置**（零闪烁就地更新），可视化管理模块开关、多语言风格、模型档位、`sshHosts`、系统提示词、Hooks 与 **检查并直接更新** | 默认内置 |
+| **系统级提示词与 Hooks** | 无损托管 `~/.gemini/GEMINI.md`、`~/.gemini/config/rules/*.md`（`trigger: always_on`）与 `hooks.json`（`SessionStart` / `PreInvocation` 系统角色注入 + `PreToolUse` 安全放行守卫） | **默认关闭**（按需开启） |
+| **会话状态与用量统计** | 底部四态指示与 **Liquid Glass 液态玻璃** 一/二级用量面板、每轮悬浮详情卡，覆盖主对话、旁路提问与可选 **SSH Remote** | 默认开启（SSH 可选） |
+| **中文系界面汉化** | 融合上游精校 `2,300+` 词条，支持 **简体中文 (`zh-CN`) / 英文术语简中 (`zh-SG`) / 繁體中文 (`zh-TW`) / 原版英文** 即时切换，可选联动 AI 思考与回复语言 | 默认开启 |
 | **输入框下一句预测** | 回复结束后在空输入框显示 Ghost Text，按 `Tab` / `→` 补全，内置 `agy models` 二级级联模型选择 | **默认关闭**（按需开启） |
 
 ## 快速安装
@@ -62,8 +63,8 @@ https://github.com/user-attachments/assets/749990f3-f2ce-48e7-8f66-3d7c88a7d49d
 ### 命令行安装
 
 ```bash
-git clone https://github.com/nkjDSLcvanv/antigravity-codex-theme.git
-cd antigravity-codex-theme
+git clone https://github.com/XziXmn/antigravity-theme.git
+cd antigravity-theme
 node install.mjs install
 node --disable-warning=ExperimentalWarning install.mjs doctor
 ```
@@ -72,7 +73,7 @@ node --disable-warning=ExperimentalWarning install.mjs doctor
 
 将下面这段提示词直接发给 Antigravity、Claude Code、Codex 或 Cursor：
 
-> 请读取 `https://github.com/nkjDSLcvanv/antigravity-codex-theme.git`，使用 `git clone --depth=1 --filter=blob:none --sparse` 拉取核心文件（参考仓库内的 `SKILL.md`，跳过 `assets/` 和 `tests/`；如需只装部分功能可追加 `--only` 参数），运行 `node install.mjs install`、`node --disable-warning=ExperimentalWarning install.mjs doctor` 和 `verify` 完成安装并确认实时注入正常。
+> 请读取 `https://github.com/XziXmn/antigravity-theme.git`，使用 `git clone --depth=1 --filter=blob:none --sparse` 拉取核心文件（参考仓库内的 `SKILL.md`，跳过 `assets/` 和 `tests/`；如需只装部分功能可追加 `--only` 参数），运行 `node install.mjs install`、`node --disable-warning=ExperimentalWarning install.mjs doctor` 和 `verify` 完成安装并确认实时注入正常。
 
 ### 按需安装
 
@@ -97,8 +98,8 @@ node install.mjs install --only i18n,metrics
 **1. 跳过 `assets/` 与 `tests/`，仅拉取核心代码（全平台通用）：**
 
 ```bash
-git clone --depth=1 --filter=blob:none --sparse https://github.com/nkjDSLcvanv/antigravity-codex-theme.git
-cd antigravity-codex-theme
+git clone --depth=1 --filter=blob:none --sparse https://github.com/XziXmn/antigravity-theme.git
+cd antigravity-theme
 git sparse-checkout set core user
 node install.mjs install --only i18n,metrics
 ```
@@ -107,15 +108,16 @@ node install.mjs install --only i18n,metrics
 
 ```bash
 # 示例：仅下载并安装中文界面模块 (i18n)
-git clone --depth=1 --filter=blob:none --sparse https://github.com/nkjDSLcvanv/antigravity-codex-theme.git
-cd antigravity-codex-theme
+git clone --depth=1 --filter=blob:none --sparse https://github.com/XziXmn/antigravity-theme.git
+cd antigravity-theme
 git sparse-checkout set --no-cone \
   /install.mjs /package.json /SKILL.md /LICENSE \
   /user/config.json /user/custom.css /user/custom.js /user/i18n.override.json \
   /core/daemon.mjs /core/shared.mjs /core/manifest.json /core/installer \
   /core/daemon/paths.mjs /core/daemon/cdp-bridge.mjs /core/daemon/cdp-relaunch.mjs /core/daemon/updater.mjs \
+  /core/daemon/hooks-sync.mjs /core/daemon/hook-runner.mjs \
   /core/styles/45-settings-ui.css /core/runtime/00-head.js /core/runtime/75-settings-ui.js /core/runtime/90-tail.js \
-  /core/i18n.json /core/runtime/60-i18n-engine.js
+  /core/i18n.json /core/i18n /core/runtime/60-i18n-engine.js
 node install.mjs install --only i18n --minimal
 ```
 
@@ -134,9 +136,10 @@ node install.mjs install --only i18n --minimal
 | `node --disable-warning=ExperimentalWarning install.mjs doctor` | 检查 Node 版本、CDP 状态、`core/manifest.json` 哈希及页面挂载状态 |
 | `node --disable-warning=ExperimentalWarning install.mjs verify [--safe-mode]` | 单次注入并校验；`--safe-mode` 跳过 `user/` 自定义脚本以便排障 |
 | `node install.mjs sparse-paths --only <features>` | 输出指定模块组合的文件路径清单 |
+| `node install.mjs sync-i18n` / `npm run sync-i18n` | 从已登记上游（见 [`UPSTREAMS.md`](UPSTREAMS.md) 与 `core/upstreams.json`）拉取最新中文系词库并同步哈希 |
 | `node install.mjs rollback` | 回滚至上一份备份的 `core/` 版本 |
 | `node install.mjs uninstall` | 停止服务、清理自启项与启动参数，恢复英文界面与原生样式 |
-| `npm run check` / `npm test` | 校验全部 `.mjs` 与拼接后的前端脚本语法，运行 61 项 `node:test` 单元测试 |
+| `npm run check` / `npm test` | 校验全部 `.mjs` 与拼接后的前端脚本语法，运行 64 项 `node:test` 单元测试 |
 
 </details>
 
@@ -144,7 +147,7 @@ node install.mjs install --only i18n --minimal
 
 ### 嵌入式设置面板与一键更新
 
-在 Antigravity 原生设置弹窗的侧边栏（`内置浏览器` 下方）直接嵌入 **Codex 主题** 页签，日常切换无需手改 JSON：
+在 Antigravity 原生设置弹窗的侧边栏（`内置浏览器` 下方）直接嵌入 **增强设置** 页签，日常切换无需手改 JSON：
 
 - **可视化控制全部模块**：分组管理核心模块（昼夜主题 / 中文汉化 / 实时统计）、可选增强（输入预测与 `agy models` 二级级联模型选择器、SSH Remote 与 `sshHosts` 主机标签）及状态栏密度与缓存口径；关闭汉化后设置页也会同步切回英文。
 - **头部快捷栏**：标题旁内置 **手动刷新 (`↻`)** 按钮，一键强制重建并热重载当前窗口；右上角直达 GitHub 仓库与反馈入口。
@@ -156,7 +159,7 @@ node install.mjs install --only i18n --minimal
 
 回复结束后根据当前对话上下文预测下一句指令，以幽灵灰字（Ghost Text）显示在空输入框中：
 
-- **默认关闭，零额外消耗**：未开启时不启动后台 `agy` 进程、不消耗模型额度；可在 **设置 → Codex 主题** 随时开关（或安装时通过 `--only suggest` 启用），关闭后立即终止后台进程。
+- **默认关闭，零额外消耗**：未开启时不启动后台 `agy` 进程、不消耗模型额度；可在 **设置 → 增强设置** 随时开关（或安装时通过 `--only suggest` 启用），关闭后立即终止后台进程。
 - **快捷补全与模型分级**：按 `Tab`、`→` 或点击 `Tab` 角标直接填入，开始输入或按 `Esc` 隐藏；支持在设置面板中按基础模型与 `Thinking effort` 档位自由切换预测模型（默认推荐 `Gemini 3.8 Flash Low`）。
 
 ![输入框下一句预测 Ghost Text 与 Tab 补全](assets/prompt-suggestions.png)
@@ -188,7 +191,7 @@ node install.mjs install --only i18n --minimal
 
 #### SSH Remote 远端只读统计
 
-连接远端开发机时，可在 **设置 → Codex 主题** 中开启 **SSH Remote 远端只读统计** 并添加主机别名（默认关闭，不扫描 `~/.ssh/config`）。后台通过单条常驻 `ssh` 会话执行 `~/.gemini/antigravity/codex-theme-remote/metrics_reader.py --serve`（纯明文只读脚本，无 `base64`/`exec`/`-c`，企业 HIDS 友好）以 `sqlite3` `mode=ro` 读取最新 WAL，**在远端剥离全部正文、Prompt 与 Checkpoint 文本**，仅回传脱敏数值元数据并在本地纯内存解析，不调用 `scp`，不在本地拷贝或残留任何 `.db` 文件。
+连接远端开发机时，可在 **设置 → 增强设置** 中开启 **SSH Remote 远端只读统计** 并添加主机别名（默认关闭，不扫描 `~/.ssh/config`）。后台通过单条常驻 `ssh` 会话执行 `~/.gemini/antigravity/codex-theme-remote/metrics_reader.py --serve`（纯明文只读脚本，无 `base64`/`exec`/`-c`，企业 HIDS 友好）以 `sqlite3` `mode=ro` 读取最新 WAL，**在远端剥离全部正文、Prompt 与 Checkpoint 文本**，仅回传脱敏数值元数据并在本地纯内存解析，不调用 `scp`，不在本地拷贝或残留任何 `.db` 文件。
 
 <details>
 <summary>查看 SSH Remote 手动配置示例（user/config.json）</summary>
@@ -220,7 +223,7 @@ node install.mjs install --only i18n --minimal
 
 ### 日常配置与高级定制（`user/`）
 
-日常模块开关、模型切换、主机白名单和状态栏偏好推荐直接在 **设置 → Codex 主题** 中修改，保存后实时写入 `~/.gemini/antigravity/codex-theme/user/config.json` 并热重载生效，升级插件时不会覆盖 `user/` 目录。
+日常模块开关、模型切换、主机白名单、系统提示词、Hooks 和状态栏偏好推荐直接在 **设置 → 增强设置** 中修改，保存后实时写入 `~/.gemini/antigravity/codex-theme/user/config.json` 并热重载生效，升级插件时不会覆盖 `user/` 目录。
 
 <details>
 <summary>查看 user/ 目录与 config.json 高级字段说明</summary>
@@ -240,15 +243,16 @@ node install.mjs install --only i18n --minimal
 
 ### 源码定制（`core/`）
 
-核心代码拆分为 34 个独立模块，配套 61 项 `node:test` 单元测试：
+核心代码拆分为 40 个独立文件，配套 64 项 `node:test` 单元测试：
 
 | 定制方向 | 对应文件 |
 | :--- | :--- |
 | 昼夜主题配色与布局 | [core/styles/00-base.css](core/styles/00-base.css)、[10-light-codex.css](core/styles/10-light-codex.css)、[20-dark-codex.css](core/styles/20-dark-codex.css) |
 | 原生设置面板与自更新 | [core/runtime/75-settings-ui.js](core/runtime/75-settings-ui.js)、[core/styles/45-settings-ui.css](core/styles/45-settings-ui.css)、[core/daemon/updater.mjs](core/daemon/updater.mjs) |
-| 状态机与用量统计面板 | [core/runtime/40-status-machine.js](core/runtime/40-status-machine.js)、[core/daemon/telemetry-renderer.mjs](core/daemon/telemetry-renderer.mjs)、[core/styles/30-telemetry.css](core/styles/30-telemetry.css) |
+| 系统级提示词与 Hooks | [core/daemon/hooks-sync.mjs](core/daemon/hooks-sync.mjs)、[core/daemon/hook-runner.mjs](core/daemon/hook-runner.mjs) |
+| 状态机与液态玻璃统计面板 | [core/runtime/40-status-machine.js](core/runtime/40-status-machine.js)、[core/daemon/telemetry-renderer.mjs](core/daemon/telemetry-renderer.mjs)、[core/styles/30-telemetry.css](core/styles/30-telemetry.css) |
 | 输入预测与模型解析 | [core/daemon/prompt-suggest.mjs](core/daemon/prompt-suggest.mjs)、[core/runtime/70-prompt-suggestions.js](core/runtime/70-prompt-suggestions.js) |
-| 词典与按需分组 | [core/i18n.json](core/i18n.json)、[core/runtime/60-i18n-engine.js](core/runtime/60-i18n-engine.js)、[core/installer/features.mjs](core/installer/features.mjs) |
+| 词典与上游同步脚本 | [core/i18n/](core/i18n/)、[core/runtime/60-i18n-engine.js](core/runtime/60-i18n-engine.js)、[scripts/sync-i18n.mjs](scripts/sync-i18n.mjs) |
 
 修改 `core/` 后运行以下命令即可重建哈希清单、跑完校验与测试并部署至本机：
 
@@ -260,22 +264,27 @@ node install.mjs build-manifest && npm run check && npm test && node install.mjs
 <summary>查看仓库目录结构</summary>
 
 ```text
-antigravity-codex-theme/
+antigravity-theme/
 ├── assets/                     # README 展示图
 ├── core/
-│   ├── daemon/                 # 后台同步服务（热加载 / Protobuf / 重试日志 / 渲染 / SQLite / SSH Remote / 下一句预测 / 自更新 / CDP / 2.33.0 接力）
-│   ├── runtime/                # 按序注入的前端脚本（生命周期 / 修复 / 明暗同步 / 状态机 / 统计界面 / 汉化 / 输入预测 / 嵌入式设置面板）
-│   ├── styles/                 # 样式模块（基础 / 浅色 / 深色 / 状态与统计 / 输入预测 / 设置面板）
+│   ├── daemon/                 # 后台同步服务（热加载 / Protobuf / 重试日志 / 渲染 / SQLite / SSH Remote / 下一句预测 / 系统提示词与 Hooks / 自更新 / CDP / 2.33.0 接力）
+│   ├── runtime/                # 按序注入的前端脚本（生命周期 / 修复 / 明暗同步 / 状态机 / 统计界面 / 汉化 / 输入预测 / 嵌入式增强设置面板）
+│   ├── styles/                 # 样式模块（基础 / 浅色 / 深色 / 液态玻璃统计卡 / 输入预测 / 设置面板）
 │   ├── installer/              # 模块分组 / Manifest 校验打包 / 环境探测 / 跨平台自启与 CDP 管理
+│   ├── i18n/                   # zh-CN / zh-SG / zh-TW 多变体中文词库
 │   ├── daemon.mjs              # 后台服务入口
 │   ├── shared.mjs              # 公共工具函数
-│   ├── i18n.json               # 1,900+ 界面词典
-│   └── manifest.json           # core/ 文件完整性哈希清单
-├── tests/                      # 61 项 node:test 单元测试
+│   ├── i18n.json               # 默认简体中文词典（2,300+ 条）
+│   ├── upstreams.json          # 上游追踪清单
+│   └── manifest.json           # core/ 文件完整性哈希清单（40 个文件）
+├── scripts/
+│   └── sync-i18n.mjs           # 上游词库拉取与合并脚本
+├── tests/                      # 64 项 node:test 单元测试
 ├── user/                       # 个人配置与热重载目录
 ├── install.mjs                 # 安装、更新、重启与运维 CLI
+├── UPSTREAMS.md                # 上游项目追踪与许可说明
 ├── SKILL.md                    # AI Agent 操作指南
-└── LICENSE                     # MIT License
+└── LICENSE                     # GNU GPL-3.0 License
 ```
 
 </details>
@@ -299,15 +308,22 @@ antigravity-codex-theme/
 
 本项目在此基础上重写了整体架构并扩展了以下能力：34 个独立模块与 61 项单元测试及 CI、无外部字体依赖的 Codex 昼夜主题、嵌入式 **Codex 主题** 设置面板与面板内检查更新、四态会话状态机与一/二级用量面板及每轮悬浮详情卡、可选 SSH Remote 只读统计与输入预测，以及 `--only` 按需安装与 `user/` 热重载分层。
 
-基于 [MIT License](LICENSE) 开源，欢迎 Fork 与定制。
+本项目上游追踪与许可声明详见 [`UPSTREAMS.md`](UPSTREAMS.md) 与 [`core/upstreams.json`](core/upstreams.json)，特别致谢以下上游项目：
+
+- [nkjDSLcvanv/antigravity-codex-theme](https://github.com/nkjDSLcvanv/antigravity-codex-theme)（MIT）：主题配色、CDP 守护进程架构、四态状态机与嵌入式设置面板核心框架
+- [CHANPAJN/antigravity-langpack](https://github.com/CHANPAJN/antigravity-langpack)（GPL-3.0）：现代简体中文（`zh-CN`）、英文术语简中（`zh-SG`）与繁體中文（`zh-TW`）主词库及 AI 语言联动规则规范
+- [guuguo/antigravity-zh-launcher](https://github.com/guuguo/antigravity-zh-launcher)（MIT）：通用 IDE 菜单补充词库、首页欢迎语模板、文件动作动态模板与聊天正文防误伤 DOM 隔离规则
+
+基于 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 开源，欢迎 Fork 与定制。
 
 ## English Overview
 
-`antigravity-codex-theme` brings Codex light and dark themes, Chinese UI localization, an embedded native Settings panel, and live session telemetry to Google Antigravity (`2.30.x` – `2.35.1+`) without modifying the application bundle. Built as 34 independent modules under `core/` with 61 `node:test` unit tests (requires Node.js `>= 22.13.0`, verified on macOS, Windows, and Linux desktops).
+`antigravity-theme` brings Codex light and dark themes, multi-variant Chinese localization (`zh-CN` / `zh-SG` / `zh-TW`), a zero-flicker embedded **Enhancements** Settings panel, Liquid Glass telemetry cards, and system-level custom prompt & lifecycle hook management to Google Antigravity (`2.30.x` – `2.35.1+`) without modifying the application bundle. Built as 40 modular files under `core/` with 64 `node:test` unit tests (requires Node.js `>= 22.13.0`, verified on macOS, Windows, and Linux desktops).
 
 - **Codex Light & Dark Themes**: Pure white (`codex-pure-white`) and charcoal dark (`codex-dark`) palettes with zero external font dependencies and automatic light/dark switching.
-- **Embedded Settings Panel & Self-Updater**: Mounts directly under **Settings → Codex Theme** to toggle modules, select prompt-suggestion models & thinking effort tiers via a 2-level `agy models` cascading menu, edit `sshHosts`, trigger manual hot-reloads, and check/apply in-panel updates (`node install.mjs update`) with integrity verification and automatic `core.prev/` rollback backups while preserving `user/`.
-- **Live Session Status & Telemetry**: Bottom 4-state indicator (ready, running, waiting/retrying, error), expandable L1/L2 usage panels, adaptive layouts (`compact` centered inline with narrow-pane auto-wrap; `detailed` as a dedicated centered bottom row aligned with the hover card), and per-turn hover breakdown cards across main chats, Side Question panes, and opt-in read-only SSH Remote sessions (zero local `.db` copy).
-- **Chinese Localization & Opt-In Prompt Suggestions**: `1,900+` `WeakMap` in-place UI translations (including dynamic quota-exhausted & AI Credits banners while preserving model names), plus opt-in Ghost Text + `Tab` prompt suggestions (`--only suggest`, off by default).
+- **Zero-Flicker Embedded Settings Panel & Self-Updater**: Mounts directly under **Settings → Enhancements** with in-place DOM updates to toggle modules, switch display locales, select prompt-suggestion models & thinking effort tiers via a 2-level `agy models` cascading menu, edit `sshHosts`, manage system prompts & hooks, and check/apply in-panel updates (`node install.mjs update`) while preserving `user/`.
+- **System-Level Custom Prompt & Lifecycle Hooks**: Non-destructively manages `~/.gemini/GEMINI.md`, `~/.gemini/config/rules/*.md` (`trigger: always_on`), and `~/.gemini/config/hooks.json` (`SessionStart` / `PreInvocation` `systemMessage` + `PreToolUse` auto-allow with destructive-command guard).
+- **Live Session Status & Liquid Glass Telemetry**: Bottom 4-state indicator (ready, running, waiting/retrying, error), expandable Liquid Glass L1/L2 usage panels, adaptive layouts, and per-turn hover breakdown cards across main chats, Side Question panes, and opt-in read-only SSH Remote sessions.
+- **Multi-Variant Chinese Localization & Opt-In Prompt Suggestions**: `2,300+` `WeakMap` in-place UI translations (`zh-CN` / `zh-SG` / `zh-TW` / `en`) with optional AI thinking/reply language sync and tracked upstream dictionary syncing (`npm run sync-i18n`), plus opt-in Ghost Text + `Tab` prompt suggestions (`--only suggest`, off by default).
 
-Thanks to community contributors [@isdou](https://github.com/isdou) ([PR #1](https://github.com/nkjDSLcvanv/antigravity-codex-theme/pull/1)), [@xiaoxiami-zyx](https://github.com/xiaoxiami-zyx) ([PR #3](https://github.com/nkjDSLcvanv/antigravity-codex-theme/pull/3)), and [@chunbin1](https://github.com/chunbin1) ([PR #6](https://github.com/nkjDSLcvanv/antigravity-codex-theme/pull/6)). Early CDP injection and `2.33.0` launch relay research drew inspiration from [Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) (MIT). Licensed under the [MIT License](LICENSE).
+Thanks to community contributors [@isdou](https://github.com/isdou) ([PR #1](https://github.com/nkjDSLcvanv/antigravity-codex-theme/pull/1)), [@xiaoxiami-zyx](https://github.com/xiaoxiami-zyx) ([PR #3](https://github.com/nkjDSLcvanv/antigravity-codex-theme/pull/3)), and [@chunbin1](https://github.com/chunbin1) ([PR #6](https://github.com/nkjDSLcvanv/antigravity-codex-theme/pull/6)). Early CDP injection and `2.33.0` launch relay research drew inspiration from [Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) (MIT). Licensed under the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).

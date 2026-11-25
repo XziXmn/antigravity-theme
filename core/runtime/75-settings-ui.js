@@ -108,6 +108,9 @@
       document.querySelectorAll('[data-ag-codex-settings-open]').forEach((el) => {
         el.removeAttribute('data-ag-codex-settings-open');
       });
+      document.querySelectorAll('[data-ag-settings-split-row]').forEach((el) => {
+        el.removeAttribute('data-ag-settings-split-row');
+      });
       document.querySelectorAll('[data-ag-settings-right-pane]').forEach((el) => {
         el.removeAttribute('data-ag-settings-right-pane');
       });
@@ -138,6 +141,23 @@
       let disposed = false;
       let reqSeq = 0;
       const pendingReqs = new Map();
+      const abortCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const manualRemovers = [];
+      function listen(target, type, handler, capture = false) {
+        if (!target || typeof target.addEventListener !== 'function') return;
+        if (abortCtrl && abortCtrl.signal) {
+          try {
+            target.addEventListener(type, handler, { capture: Boolean(capture), signal: abortCtrl.signal });
+            return;
+          } catch {}
+        }
+        target.addEventListener(type, handler, capture);
+        manualRemovers.push(() => {
+          try {
+            target.removeEventListener(type, handler, capture);
+          } catch {}
+        });
+      }
       let scanTimer = null;
       let statusPollTimer = null;
       let saveBadgeTimer = null;
@@ -151,10 +171,43 @@
       let activeDlg = null;
       let activeSidebar = null;
       let boundSidebarClick = null;
+      let boundNavBtn = null;
+      let boundPane = null;
+      let promptDraft =
+        typeof window.__ag_settings_prompt_draft === 'string' ? window.__ag_settings_prompt_draft : null;
+      function setPromptDraft(val) {
+        promptDraft = typeof val === 'string' ? val : null;
+        window.__ag_settings_prompt_draft = promptDraft;
+      }
 
       const bootUserCfg = boot.userConfig && typeof boot.userConfig === 'object' ? boot.userConfig : {};
+      const bootPromptCfg =
+        bootUserCfg.customSystemPrompt && typeof bootUserCfg.customSystemPrompt === 'object'
+          ? bootUserCfg.customSystemPrompt
+          : boot.customSystemPrompt && typeof boot.customSystemPrompt === 'object'
+          ? boot.customSystemPrompt
+          : {};
+      const bootHookAllowCfg =
+        bootUserCfg.hookAutoAllow && typeof bootUserCfg.hookAutoAllow === 'object'
+          ? bootUserCfg.hookAutoAllow
+          : boot.hookAutoAllow && typeof boot.hookAutoAllow === 'object'
+          ? boot.hookAutoAllow
+          : {};
+
       const uiState = {
         config: {
+          i18nLocale: bootUserCfg.i18nLocale || boot.i18nLocale || (MODULES.i18n ? 'zh-CN' : 'en'),
+          syncAiOutputLang: Boolean(bootUserCfg.syncAiOutputLang ?? boot.syncAiOutputLang),
+          customSystemPrompt: {
+            enabled: Boolean(bootPromptCfg.enabled),
+            mode: bootPromptCfg.mode || 'system-dual',
+            text: typeof bootPromptCfg.text === 'string' ? bootPromptCfg.text : '',
+            everyInvocation: Boolean(bootPromptCfg.everyInvocation)
+          },
+          hookAutoAllow: {
+            enabled: Boolean(bootHookAllowCfg.enabled),
+            mode: bootHookAllowCfg.mode || 'files'
+          },
           telemetryLayout: bootUserCfg.telemetryLayout || boot.telemetryLayout || 'compact',
           telemetryCacheMode: bootUserCfg.telemetryCacheMode || boot.telemetryCacheMode || 'session',
           promptSuggestionModel: bootUserCfg.promptSuggestionModel || 'gemini-3.8-flash-low',
@@ -191,15 +244,147 @@
         return m ? 'v' + m[1] : 'v1.2';
       }
 
-      function isZhUi() {
-        return Boolean(uiState.config.modules.i18n);
+      function getActiveLocale() {
+        if (!uiState.config.modules.i18n) return 'en';
+        const loc = uiState.config.i18nLocale || 'zh-CN';
+        return loc === 'zh-TW' || loc === 'zh-SG' || loc === 'en' ? loc : 'zh-CN';
       }
 
       function getStrings() {
-        if (isZhUi()) {
+        const loc = getActiveLocale();
+        if (loc === 'zh-TW') {
           return {
-            navTitle: 'Codex 主题',
-            pageTitle: 'Codex 主题',
+            navTitle: '增強設定',
+            pageTitle: '增強設定',
+            manualRefreshLabel: '手動重新整理主題與設定',
+            savedBadge: '已同步',
+            refreshedBadge: '已重新整理',
+            githubLabel: 'GitHub',
+            feedbackLabel: '回報問題',
+            subtitlePrefix: '管理主題配色、介面語言、工作階段統計與可選增強模組，變更即時同步至 ',
+            subtitleSuffix: '。',
+            secCore: '核心模組',
+            modTheme: 'Codex 晝夜主題',
+            modThemeDesc: '純白淺色與中性炭灰深色配色，隨 IDE 外觀自動切換',
+            modI18n: '中文介面本地化',
+            modI18nDesc: '內建 2,300+ 精校詞條，原地更新不影響互動，關閉即還原英文',
+            localeLbl: '顯示語言與術語風格',
+            localeDesc: '即時切換介面語言，無需重啟',
+            locZhCn: '简体中文',
+            locZhSg: '简中·英术',
+            locZhTw: '繁體中文',
+            locEn: 'English',
+            syncAiLangLbl: '同步 AI 思考與回覆語言',
+            syncAiLangDesc: '開啟後自動託管全域規則檔，使代理的思考與回覆跟隨目前介面語言（預設關閉）',
+            secPromptHooks: '系統提示詞與 Hooks',
+            secPromptHooksHint: '託管 GEMINI.md、rules 與 hooks.json，保留原有設定',
+            modCustomPrompt: '系統級自訂提示詞',
+            modCustomPromptDesc: '跨所有專案與工作區生效，直接寫入全域系統指令檔與系統角色 Hook（不改動官方安裝包）',
+            promptModeLbl: '系統級注入通道',
+            promptModeDesc: '推薦「系統雙通道」：同步寫入全域 GEMINI.md 並於新對話以 systemMessage 系統角色強化注入',
+            promptModeDual: '系統雙通道',
+            promptModeGemini: '全域 GEMINI.md',
+            promptModeRule: '全域規則',
+            promptModePreInv: '每輪前強注',
+            promptEveryInvLbl: '每輪模型呼叫前重複強注（防長對話遺忘）',
+            promptEveryInvDesc: '關閉時僅首輪注入以保護 Prompt Cache；開啟後每次模型推理前皆以 systemMessage 強重申',
+            promptTargetPrefix: '系統生效目標：',
+            promptTargetDual: '~/.gemini/GEMINI.md（託管區塊）+ ~/.gemini/config/hooks.json (SessionStart · systemMessage)',
+            promptTargetGemini: '~/.gemini/GEMINI.md（託管區塊，全端通用、零延遲）',
+            promptTargetRule: '~/.gemini/config/rules/98_antigravity_theme_system_prompt.md (trigger: always_on)',
+            promptTargetSession: '~/.gemini/config/hooks.json (SessionStart · systemMessage)',
+            promptTargetPreInv: '~/.gemini/config/hooks.json (PreInvocation · systemMessage)',
+            promptPresetLbl: '系統範本：',
+            presetSystemRole: '系統級專家設定',
+            presetAntiHalluc: '嚴謹防幻覺',
+            presetConcise: '簡潔極客',
+            presetContract: '契約開發',
+            promptPlaceholder: '輸入系統級角色定義、全域工程紀律、回覆風格或操作契約（最多 20,000 字元）…',
+            promptClearBtn: '清空',
+            promptSaveBtn: '儲存系統提示詞',
+            promptUnsaved: '有未儲存的修改',
+            promptSavedTip: 'Ctrl/Cmd + Enter 快捷儲存',
+            modAutoAllow: '工具自動放行 Hook (PreToolUse)',
+            modAutoAllowDesc: '透過 ~/.gemini/config/hooks.json 自動核准指定工具，減少重複確認彈窗',
+            autoAllowModeLbl: '放行範圍',
+            autoAllowModeDesc: '「含安全指令」內建高危破壞性指令攔截，高危操作仍交由人工確認',
+            autoAllowFiles: '僅檔案讀寫',
+            autoAllowSafeCmd: '含安全指令',
+            autoAllowAll: '全部放行',
+            autoAllowAllWarn: '注意：全部放行將略過所有終端機指令確認，包含具破壞性的操作，請謹慎開啟。',
+            presets: {
+              systemRole:
+                '## 系統級角色與執行原則\n- 你是一位資深全端系統架構師，所有技術判斷以實際讀取到的程式碼與執行結果為唯一依據。\n- 先分析根因再動手修改，避免表面修補與無關重構。\n- 每次改動後自動執行對應驗證（語法檢查／測試／建置），僅回報實際驗證通過的結果。\n- 回覆簡明直接，先給結論與關鍵改動，程式碼識別字與命令保持英文原樣。',
+              antiHalluc:
+                '## 嚴謹工程與防幻覺規範\n- 修改任何程式碼前必須先讀取並核對實際檔案，嚴禁臆測未驗證的 API、路徑或設定項。\n- 所有改動完成後必須執行對應的語法檢查或單元測試，並只回報實際執行觀察到的結果。\n- 若遇資訊不足或高風險破壞性操作，先說明影響並向使用者確認。',
+              concise:
+                '## 高效精簡回覆規範\n- 先給結論與可執行方案，避免客套與冗長鋪陳。\n- 優先最小化精準修改，不順手重構無關程式碼。\n- 關鍵檔案與行號附上明確定位。',
+              contract:
+                '## 契約式開發規範\n- 動手修改前先列出受影響檔案清單與變更目標。\n- 嚴格遵守現有專案架構、命名風格與零多餘依賴原則。\n- 交付時簡明總結改動點、驗證指令與結果。'
+            },
+            modMetrics: '即時工作階段狀態與用量統計',
+            modMetricsDesc: '底部四態狀態指示、一/二級明細面板與每輪對話尾部統計',
+            secOptional: '可選增強',
+            secOptionalHint: '預設關閉，按需開啟',
+            modSuggest: '輸入框下一句預測',
+            modSuggestDescPre: '回覆結束後預測下一句指令，按 ',
+            modSuggestDescMid: ' 或 ',
+            modSuggestDescPost: ' 補全（開啟後背景常駐 ',
+            modSuggestDescEnd: ' 程序）',
+            agyIdle: '未啟動',
+            agyWarming: '預熱中…',
+            agyReady: 'agy 就緒',
+            agyMissing: '未偵測到 agy',
+            suggestModelLbl: '預測模型',
+            suggestModelDescPre: '由 ',
+            suggestModelDescPost: ' 自動依模型與檔位分組，推薦 Gemini 3.8 Flash Low',
+            refreshModelsTitle: '重新取得 agy models',
+            menuModelsHdr: '模型',
+            recommendedBadge: '推薦',
+            modSsh: 'SSH Remote 遠端唯讀統計',
+            modSshDesc: '透過遠端唯讀 Python 擷取脫敏數值中繼資料，不在本機複製 .db 檔案',
+            sshHostsLbl: '允許探測的主機（sshHosts）',
+            addHostBtn: '+ 新增主機',
+            addHostPlaceholder: '例如 node032',
+            addHostOk: '新增',
+            secTelemetry: '狀態列偏好',
+            layoutLbl: '底部狀態列密度',
+            layoutDesc: '精簡模式置中嵌於工具列內；詳細模式展開為底部置中獨立列，補充 TTFT 與本步輸出',
+            layoutCompact: '精簡',
+            layoutDetailed: '詳細',
+            cacheLbl: '快取命中率口徑',
+            cacheDesc: '選擇狀態列顯示整個工作階段的累計命中率，或最近單步命中率',
+            cacheSession: '工作階段累計',
+            cacheStep: '單步',
+            secUpdate: '版本與更新',
+            updTitle: '外掛版本',
+            updDescIdle: '從 GitHub 倉庫檢查新版本並直接更新，保留 user/ 個人設定',
+            updDescChecking: '正在連線 GitHub 檢查最新版本與檔案清單…',
+            updDescUpToDate: '目前已與遠端最新版本保持一致',
+            updDescAhead: '目前本機版本高於遠端發佈版本',
+            updDescAvailable: '發現新版本，點擊直接更新並熱重載生效，無需重啟 Antigravity',
+            updDescMainDiff: '遠端 main 分支有檔案差異，可一鍵同步最新 main',
+            updDescUpdating: '正在下載並驗證更新檔案，同時備份舊版本，請稍候…',
+            updDescApplied: '已更新完成，背景服務正在重啟並熱重載至目前視窗…',
+            updPillChecking: '檢查中…',
+            updPillLatest: '已是最新',
+            updPillAhead: '本機領先',
+            updPillAvailablePrefix: '新版本 ',
+            updPillMainDiff: 'main 有差異',
+            updPillUpdating: '更新中…',
+            updPillApplied: '更新完成',
+            updPillErr: '檢查失敗',
+            updBtnCheck: '檢查更新',
+            updBtnChecking: '檢查中…',
+            updBtnApply: '立即更新',
+            updBtnSyncMain: '同步 main',
+            updBtnUpdating: '更新中…'
+          };
+        }
+        if (loc === 'zh-CN' || loc === 'zh-SG') {
+          return {
+            navTitle: '增强设置',
+            pageTitle: '增强设置',
             manualRefreshLabel: '手动刷新主题与配置',
             savedBadge: '已同步',
             refreshedBadge: '已刷新',
@@ -211,7 +396,61 @@
             modTheme: 'Codex 昼夜主题',
             modThemeDesc: '浅色纯白与中性炭灰深色配色，随 IDE 外观自动切换',
             modI18n: '中文界面汉化',
-            modI18nDesc: '内置 1,900+ 界面词条，原地更新不影响交互，关闭即恢复英文',
+            modI18nDesc: '内置 2,300+ 精校词条，原地更新不影响交互，关闭即恢复英文',
+            localeLbl: '显示语言与术语风格',
+            localeDesc: '实时切换界面语言，无需重启',
+            locZhCn: '简体中文',
+            locZhSg: '简中·英术',
+            locZhTw: '繁體中文',
+            locEn: 'English',
+            syncAiLangLbl: '同步 AI 思考与回复语言',
+            syncAiLangDesc: '开启后自动托管全局规则文件，让智能体的思考与回复跟随当前界面语言（默认关闭）',
+            secPromptHooks: '系统提示词与 Hooks',
+            secPromptHooksHint: '托管 GEMINI.md、rules 与 hooks.json，保留原有配置',
+            modCustomPrompt: '系统级自定义提示词',
+            modCustomPromptDesc: '跨所有项目与工作区生效，直接写入全局系统指令文件与系统角色 Hook（零改包、不破签名）',
+            promptModeLbl: '系统级注入通道',
+            promptModeDesc: '推荐「系统双通道」：同步写入全局 GEMINI.md 并在新会话以 systemMessage 系统角色强化注入',
+            promptModeDual: '系统双通道',
+            promptModeGemini: '全局 GEMINI.md',
+            promptModeRule: '全局规则',
+            promptModePreInv: '每轮前强注',
+            promptEveryInvLbl: '每轮模型调用前重复强注（防长对话遗忘）',
+            promptEveryInvDesc: '关闭时仅首轮注入以保护 Prompt Cache；开启后每次模型推理前均以 systemMessage 强重申',
+            promptTargetPrefix: '系统生效目标：',
+            promptTargetDual: '~/.gemini/GEMINI.md（托管块）+ ~/.gemini/config/hooks.json (SessionStart · systemMessage)',
+            promptTargetGemini: '~/.gemini/GEMINI.md（托管块，App/CLI/IDE 全端通用、零延迟）',
+            promptTargetRule: '~/.gemini/config/rules/98_antigravity_theme_system_prompt.md (trigger: always_on)',
+            promptTargetSession: '~/.gemini/config/hooks.json (SessionStart · systemMessage)',
+            promptTargetPreInv: '~/.gemini/config/hooks.json (PreInvocation · systemMessage)',
+            promptPresetLbl: '系统模板：',
+            presetSystemRole: '系统级专家设定',
+            presetAntiHalluc: '严谨防幻觉',
+            presetConcise: '简洁极客',
+            presetContract: '契约开发',
+            promptPlaceholder: '输入系统级角色定义、全局工程纪律、回复风格或操作契约（最多 20,000 字符）…',
+            promptClearBtn: '清空',
+            promptSaveBtn: '保存系统提示词',
+            promptUnsaved: '有未保存的修改',
+            promptSavedTip: 'Ctrl/Cmd + Enter 快捷保存',
+            modAutoAllow: '工具自动放行 Hook (PreToolUse)',
+            modAutoAllowDesc: '通过 ~/.gemini/config/hooks.json 自动放行指定工具，减少重复确认弹窗',
+            autoAllowModeLbl: '放行范围',
+            autoAllowModeDesc: '「含安全命令」内置高危破坏性命令拦截守卫，高危操作仍交由人工确认',
+            autoAllowFiles: '仅文件读写',
+            autoAllowSafeCmd: '含安全命令',
+            autoAllowAll: '全部放行',
+            autoAllowAllWarn: '注意：全部放行将跳过所有终端命令审批（含潜在破坏性命令），请谨慎开启。',
+            presets: {
+              systemRole:
+                '## 系统级角色与执行原则\n- 你是一位资深全栈系统架构师，所有技术判断以实际读取到的代码和命令输出为唯一依据。\n- 先定位根因再动手修改，不做表面修补与无关重构。\n- 每次改动后自动执行对应的语法检查或测试验证，仅汇报实际观测到的结果。\n- 回复简洁直接，先给结论与关键修改点，代码标识符与命令保持英文原样。',
+              antiHalluc:
+                '## 严谨工程与防幻觉规范\n- 修改任何代码前必须先读取并核对实际文件，严禁臆测未验证的 API、路径或配置项。\n- 所有改动完成后必须执行对应的语法检查或单元测试，仅汇报实际执行观察到的结果。\n- 若遇信息不足或高风险破坏性操作，先说明影响并向用户确认。',
+              concise:
+                '## 高效精简回复规范\n- 先给结论与可执行方案，避免客套与冗长铺陈。\n- 优先最小化精准修改，不顺手重构无关代码。\n- 关键文件与行号附上明确位置。',
+              contract:
+                '## 契约式开发规范\n- 动手修改前先列出受影响文件清单与变更目标。\n- 严格遵守现有项目架构、命名风格与最小依赖原则。\n- 交付时简明总结改动点、验证命令与结果。'
+            },
             modMetrics: '实时会话状态与用量统计',
             modMetricsDesc: '底部四态状态指示、一/二级明细面板与每轮对话尾部统计',
             secOptional: '可选增强',
@@ -272,20 +511,74 @@
           };
         }
         return {
-          navTitle: 'Codex Theme',
-          pageTitle: 'Codex Theme',
+          navTitle: 'Enhancements',
+          pageTitle: 'Enhancements',
           manualRefreshLabel: 'Reload theme & config',
           savedBadge: 'Synced',
           refreshedBadge: 'Refreshed',
           githubLabel: 'GitHub',
-          feedbackLabel: 'Feedback',
+          feedbackLabel: 'Issues',
           subtitlePrefix: 'Manage theme colors, localization, live telemetry, and opt-in modules. Changes sync directly to ',
           subtitleSuffix: '.',
           secCore: 'Core Modules',
           modTheme: 'Codex Light & Dark Theme',
           modThemeDesc: 'Pure white light and charcoal dark palettes that follow IDE appearance automatically',
           modI18n: 'Chinese UI Localization',
-          modI18nDesc: '1,900+ built-in UI entries applied in place; disable to restore English immediately',
+          modI18nDesc: '2,300+ curated UI entries applied in place; disable to restore English immediately',
+          localeLbl: 'Display Language',
+          localeDesc: 'Switch interface locale live without restarting',
+          locZhCn: '简体中文',
+          locZhSg: '简中·英术',
+          locZhTw: '繁體中文',
+          locEn: 'English',
+          syncAiLangLbl: 'Sync AI Thinking & Reply Language',
+          syncAiLangDesc: 'Manages a global rule file so agent thinking and replies follow your active UI locale (off by default)',
+          secPromptHooks: 'System Prompt & Lifecycle Hooks',
+          secPromptHooksHint: 'Manages GEMINI.md, rules & hooks.json safely',
+          modCustomPrompt: 'System-Level Custom Prompt',
+          modCustomPromptDesc: 'Applies across all workspaces via global system instruction files and system-role hooks (zero binary patching)',
+          promptModeLbl: 'System Injection Channel',
+          promptModeDesc: 'System Dual recommended: syncs global ~/.gemini/GEMINI.md plus a SessionStart systemMessage',
+          promptModeDual: 'System Dual',
+          promptModeGemini: 'Global GEMINI.md',
+          promptModeRule: 'Global Rule',
+          promptModePreInv: 'PreInvocation',
+          promptEveryInvLbl: 'Re-assert before every model invocation',
+          promptEveryInvDesc: 'Off injects once per turn (cache-friendly); On re-injects as systemMessage on every call to prevent drift',
+          promptTargetPrefix: 'Active system target: ',
+          promptTargetDual: '~/.gemini/GEMINI.md (managed block) + ~/.gemini/config/hooks.json (SessionStart · systemMessage)',
+          promptTargetGemini: '~/.gemini/GEMINI.md (managed block, App/CLI/IDE universal)',
+          promptTargetRule: '~/.gemini/config/rules/98_antigravity_theme_system_prompt.md (trigger: always_on)',
+          promptTargetSession: '~/.gemini/config/hooks.json (SessionStart · systemMessage)',
+          promptTargetPreInv: '~/.gemini/config/hooks.json (PreInvocation · systemMessage)',
+          promptPresetLbl: 'System Presets:',
+          presetSystemRole: 'System Architect',
+          presetAntiHalluc: 'Anti-Hallucination',
+          presetConcise: 'Concise Engineer',
+          presetContract: 'Contract Mode',
+          promptPlaceholder: 'Enter system-level persona, engineering standards, or operator contract (up to 20,000 chars)…',
+          promptClearBtn: 'Clear',
+          promptSaveBtn: 'Save System Prompt',
+          promptUnsaved: 'Unsaved changes',
+          promptSavedTip: 'Ctrl/Cmd + Enter to save',
+          modAutoAllow: 'Tool Auto-Allow Hook (PreToolUse)',
+          modAutoAllowDesc: 'Automatically approves matching tools via ~/.gemini/config/hooks.json',
+          autoAllowModeLbl: 'Approval Scope',
+          autoAllowModeDesc: 'Safe Commands guards against destructive shell commands and escalates them to manual ask',
+          autoAllowFiles: 'Files Only',
+          autoAllowSafeCmd: 'Safe Commands',
+          autoAllowAll: 'Allow All',
+          autoAllowAllWarn: 'Warning: Allow All skips confirmation for every run_command call, including destructive commands.',
+          presets: {
+            systemRole:
+              '## System-Level Persona & Operating Rules\n- Act as a principal systems engineer; ground every claim in inspected source files and real command output.\n- Diagnose root causes before editing; avoid band-aids and unrelated refactors.\n- Run relevant checks/tests after edits and report only observed results.\n- Lead with concise conclusions and exact file/line references.',
+            antiHalluc:
+              '## Verification & Anti-Hallucination\n- Read actual source files before editing; never guess unverified APIs, paths, or flags.\n- Run relevant checks/tests after edits and report only observed results.\n- Ask for confirmation before destructive operations.',
+            concise:
+              '## Concise Engineering Style\n- Lead with conclusions and actionable changes; skip filler.\n- Make minimal, targeted edits without unrelated refactors.',
+            contract:
+              '## Contract-Driven Workflow\n- Outline affected files and intent before making broad edits.\n- Follow existing codebase conventions and summarize verified changes clearly.'
+          },
           modMetrics: 'Live Session Status & Telemetry',
           modMetricsDesc: 'Bottom 4-state status indicator, expandable L1/L2 panels, and per-turn footer stats',
           secOptional: 'Optional Enhancements',
@@ -411,13 +704,39 @@
       function applyRemoteState(res, flashSaved) {
         if (!res || !res.ok) return;
         if (res.config) {
+          const nextSp =
+            res.config.customSystemPrompt && typeof res.config.customSystemPrompt === 'object'
+              ? {
+                  enabled: Boolean(res.config.customSystemPrompt.enabled),
+                  mode: res.config.customSystemPrompt.mode || 'system-dual',
+                  text: typeof res.config.customSystemPrompt.text === 'string' ? res.config.customSystemPrompt.text : '',
+                  everyInvocation: Boolean(res.config.customSystemPrompt.everyInvocation)
+                }
+              : uiState.config.customSystemPrompt;
+          const nextAa =
+            res.config.hookAutoAllow && typeof res.config.hookAutoAllow === 'object'
+              ? {
+                  enabled: Boolean(res.config.hookAutoAllow.enabled),
+                  mode: res.config.hookAutoAllow.mode || 'files'
+                }
+              : uiState.config.hookAutoAllow;
           uiState.config = {
+            i18nLocale: res.config.i18nLocale || uiState.config.i18nLocale || 'zh-CN',
+            syncAiOutputLang:
+              typeof res.config.syncAiOutputLang === 'boolean'
+                ? res.config.syncAiOutputLang
+                : Boolean(uiState.config.syncAiOutputLang),
+            customSystemPrompt: nextSp,
+            hookAutoAllow: nextAa,
             telemetryLayout: res.config.telemetryLayout || uiState.config.telemetryLayout,
             telemetryCacheMode: res.config.telemetryCacheMode || uiState.config.telemetryCacheMode,
             promptSuggestionModel: res.config.promptSuggestionModel || uiState.config.promptSuggestionModel,
             sshHosts: Array.isArray(res.config.sshHosts) ? res.config.sshHosts.slice() : uiState.config.sshHosts,
             modules: Object.assign({}, uiState.config.modules, res.config.modules || {})
           };
+          if (promptDraft === null) {
+            setPromptDraft(nextSp.text);
+          }
         }
         if (res.agyStatus) {
           uiState.agyStatus = Object.assign({}, res.agyStatus);
@@ -535,11 +854,30 @@
         // Optimistic local state update for snappy UX
         if (patch.modules) {
           Object.assign(uiState.config.modules, patch.modules);
+          if (patch.modules.i18n === true && uiState.config.i18nLocale === 'en') {
+            uiState.config.i18nLocale = 'zh-CN';
+          }
           if (patch.modules.promptSuggestions === false) {
             uiState.agyStatus = Object.assign({}, uiState.agyStatus, { running: false, ready: false, warmed: false });
           } else if (patch.modules.promptSuggestions === true && uiState.agyStatus.available) {
             uiState.agyStatus = Object.assign({}, uiState.agyStatus, { running: true, warmed: false });
           }
+        }
+        if (typeof patch.i18nLocale === 'string') {
+          uiState.config.i18nLocale = patch.i18nLocale;
+          uiState.config.modules.i18n = patch.i18nLocale !== 'en';
+        }
+        if (typeof patch.syncAiOutputLang === 'boolean') {
+          uiState.config.syncAiOutputLang = patch.syncAiOutputLang;
+        }
+        if (patch.customSystemPrompt && typeof patch.customSystemPrompt === 'object') {
+          uiState.config.customSystemPrompt = Object.assign({}, uiState.config.customSystemPrompt, patch.customSystemPrompt);
+          if (typeof patch.customSystemPrompt.text === 'string') {
+            setPromptDraft(patch.customSystemPrompt.text);
+          }
+        }
+        if (patch.hookAutoAllow && typeof patch.hookAutoAllow === 'object') {
+          uiState.config.hookAutoAllow = Object.assign({}, uiState.config.hookAutoAllow, patch.hookAutoAllow);
         }
         if (patch.telemetryLayout) uiState.config.telemetryLayout = patch.telemetryLayout;
         if (patch.telemetryCacheMode) uiState.config.telemetryCacheMode = patch.telemetryCacheMode;
@@ -1047,14 +1385,139 @@
         }
       }
 
-      function renderPane() {
+      function bindAddingHostInput() {
+        if (!addingHost) return;
+        const inp = document.getElementById('ag-s-host-input');
+        if (!inp || inp.__ag_bound_host_input) return;
+        inp.__ag_bound_host_input = true;
+        inp.focus();
+        listen(inp, 'keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            submitNewHost(inp.value);
+          } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            addingHost = false;
+            invalidHost = false;
+            renderPane();
+          }
+        });
+      }
+
+      function buildUpdateCardHtml(s) {
+        const u = uiState.update || {};
+        const verStr = u.currentVersion ? 'v' + String(u.currentVersion).replace(/^v/i, '') : getShortVersionTag();
+        const isBusy = u.phase === 'checking' || u.phase === 'updating';
+        let pillHtml = '';
+        let descText = s.updDescIdle;
+        if (u.phase === 'checking') {
+          pillHtml = '<span class="ag-s-upd-pill" data-tone="idle">' + escHtml(s.updPillChecking) + '</span>';
+          descText = s.updDescChecking;
+        } else if (u.phase === 'updating') {
+          pillHtml = '<span class="ag-s-upd-pill" data-tone="warn">' + escHtml(s.updPillUpdating) + '</span>';
+          descText = s.updDescUpdating;
+        } else if (u.status === 'applied') {
+          pillHtml = '<span class="ag-s-upd-pill" data-tone="ok">' + escHtml(s.updPillApplied) + '</span>';
+          descText = s.updDescApplied;
+        } else if (u.status === 'up_to_date') {
+          pillHtml = '<span class="ag-s-upd-pill" data-tone="ok">' + escHtml(s.updPillLatest) + '</span>';
+          descText = s.updDescUpToDate;
+        } else if (u.status === 'ahead') {
+          pillHtml = '<span class="ag-s-upd-pill" data-tone="ok">' + escHtml(s.updPillAhead) + '</span>';
+          descText = s.updDescAhead;
+        } else if (u.status === 'update_available') {
+          const latestTag = u.latestVersion ? 'v' + String(u.latestVersion).replace(/^v/i, '') : '';
+          pillHtml =
+            '<span class="ag-s-upd-pill" data-tone="warn">' +
+            escHtml(s.updPillAvailablePrefix + latestTag) +
+            '</span>';
+          descText = s.updDescAvailable;
+        } else if (u.status === 'main_diff') {
+          const diffSuffix = u.changedCount > 0 ? ' (' + u.changedCount + ')' : '';
+          pillHtml =
+            '<span class="ag-s-upd-pill" data-tone="warn">' +
+            escHtml(s.updPillMainDiff + diffSuffix) +
+            '</span>';
+          descText = s.updDescMainDiff;
+        } else if (u.status === 'error') {
+          pillHtml = '<span class="ag-s-upd-pill" data-tone="err">' + escHtml(s.updPillErr) + '</span>';
+          descText = u.error ? String(u.error).slice(0, 140) : s.updPillErr;
+        }
+
+        const showApply = u.status === 'update_available' || u.status === 'main_diff' || u.phase === 'updating';
+        const applyLabel =
+          u.phase === 'updating'
+            ? s.updBtnUpdating
+            : u.status === 'update_available'
+            ? s.updBtnApply
+            : s.updBtnSyncMain;
+
+        return (
+          '<div class="ag-s-row"><div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info">' +
+          '<div class="ag-s-row-label-wrap">' +
+          '<span class="ag-s-row-label" style="cursor:default">' +
+          escHtml(s.updTitle) +
+          '</span>' +
+          '<span class="ag-s-upd-pill">' +
+          escHtml(verStr) +
+          '</span>' +
+          pillHtml +
+          '</div>' +
+          '<div class="ag-s-row-desc">' +
+          escHtml(descText) +
+          '</div>' +
+          '</div>' +
+          '<div class="ag-s-upd-actions">' +
+          '<button type="button" id="ag-s-check-update" class="ag-s-btn-secondary"' +
+          (isBusy ? ' disabled' : '') +
+          '>' +
+          escHtml(u.phase === 'checking' ? s.updBtnChecking : s.updBtnCheck) +
+          '</button>' +
+          (showApply
+            ? '<button type="button" id="ag-s-apply-update" class="' +
+              (u.status === 'update_available' || u.phase === 'updating' ? 'ag-s-btn-primary' : 'ag-s-btn-secondary') +
+              '"' +
+              (isBusy ? ' disabled' : '') +
+              '>' +
+              escHtml(applyLabel) +
+              '</button>'
+            : '') +
+          '</div>' +
+          '</div></div>'
+        );
+      }
+
+      function syncSaveBadge(savedActive, savedLabel) {
+        const b = document.getElementById('ag-s-hot-badge');
+        if (b) {
+          if (b.textContent !== savedLabel) b.textContent = savedLabel;
+          b.hidden = !savedActive;
+        }
+        if (saveBadgeTimer) {
+          clearTimeout(saveBadgeTimer);
+          saveBadgeTimer = null;
+        }
+        if (savedActive) {
+          const remain = Math.max(100, window.__ag_settings_saved_until - Date.now());
+          saveBadgeTimer = setTimeout(() => {
+            saveBadgeTimer = null;
+            const badgeEl = document.getElementById('ag-s-hot-badge');
+            if (badgeEl) badgeEl.hidden = true;
+          }, remain);
+        }
+      }
+
+      function renderPane({ forceRebuild = false } = {}) {
         const navBtn = document.getElementById('ag-settings-nav-btn');
         const s = getStrings();
         if (navBtn) {
           const lbl = navBtn.querySelector('.ag-s-nav-label');
-          if (lbl) lbl.textContent = s.navTitle;
+          if (lbl && lbl.textContent !== s.navTitle) lbl.textContent = s.navTitle;
           const ver = navBtn.querySelector('.ag-s-nav-ver');
-          if (ver) ver.textContent = getShortVersionTag();
+          const verText = getShortVersionTag();
+          if (ver && ver.textContent !== verText) ver.textContent = verText;
         }
 
         const pane = document.getElementById('ag-settings-pane');
@@ -1064,8 +1527,23 @@
         const mods = cfg.modules || {};
         const psOn = Boolean(mods.promptSuggestions);
         const sshOn = Boolean(mods.sshRemote);
+        const sp = cfg.customSystemPrompt || { enabled: false, mode: 'system-dual', text: '', everyInvocation: false };
+        const aa = cfg.hookAutoAllow || { enabled: false, mode: 'files' };
+        const draftVal = promptDraft !== null ? promptDraft : sp.text || '';
+        const isDirty = draftVal !== (sp.text || '');
+        const promptTargetText =
+          sp.mode === 'global-gemini'
+            ? s.promptTargetGemini
+            : sp.mode === 'rule'
+            ? s.promptTargetRule
+            : sp.mode === 'session-start'
+            ? s.promptTargetSession
+            : sp.mode === 'pre-invocation'
+            ? s.promptTargetPreInv
+            : s.promptTargetDual;
         const selInfo = findSelectedModelInfo(cfg.promptSuggestionModel);
         const savedActive = Boolean(window.__ag_settings_saved_until && Date.now() < window.__ag_settings_saved_until);
+        const activeLoc = getActiveLocale();
 
         let workerStatus = 'idle';
         let workerLabel = s.agyIdle;
@@ -1081,8 +1559,6 @@
             workerLabel = s.agyWarming;
           }
         }
-
-        const prevScroll = pane.scrollTop || window.__ag_settings_scroll_top || 0;
 
         const chipsHtml =
           (cfg.sshHosts || [])
@@ -1116,6 +1592,127 @@
               '</button>');
 
         const savedLabel = window.__ag_settings_saved_label === 'refreshed' ? s.refreshedBadge : s.savedBadge;
+        const updateCardHtml = buildUpdateCardHtml(s);
+
+        // Fast zero-flicker in-place state sync when pane is already mounted in the same locale
+        const renderedLocale = pane.getAttribute ? pane.getAttribute('data-ag-rendered-locale') : '';
+        if (
+          !forceRebuild &&
+          renderedLocale === activeLoc &&
+          pane.querySelector &&
+          pane.querySelector('#ag-s-sw-theme') &&
+          pane.querySelector('#ag-s-update-card')
+        ) {
+          const syncSwitch = (id, checked) => {
+            const el = document.getElementById(id);
+            if (el && Boolean(el.checked) !== Boolean(checked)) {
+              el.checked = Boolean(checked);
+            }
+          };
+          syncSwitch('ag-s-sw-theme', mods.theme !== false);
+          syncSwitch('ag-s-sw-i18n', mods.i18n !== false);
+          syncSwitch('ag-s-sw-ai-lang', Boolean(cfg.syncAiOutputLang));
+          syncSwitch('ag-s-sw-metrics', mods.metrics !== false);
+          syncSwitch('ag-s-sw-suggest', psOn);
+          syncSwitch('ag-s-sw-ssh', sshOn);
+          syncSwitch('ag-s-sw-custom-prompt', Boolean(sp.enabled));
+          syncSwitch('ag-s-sw-prompt-every-inv', Boolean(sp.everyInvocation));
+          syncSwitch('ag-s-sw-auto-allow', Boolean(aa.enabled));
+
+          pane.querySelectorAll('.ag-s-seg-btn[data-seg]').forEach((btn) => {
+            const field = btn.getAttribute('data-seg');
+            const val = btn.getAttribute('data-val');
+            let active = false;
+            if (field === 'i18nLocale') active = activeLoc === val;
+            else if (field === 'telemetryLayout') {
+              active = val === 'detailed' ? cfg.telemetryLayout === 'detailed' : cfg.telemetryLayout !== 'detailed';
+            } else if (field === 'telemetryCacheMode') {
+              active = val === 'step' ? cfg.telemetryCacheMode === 'step' : cfg.telemetryCacheMode !== 'step';
+            } else {
+              active = cfg[field] === val;
+            }
+            const nextStr = active ? 'true' : 'false';
+            if (btn.getAttribute('aria-pressed') !== nextStr) btn.setAttribute('aria-pressed', nextStr);
+          });
+
+          pane.querySelectorAll('.ag-s-seg-btn[data-nested-seg]').forEach((btn) => {
+            const spec = btn.getAttribute('data-nested-seg') || '';
+            const val = btn.getAttribute('data-val');
+            const parts = spec.split('.');
+            const curObj = parts.length === 2 ? cfg[parts[0]] || {} : {};
+            const nextStr = curObj[parts[1]] === val ? 'true' : 'false';
+            if (btn.getAttribute('aria-pressed') !== nextStr) btn.setAttribute('aria-pressed', nextStr);
+          });
+
+          const setHidden = (id, hide) => {
+            const el = document.getElementById(id);
+            if (el && Boolean(el.hidden) !== Boolean(hide)) el.hidden = Boolean(hide);
+          };
+          setHidden('ag-s-sub-ai-lang', !(mods.i18n !== false && activeLoc !== 'en'));
+          setHidden('ag-s-sub-suggest', !psOn);
+          setHidden('ag-s-sub-ssh', !sshOn);
+          setHidden('ag-s-sub-custom-prompt', !sp.enabled);
+          setHidden('ag-s-prompt-every-inv-row', sp.mode !== 'pre-invocation');
+          setHidden('ag-s-sub-auto-allow', !aa.enabled);
+          setHidden('ag-s-warn-auto-allow-all', aa.mode !== 'all');
+
+          const targetPathEl = document.getElementById('ag-s-prompt-target-path');
+          if (targetPathEl && targetPathEl.textContent !== promptTargetText) {
+            targetPathEl.textContent = promptTargetText;
+          }
+
+          const workerPill = document.getElementById('ag-s-worker-pill');
+          if (workerPill && workerPill.getAttribute('data-status') !== workerStatus) {
+            workerPill.setAttribute('data-status', workerStatus);
+          }
+          const workerLblEl = document.getElementById('ag-s-worker-label');
+          if (workerLblEl && workerLblEl.textContent !== workerLabel) {
+            workerLblEl.textContent = workerLabel;
+          }
+
+          const modelNameEl = document.getElementById('ag-s-model-name');
+          if (modelNameEl && modelNameEl.textContent !== selInfo.family.name) {
+            modelNameEl.textContent = selInfo.family.name;
+          }
+          const modelEffEl = document.getElementById('ag-s-model-effort');
+          if (modelEffEl) {
+            const effText = selInfo.effortLabel || '';
+            if (modelEffEl.textContent !== effText) modelEffEl.textContent = effText;
+            modelEffEl.hidden = !effText;
+          }
+
+          const ta = document.getElementById('ag-s-prompt-textarea');
+          if (ta && document.activeElement !== ta && ta.value !== draftVal) {
+            ta.value = draftVal;
+          }
+          const metaEl = document.getElementById('ag-s-prompt-meta');
+          const nextMeta = draftVal.length + ' / 20000 · ' + (isDirty ? s.promptUnsaved : s.promptSavedTip);
+          if (metaEl && metaEl.textContent !== nextMeta) metaEl.textContent = nextMeta;
+          const saveBtn = document.getElementById('ag-s-prompt-save');
+          if (saveBtn) saveBtn.disabled = !isDirty;
+
+          const chipsEl = document.getElementById('ag-s-ssh-chips');
+          if (chipsEl && chipsEl.__ag_html !== chipsHtml) {
+            chipsEl.innerHTML = chipsHtml;
+            chipsEl.__ag_html = chipsHtml;
+            bindAddingHostInput();
+          }
+
+          const updEl = document.getElementById('ag-s-update-card');
+          if (updEl && updEl.__ag_html !== updateCardHtml) {
+            updEl.innerHTML = updateCardHtml;
+            updEl.__ag_html = updateCardHtml;
+          }
+
+          updateRefreshSpin();
+          syncSaveBadge(savedActive, savedLabel);
+          if (isPopoverOpen(document.getElementById('ag-settings-model-menu'))) {
+            renderModelMenuItems();
+          }
+          return;
+        }
+
+        const prevScroll = pane.scrollTop || window.__ag_settings_scroll_top || 0;
 
         pane.innerHTML =
           '<div class="ag-s-header">' +
@@ -1138,14 +1735,14 @@
           '</span>' +
           '</div>' +
           '<div class="ag-s-hdr-links">' +
-          '<a id="ag-s-link-github" class="ag-s-hdr-link" href="https://github.com/nkjDSLcvanv/antigravity-codex-theme" target="_blank" rel="noopener noreferrer" data-ext-link="github">' +
+          '<a id="ag-s-link-github" class="ag-s-hdr-link" href="https://github.com/XziXmn/antigravity-theme" target="_blank" rel="noopener noreferrer" data-ext-link="github">' +
           '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>' +
           '<span>' +
           escHtml(s.githubLabel) +
           '</span>' +
           '</a>' +
-          '<a id="ag-s-link-feedback" class="ag-s-hdr-link" href="https://x.com/shehxuhxjx66088/status/2124698149742883293?a=EQtEZD2AMCGaj9bBRIo&s=20" target="_blank" rel="noopener noreferrer" data-ext-link="feedback">' +
-          '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9.52 6.77 15.48 0h-1.41L8.9 5.88 4.77 0H0l6.25 8.9L0 16h1.41l5.46-6.21L11.23 16H16L9.52 6.77Zm-1.93 2.2-.63-.89L1.92 1.04h2.17l4.07 5.7.63.89 5.29 7.4h-2.17L7.59 8.97Z"/></svg>' +
+          '<a id="ag-s-link-feedback" class="ag-s-hdr-link" href="https://github.com/XziXmn/antigravity-theme/issues" target="_blank" rel="noopener noreferrer" data-ext-link="feedback">' +
+          '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 5.2v3.2M8 10.8h.01"/></svg>' +
           '<span>' +
           escHtml(s.feedbackLabel) +
           '</span>' +
@@ -1188,7 +1785,53 @@
           '" ' +
           (mods.i18n !== false ? 'checked' : '') +
           ' />' +
+          '</div>' +
+          '<div class="ag-s-subrow">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.localeLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.localeDesc) +
           '</div></div>' +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.localeLbl) +
+          '">' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="i18nLocale" data-val="zh-CN" aria-pressed="' +
+          (activeLoc === 'zh-CN' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.locZhCn) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="i18nLocale" data-val="zh-SG" aria-pressed="' +
+          (activeLoc === 'zh-SG' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.locZhSg) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="i18nLocale" data-val="zh-TW" aria-pressed="' +
+          (activeLoc === 'zh-TW' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.locZhTw) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="i18nLocale" data-val="en" aria-pressed="' +
+          (activeLoc === 'en' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.locEn) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '<div id="ag-s-sub-ai-lang" class="ag-s-subrow"' +
+          (mods.i18n !== false && activeLoc !== 'en' ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-ai-lang" style="cursor:pointer">' +
+          escHtml(s.syncAiLangLbl) +
+          '</label><div class="ag-s-sub-desc">' +
+          escHtml(s.syncAiLangDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-ai-lang" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-flag="syncAiOutputLang" aria-label="' +
+          escHtml(s.syncAiLangLbl) +
+          '" ' +
+          (cfg.syncAiOutputLang ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '</div>' +
           '<div class="ag-s-row"><div class="ag-s-row-main">' +
           '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-metrics">' +
           escHtml(s.modMetrics) +
@@ -1222,11 +1865,11 @@
           '<label class="ag-s-row-label" for="ag-s-sw-suggest">' +
           escHtml(s.modSuggest) +
           '</label>' +
-          '<span class="ag-s-worker-pill" data-status="' +
+          '<span id="ag-s-worker-pill" class="ag-s-worker-pill" data-status="' +
           workerStatus +
           '">' +
           '<span class="ag-s-worker-dot"></span>' +
-          '<span>' +
+          '<span id="ag-s-worker-label">' +
           escHtml(workerLabel) +
           '</span>' +
           '</span>' +
@@ -1247,7 +1890,7 @@
           (psOn ? 'checked' : '') +
           ' />' +
           '</div>' +
-          '<div class="ag-s-subrow"' +
+          '<div id="ag-s-sub-suggest" class="ag-s-subrow"' +
           (psOn ? '' : ' hidden') +
           '>' +
           '<div>' +
@@ -1263,10 +1906,14 @@
           '<div class="ag-s-picker-controls">' +
           '<button type="button" id="ag-s-model-trigger" class="ag-s-pill-trigger" aria-haspopup="menu" aria-expanded="false">' +
           '<span class="ag-s-trigger-text">' +
-          '<span>' +
+          '<span id="ag-s-model-name">' +
           escHtml(selInfo.family.name) +
           '</span>' +
-          (selInfo.effortLabel ? '<span class="ag-s-trigger-effort">' + escHtml(selInfo.effortLabel) + '</span>' : '') +
+          '<span id="ag-s-model-effort" class="ag-s-trigger-effort"' +
+          (selInfo.effortLabel ? '' : ' hidden') +
+          '>' +
+          escHtml(selInfo.effortLabel || '') +
+          '</span>' +
           '</span>' +
           '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0"><path d="M4 6l4 4 4-4"/></svg>' +
           '</button>' +
@@ -1294,14 +1941,186 @@
           (sshOn ? 'checked' : '') +
           ' />' +
           '</div>' +
-          '<div class="ag-s-subrow"' +
+          '<div id="ag-s-sub-ssh" class="ag-s-subrow"' +
           (sshOn ? '' : ' hidden') +
           '>' +
           '<span class="ag-s-sub-label">' +
           escHtml(s.sshHostsLbl) +
           '</span>' +
-          '<div class="ag-s-chips">' +
+          '<div id="ag-s-ssh-chips" class="ag-s-chips">' +
           chipsHtml +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // Group 2b: Custom System Prompt & Lifecycle Hooks
+          '<div>' +
+          '<div class="ag-s-section-head">' +
+          '<span class="ag-s-section-title">' +
+          escHtml(s.secPromptHooks) +
+          '</span>' +
+          '<span class="ag-s-section-hint">' +
+          escHtml(s.secPromptHooksHint) +
+          '</span>' +
+          '</div>' +
+          '<div class="ag-s-card">' +
+          // Custom System Prompt
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-custom-prompt">' +
+          escHtml(s.modCustomPrompt) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.modCustomPromptDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-custom-prompt" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="customSystemPrompt.enabled" aria-label="' +
+          escHtml(s.modCustomPrompt) +
+          '" ' +
+          (sp.enabled ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-custom-prompt" class="ag-s-subrow-stack"' +
+          (sp.enabled ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.promptModeLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.promptModeDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.promptModeLbl) +
+          '">' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="system-dual" aria-pressed="' +
+          (sp.mode === 'system-dual' || !sp.mode ? 'true' : 'false') +
+          '">' +
+          escHtml(s.promptModeDual) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="global-gemini" aria-pressed="' +
+          (sp.mode === 'global-gemini' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.promptModeGemini) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="rule" aria-pressed="' +
+          (sp.mode === 'rule' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.promptModeRule) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="pre-invocation" aria-pressed="' +
+          (sp.mode === 'pre-invocation' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.promptModePreInv) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '<div class="ag-s-target-bar">' +
+          '<span>' +
+          escHtml(s.promptTargetPrefix) +
+          '</span>' +
+          '<span id="ag-s-prompt-target-path" class="ag-s-target-path">' +
+          escHtml(promptTargetText) +
+          '</span>' +
+          '</div>' +
+          '<div id="ag-s-prompt-every-inv-row" class="ag-s-inline-toggle"' +
+          (sp.mode === 'pre-invocation' ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-prompt-every-inv" style="cursor:pointer">' +
+          escHtml(s.promptEveryInvLbl) +
+          '</label><div class="ag-s-sub-desc">' +
+          escHtml(s.promptEveryInvDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-prompt-every-inv" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="customSystemPrompt.everyInvocation" aria-label="' +
+          escHtml(s.promptEveryInvLbl) +
+          '" ' +
+          (sp.everyInvocation ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div class="ag-s-preset-bar">' +
+          '<span class="ag-s-preset-lbl">' +
+          escHtml(s.promptPresetLbl) +
+          '</span>' +
+          '<button type="button" class="ag-s-preset-btn" data-prompt-preset="systemRole">' +
+          escHtml(s.presetSystemRole) +
+          '</button>' +
+          '<button type="button" class="ag-s-preset-btn" data-prompt-preset="antiHalluc">' +
+          escHtml(s.presetAntiHalluc) +
+          '</button>' +
+          '<button type="button" class="ag-s-preset-btn" data-prompt-preset="concise">' +
+          escHtml(s.presetConcise) +
+          '</button>' +
+          '<button type="button" class="ag-s-preset-btn" data-prompt-preset="contract">' +
+          escHtml(s.presetContract) +
+          '</button>' +
+          '</div>' +
+          '<textarea id="ag-s-prompt-textarea" class="ag-s-textarea" placeholder="' +
+          escHtml(s.promptPlaceholder) +
+          '" maxlength="20000">' +
+          escHtml(draftVal) +
+          '</textarea>' +
+          '<div class="ag-s-prompt-foot">' +
+          '<span id="ag-s-prompt-meta" class="ag-s-prompt-meta">' +
+          escHtml(draftVal.length + ' / 20000 · ' + (isDirty ? s.promptUnsaved : s.promptSavedTip)) +
+          '</span>' +
+          '<div class="ag-s-prompt-actions">' +
+          '<button type="button" id="ag-s-prompt-clear" class="ag-s-btn-secondary">' +
+          escHtml(s.promptClearBtn) +
+          '</button>' +
+          '<button type="button" id="ag-s-prompt-save" class="ag-s-btn-primary"' +
+          (isDirty ? '' : ' disabled') +
+          '>' +
+          escHtml(s.promptSaveBtn) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // PreToolUse Auto-Allow Hook
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-auto-allow">' +
+          escHtml(s.modAutoAllow) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.modAutoAllowDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-auto-allow" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="hookAutoAllow.enabled" aria-label="' +
+          escHtml(s.modAutoAllow) +
+          '" ' +
+          (aa.enabled ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-auto-allow" class="ag-s-subrow-stack"' +
+          (aa.enabled ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.autoAllowModeLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.autoAllowModeDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.autoAllowModeLbl) +
+          '">' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="hookAutoAllow.mode" data-val="files" aria-pressed="' +
+          (aa.mode === 'files' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.autoAllowFiles) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="hookAutoAllow.mode" data-val="safe-cmd" aria-pressed="' +
+          (aa.mode === 'safe-cmd' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.autoAllowSafeCmd) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="hookAutoAllow.mode" data-val="all" aria-pressed="' +
+          (aa.mode === 'all' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.autoAllowAll) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '<div id="ag-s-warn-auto-allow-all" class="ag-s-warn-note"' +
+          (aa.mode === 'all' ? '' : ' hidden') +
+          '>' +
+          escHtml(s.autoAllowAllWarn) +
           '</div>' +
           '</div>' +
           '</div>' +
@@ -1358,129 +2177,26 @@
           '</div>' +
           '</div>' +
           // Group 4: Plugin Version & Updates
-          (() => {
-            const u = uiState.update || {};
-            const verStr = u.currentVersion ? 'v' + String(u.currentVersion).replace(/^v/i, '') : getShortVersionTag();
-            const isBusy = u.phase === 'checking' || u.phase === 'updating';
-            let pillHtml = '';
-            let descText = s.updDescIdle;
-            if (u.phase === 'checking') {
-              pillHtml = '<span class="ag-s-upd-pill" data-tone="idle">' + escHtml(s.updPillChecking) + '</span>';
-              descText = s.updDescChecking;
-            } else if (u.phase === 'updating') {
-              pillHtml = '<span class="ag-s-upd-pill" data-tone="warn">' + escHtml(s.updPillUpdating) + '</span>';
-              descText = s.updDescUpdating;
-            } else if (u.status === 'applied') {
-              pillHtml = '<span class="ag-s-upd-pill" data-tone="ok">' + escHtml(s.updPillApplied) + '</span>';
-              descText = s.updDescApplied;
-            } else if (u.status === 'up_to_date') {
-              pillHtml = '<span class="ag-s-upd-pill" data-tone="ok">' + escHtml(s.updPillLatest) + '</span>';
-              descText = s.updDescUpToDate;
-            } else if (u.status === 'ahead') {
-              pillHtml = '<span class="ag-s-upd-pill" data-tone="ok">' + escHtml(s.updPillAhead) + '</span>';
-              descText = s.updDescAhead;
-            } else if (u.status === 'update_available') {
-              const latestTag = u.latestVersion ? 'v' + String(u.latestVersion).replace(/^v/i, '') : '';
-              pillHtml =
-                '<span class="ag-s-upd-pill" data-tone="warn">' +
-                escHtml(s.updPillAvailablePrefix + latestTag) +
-                '</span>';
-              descText = s.updDescAvailable;
-            } else if (u.status === 'main_diff') {
-              const diffSuffix = u.changedCount > 0 ? ' (' + u.changedCount + ')' : '';
-              pillHtml =
-                '<span class="ag-s-upd-pill" data-tone="warn">' +
-                escHtml(s.updPillMainDiff + diffSuffix) +
-                '</span>';
-              descText = s.updDescMainDiff;
-            } else if (u.status === 'error') {
-              pillHtml = '<span class="ag-s-upd-pill" data-tone="err">' + escHtml(s.updPillErr) + '</span>';
-              descText = u.error ? String(u.error).slice(0, 140) : s.updPillErr;
-            }
-
-            const showApply = u.status === 'update_available' || u.status === 'main_diff' || u.phase === 'updating';
-            const applyLabel =
-              u.phase === 'updating'
-                ? s.updBtnUpdating
-                : u.status === 'update_available'
-                ? s.updBtnApply
-                : s.updBtnSyncMain;
-
-            return (
-              '<div>' +
-              '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
-              escHtml(s.secUpdate) +
-              '</span></div>' +
-              '<div class="ag-s-card">' +
-              '<div class="ag-s-row"><div class="ag-s-row-main">' +
-              '<div class="ag-s-row-info">' +
-              '<div class="ag-s-row-label-wrap">' +
-              '<span class="ag-s-row-label" style="cursor:default">' +
-              escHtml(s.updTitle) +
-              '</span>' +
-              '<span class="ag-s-upd-pill">' +
-              escHtml(verStr) +
-              '</span>' +
-              pillHtml +
-              '</div>' +
-              '<div class="ag-s-row-desc">' +
-              escHtml(descText) +
-              '</div>' +
-              '</div>' +
-              '<div class="ag-s-upd-actions">' +
-              '<button type="button" id="ag-s-check-update" class="ag-s-btn-secondary"' +
-              (isBusy ? ' disabled' : '') +
-              '>' +
-              escHtml(u.phase === 'checking' ? s.updBtnChecking : s.updBtnCheck) +
-              '</button>' +
-              (showApply
-                ? '<button type="button" id="ag-s-apply-update" class="' +
-                  (u.status === 'update_available' || u.phase === 'updating' ? 'ag-s-btn-primary' : 'ag-s-btn-secondary') +
-                  '"' +
-                  (isBusy ? ' disabled' : '') +
-                  '>' +
-                  escHtml(applyLabel) +
-                  '</button>'
-                : '') +
-              '</div>' +
-              '</div></div>' +
-              '</div>' +
-              '</div>'
-            );
-          })() +
+          '<div>' +
+          '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
+          escHtml(s.secUpdate) +
+          '</span></div>' +
+          '<div id="ag-s-update-card" class="ag-s-card">' +
+          updateCardHtml +
+          '</div>' +
+          '</div>' +
           '</div>';
+
+        if (pane.setAttribute) pane.setAttribute('data-ag-rendered-locale', activeLoc);
+        const chipsMounted = document.getElementById('ag-s-ssh-chips');
+        if (chipsMounted) chipsMounted.__ag_html = chipsHtml;
+        const updMounted = document.getElementById('ag-s-update-card');
+        if (updMounted) updMounted.__ag_html = updateCardHtml;
 
         if (prevScroll > 0) pane.scrollTop = prevScroll;
 
-        if (addingHost) {
-          const inp = document.getElementById('ag-s-host-input');
-          if (inp) {
-            inp.focus();
-            inp.addEventListener('keydown', (ev) => {
-              if (ev.key === 'Enter') {
-                ev.preventDefault();
-                submitNewHost(inp.value);
-              } else if (ev.key === 'Escape') {
-                ev.preventDefault();
-                ev.stopPropagation();
-                addingHost = false;
-                invalidHost = false;
-                renderPane();
-              }
-            });
-          }
-        }
-
-        if (savedActive) {
-          if (saveBadgeTimer) clearTimeout(saveBadgeTimer);
-          const remain = Math.max(100, window.__ag_settings_saved_until - Date.now());
-          saveBadgeTimer = setTimeout(() => {
-            const b = document.getElementById('ag-s-hot-badge');
-            if (b) {
-              b.hidden = true;
-            }
-          }, remain);
-        }
+        bindAddingHostInput();
+        syncSaveBadge(savedActive, savedLabel);
 
         if (isPopoverOpen(document.getElementById('ag-settings-model-menu'))) {
           renderModelMenuItems();
@@ -1534,19 +2250,52 @@
       }
 
       function bindPaneEvents(pane) {
-        pane.addEventListener('change', (ev) => {
+        listen(pane, 'change', (ev) => {
           const sw = ev.target && ev.target.closest ? ev.target.closest('input.ag-s-switch[data-bind-mod]') : null;
-          if (!sw) return;
-          const mod = sw.getAttribute('data-bind-mod');
-          if (!mod) return;
-          const checked = Boolean(sw.checked);
-          if (mod === 'promptSuggestions' && !checked) {
-            hideModelMenus({ restoreFocus: false });
+          if (sw) {
+            const mod = sw.getAttribute('data-bind-mod');
+            if (!mod) return;
+            const checked = Boolean(sw.checked);
+            if (mod === 'promptSuggestions' && !checked) {
+              hideModelMenus({ restoreFocus: false });
+            }
+            commitPatch({ modules: { [mod]: checked } });
+            return;
           }
-          commitPatch({ modules: { [mod]: checked } });
+          const flagSw = ev.target && ev.target.closest ? ev.target.closest('input.ag-s-switch[data-bind-flag]') : null;
+          if (flagSw) {
+            const flagKey = flagSw.getAttribute('data-bind-flag');
+            if (flagKey) {
+              commitPatch({ [flagKey]: Boolean(flagSw.checked) });
+            }
+            return;
+          }
+          const nestedSw = ev.target && ev.target.closest ? ev.target.closest('input.ag-s-switch[data-bind-nested]') : null;
+          if (nestedSw) {
+            const spec = nestedSw.getAttribute('data-bind-nested') || '';
+            const parts = spec.split('.');
+            if (parts.length === 2) {
+              commitPatch({ [parts[0]]: { [parts[1]]: Boolean(nestedSw.checked) } });
+            }
+          }
         });
 
-        pane.addEventListener('click', (ev) => {
+        listen(pane, 'input', (ev) => {
+          const ta = ev.target && ev.target.id === 'ag-s-prompt-textarea' ? ev.target : null;
+          if (!ta) return;
+          setPromptDraft(ta.value);
+          const sp = uiState.config.customSystemPrompt || { text: '' };
+          const dirty = promptDraft !== (sp.text || '');
+          const s = getStrings();
+          const metaEl = document.getElementById('ag-s-prompt-meta');
+          if (metaEl) {
+            metaEl.textContent = promptDraft.length + ' / 20000 · ' + (dirty ? s.promptUnsaved : s.promptSavedTip);
+          }
+          const saveBtn = document.getElementById('ag-s-prompt-save');
+          if (saveBtn) saveBtn.disabled = !dirty;
+        });
+
+        listen(pane, 'click', (ev) => {
           const manualRef = ev.target && ev.target.closest ? ev.target.closest('#ag-s-manual-refresh') : null;
           if (manualRef) {
             ev.preventDefault();
@@ -1604,9 +2353,50 @@
           if (seg) {
             const field = seg.getAttribute('data-seg');
             const val = seg.getAttribute('data-val');
-            if (field && val && uiState.config[field] !== val) {
+            const curVal = field === 'i18nLocale' ? getActiveLocale() : uiState.config[field];
+            if (field && val && curVal !== val) {
               commitPatch({ [field]: val });
             }
+            return;
+          }
+
+          const nestedSeg = ev.target && ev.target.closest ? ev.target.closest('.ag-s-seg-btn[data-nested-seg]') : null;
+          if (nestedSeg) {
+            const spec = nestedSeg.getAttribute('data-nested-seg') || '';
+            const val = nestedSeg.getAttribute('data-val');
+            const parts = spec.split('.');
+            if (parts.length === 2 && val) {
+              const curObj = uiState.config[parts[0]] || {};
+              if (curObj[parts[1]] !== val) {
+                commitPatch({ [parts[0]]: { [parts[1]]: val } });
+              }
+            }
+            return;
+          }
+
+          const presetBtn = ev.target && ev.target.closest ? ev.target.closest('[data-prompt-preset]') : null;
+          if (presetBtn) {
+            const pKey = presetBtn.getAttribute('data-prompt-preset');
+            const s = getStrings();
+            const tpl = s.presets && pKey ? s.presets[pKey] : '';
+            if (tpl) {
+              setPromptDraft(tpl);
+              commitPatch({ customSystemPrompt: { text: tpl } });
+            }
+            return;
+          }
+
+          if (ev.target && ev.target.closest && ev.target.closest('#ag-s-prompt-save')) {
+            const ta = document.getElementById('ag-s-prompt-textarea');
+            const nextText = ta ? ta.value : promptDraft || '';
+            setPromptDraft(nextText);
+            commitPatch({ customSystemPrompt: { text: nextText } });
+            return;
+          }
+
+          if (ev.target && ev.target.closest && ev.target.closest('#ag-s-prompt-clear')) {
+            setPromptDraft('');
+            commitPatch({ customSystemPrompt: { text: '' } });
             return;
           }
 
@@ -1634,7 +2424,15 @@
           }
         });
 
-        pane.addEventListener('keydown', (ev) => {
+        listen(pane, 'keydown', (ev) => {
+          if (ev.target && ev.target.id === 'ag-s-prompt-textarea' && (ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const nextText = ev.target.value;
+            setPromptDraft(nextText);
+            commitPatch({ customSystemPrompt: { text: nextText } });
+            return;
+          }
           const trigger = ev.target && ev.target.closest ? ev.target.closest('#ag-s-model-trigger') : null;
           if (trigger && ev.key === 'ArrowDown') {
             ev.preventDefault();
@@ -1650,12 +2448,94 @@
         });
       }
 
+      function isProtectedSettingsChild(node) {
+        if (!node || node.nodeType !== 1) return true;
+        if (node.id === 'ag-settings-pane' || node.tagName === 'STYLE' || node.tagName === 'BUTTON') return true;
+        const tid = String(node.getAttribute ? node.getAttribute('data-testid') || '' : '');
+        const aria = String(node.getAttribute ? node.getAttribute('aria-label') || '' : '');
+        const cls = String(node.className || '');
+        if (/close/i.test(tid) || /close|关闭|關閉/i.test(aria)) return true;
+        if (/\bw-px\b|\bw-\[1px\]|\bdivider\b/i.test(cls) && (!node.children || node.children.length === 0)) return true;
+        return false;
+      }
+
+      function resolveSettingsModalTargets() {
+        const sidebar = document.querySelector('[data-testid="settings-sidebar"]');
+        if (!sidebar) return null;
+        const dlg = sidebar.closest('.settings-modal-container') || sidebar.closest('[role="dialog"]');
+        if (!dlg) return null;
+
+        const listRoot = sidebar.firstElementChild || sidebar;
+        const groups = Array.from(listRoot.children || []);
+        const browserBtn = sidebar.querySelector('[data-testid="settings-nav-item-Browser"], #settings-nav-item-Browser');
+        let navGroup = null;
+        if (browserBtn) {
+          let cur = browserBtn.parentElement;
+          for (let hop = 0; hop < 4 && cur; hop++) {
+            if (groups.includes(cur)) {
+              navGroup = cur;
+              break;
+            }
+            cur = cur.parentElement;
+          }
+        }
+        if (!navGroup) {
+          navGroup =
+            groups.find((el) => el && el.querySelector && el.querySelector('[data-testid^="settings-nav-item-"]')) ||
+            groups[1] ||
+            listRoot;
+        }
+
+        // Find splitRow containing sidebar and pick the true sibling right pane (never hardcoding children[1])
+        let splitRow = sidebar.closest('.relative.flex.w-full.h-full') || sidebar.parentElement || null;
+        let rightPane = null;
+        if (splitRow && splitRow.children) {
+          const sibs = Array.from(splitRow.children).filter(
+            (ch) => ch && ch !== sidebar && !(ch.contains && ch.contains(sidebar)) && !isProtectedSettingsChild(ch)
+          );
+          rightPane =
+            sibs.find(
+              (ch) =>
+                (ch.getAttribute && ch.getAttribute('data-settings-content-pane') === 'true') ||
+                (ch.querySelector && ch.querySelector('[data-settings-content-pane="true"]'))
+            ) ||
+            sibs.find((ch) => {
+              const cls = String(ch.className || '');
+              return /\bflex-1\b|\boverflow-y-auto\b|\boverflow-hidden\b/.test(cls) || (ch.children && ch.children.length > 0);
+            }) ||
+            sibs[0] ||
+            null;
+          if (rightPane && rightPane.getAttribute && rightPane.getAttribute('data-settings-content-pane') !== 'true') {
+            const inner = rightPane.querySelector && rightPane.querySelector('[data-settings-content-pane="true"]');
+            if (inner && !(inner.contains && inner.contains(sidebar))) rightPane = inner;
+          }
+        }
+        if (!rightPane) {
+          let cursor = sidebar;
+          while (cursor && cursor !== dlg) {
+            const parent = cursor.parentElement;
+            if (!parent) break;
+            const sibs = Array.from(parent.children || []).filter(
+              (ch) => ch && ch !== cursor && !(ch.contains && ch.contains(sidebar)) && !isProtectedSettingsChild(ch)
+            );
+            if (sibs.length > 0) {
+              splitRow = parent;
+              rightPane = sibs[0];
+              break;
+            }
+            cursor = parent;
+          }
+        }
+
+        if (!navGroup || !rightPane) return null;
+        return { dlg, sidebar, navGroup, splitRow: splitRow || rightPane.parentElement, rightPane };
+      }
+
       function tryMountInSettingsModal() {
         if (disposed) return;
-        const sidebar = document.querySelector('[data-testid="settings-sidebar"]');
-        const dlg = sidebar ? sidebar.closest('.settings-modal-container') || sidebar.closest('[role="dialog"]') : null;
+        const targets = resolveSettingsModalTargets();
 
-        if (!dlg || !sidebar) {
+        if (!targets) {
           if (activeDlg) {
             activeDlg = null;
             if (activeSidebar && boundSidebarClick) {
@@ -1671,18 +2551,22 @@
           return;
         }
 
-        const listRoot = sidebar.firstElementChild;
-        const firstNavGroup =
-          listRoot &&
-          (Array.from(listRoot.children).find((el) => el.querySelector && el.querySelector('[data-testid^="settings-nav-item-"]')) ||
-            listRoot.children[1]);
-        const splitRow = sidebar.closest('.relative.flex.w-full.h-full') || (dlg.querySelector('.relative.flex.w-full.h-full'));
-        const rightPane = splitRow && splitRow.children && splitRow.children[1];
-        if (!firstNavGroup || !rightPane) return;
+        const { dlg, sidebar, navGroup: firstNavGroup, splitRow, rightPane } = targets;
 
         let justMounted = activeDlg !== dlg;
         activeDlg = dlg;
+        if (splitRow && splitRow.setAttribute) {
+          splitRow.setAttribute('data-ag-settings-split-row', '1');
+        }
         rightPane.setAttribute('data-ag-settings-right-pane', '1');
+
+        // Match native horizontal padding so our nav item aligns cleanly without indenting or stretching sidebar
+        let navGroupHasPadding = false;
+        try {
+          const cs = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(firstNavGroup) : null;
+          if (cs && parseFloat(cs.paddingLeft || '0') >= 4) navGroupHasPadding = true;
+        } catch {}
+        const padAttr = navGroupHasPadding ? '1' : '0';
 
         if (activeSidebar !== sidebar) {
           if (activeSidebar && boundSidebarClick) {
@@ -1695,7 +2579,7 @@
               setCodexTabOpen(false);
             }
           };
-          sidebar.addEventListener('click', boundSidebarClick, true);
+          listen(sidebar, 'click', boundSidebarClick, true);
         }
 
         let divider = document.getElementById('ag-settings-nav-divider');
@@ -1703,6 +2587,7 @@
           divider = document.createElement('div');
           divider.id = 'ag-settings-nav-divider';
         }
+        divider.setAttribute('data-ag-nav-padded', padAttr);
         if (divider.parentElement !== firstNavGroup) {
           firstNavGroup.appendChild(divider);
           justMounted = true;
@@ -1719,21 +2604,28 @@
           btn.setAttribute('data-testid', 'settings-nav-item-CodexTheme');
           btn.innerHTML =
             '<span class="ag-s-nav-left">' +
-            '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.85;flex-shrink:0" aria-hidden="true">' +
-            '<circle cx="8" cy="8" r="5.5"></circle>' +
-            '<path d="M8 2.5a5.5 5.5 0 0 0 0 11Z" fill="currentColor" stroke="none"></path>' +
+            '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.86;flex-shrink:0" aria-hidden="true">' +
+            '<path d="M2.25 4h2.5M8.25 4h5.5M2.25 8h7M12.75 8h1M2.25 12h4M9.75 12h4"></path>' +
+            '<circle cx="6.5" cy="4" r="1.5"></circle>' +
+            '<circle cx="11" cy="8" r="1.5"></circle>' +
+            '<circle cx="8" cy="12" r="1.5"></circle>' +
             '</svg>' +
             '<span class="ag-s-nav-label"></span>' +
             '</span>' +
             '<span class="ag-s-nav-ver"></span>';
-          btn.addEventListener('click', (ev) => {
+          navWrap.appendChild(btn);
+          justMounted = true;
+        }
+        const navBtn = document.getElementById('ag-settings-nav-btn');
+        if (navBtn && navBtn !== boundNavBtn) {
+          boundNavBtn = navBtn;
+          listen(navBtn, 'click', (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
             setCodexTabOpen(true);
           });
-          navWrap.appendChild(btn);
-          justMounted = true;
         }
+        navWrap.setAttribute('data-ag-nav-padded', padAttr);
         if (navWrap.parentElement !== firstNavGroup) {
           firstNavGroup.appendChild(navWrap);
           justMounted = true;
@@ -1743,8 +2635,11 @@
         if (!pane) {
           pane = document.createElement('div');
           pane.id = 'ag-settings-pane';
-          bindPaneEvents(pane);
           justMounted = true;
+        }
+        if (pane !== boundPane) {
+          boundPane = pane;
+          bindPaneEvents(pane);
         }
         if (pane.parentElement !== rightPane) {
           rightPane.appendChild(pane);
@@ -1815,7 +2710,7 @@
       if (observer && document.body) {
         observer.observe(document.body, { childList: true, subtree: true });
       }
-      document.addEventListener('click', onDocClick, true);
+      listen(document, 'click', onDocClick, true);
 
       tryMountInSettingsModal();
 
@@ -1827,7 +2722,13 @@
           if (saveBadgeTimer) clearTimeout(saveBadgeTimer);
           if (hoverSwitchTimer) clearTimeout(hoverSwitchTimer);
           if (observer) observer.disconnect();
-          document.removeEventListener('click', onDocClick, true);
+          if (abortCtrl) {
+            try { abortCtrl.abort(); } catch {}
+          }
+          for (let i = 0; i < manualRemovers.length; i++) {
+            try { manualRemovers[i](); } catch {}
+          }
+          manualRemovers.length = 0;
           if (activeSidebar && boundSidebarClick) {
             try { activeSidebar.removeEventListener('click', boundSidebarClick, true); } catch {}
           }
@@ -1837,8 +2738,9 @@
             document.getElementById('ag-settings-effort-menu')
           ];
           oldPopovers.forEach((el) => { if (el) el.remove(); });
-          // Preserve nav & pane nodes across hot-reloads only if modal is closed? Remove cleanly so new bundle re-mounts fresh with preserved __ag_settings_tab_open!
-          cleanupCodexSettingsDom();
+          // Keep #ag-settings-nav-* / #ag-settings-pane / data-ag-codex-settings-open intact across hot-reloads
+          // so the next bundle seamlessly re-binds in place with zero visual flicker.
+          // Full teardown when disabled is handled by 00-head.js (!ENABLED) and mountCodexSettingsUi().
           try { delete window.__ag_on_settings_state; } catch { window.__ag_on_settings_state = null; }
         });
       }

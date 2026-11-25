@@ -11,15 +11,15 @@ import { spawn } from 'node:child_process';
 import { ROOT_DIR } from './paths.mjs';
 
 export const UPDATE_REPO = Object.freeze({
-  owner: 'nkjDSLcvanv',
-  name: 'antigravity-codex-theme',
+  owner: 'XziXmn',
+  name: 'antigravity-theme',
   branch: 'main',
-  releaseApiUrl: 'https://api.github.com/repos/nkjDSLcvanv/antigravity-codex-theme/releases/latest',
-  repoUrl: 'https://github.com/nkjDSLcvanv/antigravity-codex-theme'
+  releaseApiUrl: 'https://api.github.com/repos/XziXmn/antigravity-theme/releases/latest',
+  repoUrl: 'https://github.com/XziXmn/antigravity-theme'
 });
 
 const SAFE_REL_PATH_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,180}$/;
-const TOP_LEVEL_SYNC_FILES = ['package.json', 'install.mjs', 'SKILL.md', 'README.md', 'LICENSE'];
+const TOP_LEVEL_SYNC_FILES = ['package.json', 'install.mjs', 'SKILL.md', 'README.md', 'UPSTREAMS.md', 'LICENSE'];
 
 export function buildRawGitHubUrl(relPath, ref = UPDATE_REPO.branch) {
   const cleanRef = String(ref || UPDATE_REPO.branch).trim();
@@ -304,6 +304,8 @@ export async function applyPluginUpdate({
         rel === 'shared.mjs' ||
         rel.startsWith('installer/') ||
         rel === 'daemon/paths.mjs' ||
+        rel === 'daemon/hook-runner.mjs' ||
+        rel === 'daemon/hooks-sync.mjs' ||
         rel === 'daemon/cdp-bridge.mjs' ||
         rel === 'daemon/cdp-relaunch.mjs' ||
         rel === 'daemon/updater.mjs' ||

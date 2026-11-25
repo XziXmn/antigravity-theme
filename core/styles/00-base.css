@@ -238,9 +238,9 @@ html[data-ag-preset] #antigravity\.agentSidePanelInputBox [data-testid="voice-li
   display: flex !important;
 }
 
-/* Sidebar, menus & dialogs typography */
-.bg-sidebar :is(a, button, [class*="truncate"], [class*="text-sm"], [class*="text-xs"]),
-aside :is(a, button) {
+/* Sidebar, menus & dialogs typography (scoped away from native Settings modal sidebar to prevent layout distortion) */
+.bg-sidebar:not([role="dialog"] *):not([data-testid="settings-sidebar"]) :is(a, button, [class*="truncate"], [class*="text-sm"], [class*="text-xs"]),
+aside:not([data-testid="settings-sidebar"]):not([role="dialog"] *) :is(a, button) {
   font-weight: 450 !important;
   letter-spacing: -0.012em !important;
   color: var(--ag-sidebar-fg, #171717) !important;

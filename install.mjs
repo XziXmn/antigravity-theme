@@ -38,6 +38,8 @@ import {
   uninstallSystemService
 } from './core/installer/service.mjs';
 import { checkForUpdates, applyPluginUpdate } from './core/daemon/updater.mjs';
+import { syncAgentLanguageRule } from './core/daemon/paths.mjs';
+import { syncSystemPromptAndHooks } from './core/daemon/hooks-sync.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -212,7 +214,7 @@ async function runInstall() {
       }
     }
 
-    for (const docFile of ['package.json', 'install.mjs', 'SKILL.md', 'README.md', 'LICENSE']) {
+    for (const docFile of ['package.json', 'install.mjs', 'SKILL.md', 'README.md', 'UPSTREAMS.md', 'LICENSE']) {
       const s = path.join(__dirname, docFile);
       const d = path.join(targetDir, docFile);
       if (fs.existsSync(s)) fs.copyFileSync(s, d);
@@ -237,6 +239,14 @@ async function runInstall() {
     currentCfg.preset = presetArg === 'codex-dark' || presetArg === 'onyx-dark' ? 'codex-dark' : 'codex-pure-white';
   } else if (currentCfg.preset !== 'codex-pure-white' && currentCfg.preset !== 'codex-dark') {
     currentCfg.preset = currentCfg.preset === 'onyx-dark' ? 'codex-dark' : 'codex-pure-white';
+  }
+  if (!currentCfg.i18nLocale) currentCfg.i18nLocale = 'zh-CN';
+  if (typeof currentCfg.syncAiOutputLang !== 'boolean') currentCfg.syncAiOutputLang = false;
+  if (!currentCfg.customSystemPrompt || typeof currentCfg.customSystemPrompt !== 'object') {
+    currentCfg.customSystemPrompt = { enabled: false, mode: 'rule', text: '' };
+  }
+  if (!currentCfg.hookAutoAllow || typeof currentCfg.hookAutoAllow !== 'object') {
+    currentCfg.hookAutoAllow = { enabled: false, mode: 'files' };
   }
   if (!currentCfg.telemetryLayout) currentCfg.telemetryLayout = 'compact';
   if (!currentCfg.telemetryCacheMode) currentCfg.telemetryCacheMode = 'session';
@@ -454,6 +464,8 @@ async function runUninstall() {
 
   uninstallSystemService(targetDir);
   removeCdpLaunchers();
+  syncAgentLanguageRule('en', false);
+  syncSystemPromptAndHooks({ enabled: false });
 
   if (fs.existsSync(userConfigPath) && fs.existsSync(realDaemon)) {
     try {
@@ -534,6 +546,19 @@ switch (subcommand) {
   case 'uninstall':
     await runUninstall();
     break;
+  case 'sync-i18n': {
+    const syncScript = path.join(__dirname, 'scripts', 'sync-i18n.mjs');
+    if (!fs.existsSync(syncScript)) {
+      console.error('[ERROR] Missing scripts/sync-i18n.mjs');
+      process.exit(1);
+    }
+    const syncMod = await import(pathToFileURL(syncScript).href);
+    const fromLocalDir = getArg('--from-local', '');
+    const dryRun = hasFlag('--dry-run');
+    const res = await syncMod.syncChineseLocales({ fromLocalDir, dryRun });
+    console.log(JSON.stringify(res, null, 2));
+    break;
+  }
   case 'sparse-paths': {
     const onlyArg = getArg('--only', getArg('--features', null));
     const withoutArg = getArg('--without', getArg('--skip', null));
@@ -556,6 +581,7 @@ switch (subcommand) {
   node install.mjs rollback
   node install.mjs uninstall
   node install.mjs sparse-paths   [--only theme,i18n,metrics,fixes,suggest] [--without <list>] [--json]
+  node install.mjs sync-i18n      [--from-local <refsDir>] [--dry-run]
   node install.mjs build-manifest
   node install.mjs pack`);
     break;

@@ -14,6 +14,7 @@
 
   const PATCH_VERSION = boot.version || '1.3.4';
   const ENABLED = boot.enabled !== false;
+  const I18N_LOCALE = boot.i18nLocale || 'zh-CN';
   const CSS_TEXT = boot.cssText || '';
   const CUSTOM_CSS_TEXT = boot.customCss || '';
   const THEME_VARS = boot.themeVars && typeof boot.themeVars === 'object' ? boot.themeVars : {};
@@ -34,7 +35,7 @@
 
   const DEFAULT_PRESET = boot.preset || 'codex-pure-white';
   const DEFAULT_EXCLUDE_I18N =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-row-history"] a[href^="/c/"], [data-testid="conversation-row-history"] span.truncate, [data-testid="conversation-navigator-turn"], #ag-live-metrics-pill, .ag-live-metrics-pill, #ag-live-metrics-tooltip, #ag-turn-metrics-tooltip, .ag-turn-metrics, .ag-prompt-ghost-overlay, .ag-prompt-ghost-text, .ag-prompt-ghost-kbd, #ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], [data-testid="user-message-bubble"], .agy-user-bubble, .agy-user-bubble-frame, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-row-history"] a[href^="/c/"], [data-testid="conversation-row-history"] span.truncate, [data-testid="side-question-row"], [data-testid="breadcrumb-segment"], [data-testid="subagent-node"], [data-testid="conversation-navigator-turn"], [data-agi18n-ignore="true"], #ag-live-metrics-pill, .ag-live-metrics-pill, #ag-live-metrics-tooltip, #ag-turn-metrics-tooltip, .ag-turn-metrics, .ag-prompt-ghost-overlay, .ag-prompt-ghost-text, .ag-prompt-ghost-kbd, #ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu';
 
   const SELECTORS = Object.assign(
     {
@@ -88,17 +89,17 @@
           origTextMap.delete(node);
         }
       }
-      const attrNames = ['title', 'placeholder', 'aria-label'];
+      const attrNames = ['title', 'placeholder', 'aria-label', 'data-tooltip-content'];
       const attrEls = root.querySelectorAll
         ? root.querySelectorAll(
-            '[data-ag-orig-title], [data-ag-orig-title-last], [data-ag-orig-placeholder], [data-ag-orig-placeholder-last], [data-ag-orig-aria-label], [data-ag-orig-aria-label-last]'
+            '[data-ag-orig-title], [data-ag-orig-title-last], [data-ag-orig-placeholder], [data-ag-orig-placeholder-last], [data-ag-orig-aria-label], [data-ag-orig-aria-label-last], [data-ag-orig-tooltip], [data-ag-orig-tooltip-last]'
           )
         : [];
       for (let i = 0; i < attrEls.length; i++) {
         const el = attrEls[i];
         for (let j = 0; j < attrNames.length; j++) {
           const attr = attrNames[j];
-          const origAttr = 'data-ag-orig-' + attr;
+          const origAttr = attr === 'data-tooltip-content' ? 'data-ag-orig-tooltip' : 'data-ag-orig-' + attr;
           const lastAttr = origAttr + '-last';
           if (el.hasAttribute(origAttr) || el.hasAttribute(lastAttr)) {
             const savedOrig = el.getAttribute(origAttr);
@@ -212,6 +213,7 @@
     document.querySelectorAll('.ag-turn-metrics, .ag-live-metrics-pill, .ag-prompt-ghost-overlay').forEach((el) => el.remove());
     document.querySelectorAll('[data-ag-has-suggestion]').forEach((el) => el.removeAttribute('data-ag-has-suggestion'));
     document.querySelectorAll('[data-ag-codex-settings-open]').forEach((el) => el.removeAttribute('data-ag-codex-settings-open'));
+    document.querySelectorAll('[data-ag-settings-split-row]').forEach((el) => el.removeAttribute('data-ag-settings-split-row'));
     document.querySelectorAll('[data-ag-settings-right-pane]').forEach((el) => el.removeAttribute('data-ag-settings-right-pane'));
     if (window.__ag_i18n_observer) {
       try { window.__ag_i18n_observer.disconnect(); } catch (e) {}
