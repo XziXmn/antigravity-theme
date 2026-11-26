@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-25T08:38:36.574Z",
+  "updatedAt": "2026-11-26T03:30:49.929Z",
   "upstreams": {
     "theme": {
       "id": "antigravity-codex-theme",
@@ -9,8 +9,8 @@
       "url": "https://github.com/nkjDSLcvanv/antigravity-codex-theme",
       "branch": "main",
       "license": "MIT",
-      "commit": "e3be59cbd5b5e75ea1ef6213e0c87e2aff2172fd",
-      "shortCommit": "e3be59c",
+      "commit": "8c5a353f322e442a60b09d343ad3d9add4b216d4",
+      "shortCommit": "8c5a353",
       "commitDate": "2026-11-25"
     },
     "langpack": {
@@ -25,10 +25,10 @@
         "zh-SG": "dict/base.zh-SG.json",
         "zh-TW": "dict/base.zh-TW.json"
       },
-      "commit": "f1cfa1ada975a4bc16d35f7487410b1665ad14fb",
-      "shortCommit": "f1cfa1a",
+      "commit": "9269daeeb18f52eb037619484280e76a6ef0457a",
+      "shortCommit": "9269dae",
       "commitDate": "2026-11-25",
-      "commitSubject": "perf(docs): compress lossless-source demo.gif for instant loading"
+      "commitSubject": "feat(v1.7.2): complete Swarm deep UI terms (2,125 entries), <80ms subframe attach & 2.35+ compatibility badges"
     },
     "zhLauncher": {
       "id": "antigravity-zh-launcher",
@@ -45,23 +45,35 @@
       "shortCommit": "dc9cac9",
       "commitDate": "2026-11-25",
       "commitSubject": "fix(cdp): re-inject after same-URL reload and redirect Windows app logs"
+    },
+    "chuanban": {
+      "id": "chuanban-antigravity-theme-patch",
+      "role": "inspiration-and-research",
+      "repo": "Anarcadia/chuanban-antigravity-theme-patch",
+      "url": "https://github.com/Anarcadia/chuanban-antigravity-theme-patch",
+      "branch": "main",
+      "license": "MIT",
+      "commit": "73dc3e92827897e35b5a84cf2eb99be8dd1e449e",
+      "shortCommit": "73dc3e9",
+      "commitDate": "2026-11-26",
+      "commitSubject": "docs(changelog): document R2/GitHub mirrors, Feishu CN fallback & English lightweight repo in v6.0.4"
     }
   },
   "locales": {
     "zh-CN": {
       "file": "core/i18n/zh-CN.json",
-      "entries": 2311,
-      "sha256": "6a3fec944b9629766e95b7c021959146e437961fc6956ba4a4608b4f98d4875f"
+      "entries": 2362,
+      "sha256": "304f91ca88a8ab857e8c35edce5a93f371c46fcb6220ed1e1450189a6d1d733d"
     },
     "zh-SG": {
       "file": "core/i18n/zh-SG.json",
-      "entries": 2293,
-      "sha256": "d5d01ff293fa7fa788c779f9dc486a49b087e1f8f0b9622bd17ae6b54de7fd2a"
+      "entries": 2344,
+      "sha256": "baee50e73f9eb8bc8ca5a0e904b5e1ede109f6bb0ae9fe8ca176ed74468734be"
     },
     "zh-TW": {
       "file": "core/i18n/zh-TW.json",
-      "entries": 2311,
-      "sha256": "10fc8042dfa536a1451db048ec30caa7f5d2b269f0e208338993edc77396418d"
+      "entries": 2362,
+      "sha256": "3adc6d45b3d17d5e79b19d048f830f619f400d69865d0273ad0b58eaf47e01f1"
     }
   }
 }

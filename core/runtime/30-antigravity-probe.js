@@ -12,6 +12,7 @@
       .trim();
     s = s
       .replace(/,\s*(?:Model\s+cannot\s+be\s+changed|Cannot\s+be\s+changed|Disabled|Locked)[\s\S]*$/i, '')
+      .replace(/(?:[.,]\s*|\s*[（(]\s*)(?:Applies\s+to\b|对(?:本轮|支线))[^）)]*[）)]?\s*$/i, '')
       .replace(
         /\s*[（(]\s*(?:Model\s+cannot\s+be\s+changed|Cannot\s+be\s+changed|智能体运行期间无法切换模型|会话中途无法更改)[^）)]*[）)]\s*$/i,
         ''

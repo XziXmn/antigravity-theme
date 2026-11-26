@@ -47,8 +47,20 @@ test('Part 30 helpers normalize model labels, detect superseded step errors, and
     'Gemini 4 Neon Extra High'
   );
   assert.equal(
+    cleanModelLabel('Model, current: Gemini 4 Neon Extra High. Applies to messages sent after this turn'),
+    'Gemini 4 Neon Extra High'
+  );
+  assert.equal(
     cleanModelLabel('模型，当前：Gemini 4 Neon Extra High（智能体运行期间无法切换模型）'),
     'Gemini 4 Neon Extra High'
+  );
+  assert.equal(
+    cleanModelLabel('模型，当前：Gemini 4 Neon Extra High（对本轮之后发送的消息生效）'),
+    'Gemini 4 Neon Extra High'
+  );
+  assert.equal(
+    normalizeModelMatchKey('Gemini 4 Neon Extra High. Applies to messages sent after this turn'),
+    normalizeModelMatchKey('Gemini 4 Neon (Extra High)')
   );
   assert.equal(
     normalizeModelMatchKey('Gemini 4 Neon Extra High, Model cannot be changed while the agent is running'),

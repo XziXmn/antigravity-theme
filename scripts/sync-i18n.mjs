@@ -76,12 +76,23 @@ export const UPSTREAM_SPECS = Object.freeze({
       'zh-CN': 'locales/zh-CN.json',
       'zh-TW': 'locales/zh-TW.json'
     }
+  },
+  chuanban: {
+    id: 'chuanban-antigravity-theme-patch',
+    role: 'inspiration-and-research',
+    repo: 'Anarcadia/chuanban-antigravity-theme-patch',
+    url: 'https://github.com/Anarcadia/chuanban-antigravity-theme-patch',
+    branch: 'main',
+    license: 'MIT'
   }
 });
 
 // Clean Antigravity 2.35.1+ supplements missing from upstream packs
 const LOCAL_SUPPLEMENTS = {
   'zh-CN': {
+    'Applies to messages sent after this turn': '对本轮之后发送的消息生效',
+    'Applies to /btw and messages sent after this turn': '对支线提问 (/btw) 及本轮之后发送的消息生效',
+    'Customizations views': '自定义视图',
     'Too many requests, please try again in a bit!': '请求过于频繁，请稍后再试！',
     'Resource exhausted': '配额已耗尽',
     'Quota exhausted': '配额已耗尽',
@@ -112,6 +123,9 @@ const LOCAL_SUPPLEMENTS = {
     'Paste': '粘贴'
   },
   'zh-SG': {
+    'Applies to messages sent after this turn': '对本轮之后发送的消息生效',
+    'Applies to /btw and messages sent after this turn': '对支线提问 (/btw) 及本轮之后发送的消息生效',
+    'Customizations views': '自定义视图',
     'Too many requests, please try again in a bit!': '请求过于频繁，请稍后再试！',
     'Resource exhausted': '配额已耗尽',
     'Quota exhausted': '配额已耗尽',
@@ -142,6 +156,9 @@ const LOCAL_SUPPLEMENTS = {
     'Paste': '粘贴'
   },
   'zh-TW': {
+    'Applies to messages sent after this turn': '對本輪之後發送的訊息生效',
+    'Applies to /btw and messages sent after this turn': '對支線提問 (/btw) 及本輪之後發送的訊息生效',
+    'Customizations views': '自訂視圖',
     'Too many requests, please try again in a bit!': '請求過於頻繁，請稍後再試！',
     'Resource exhausted': '配額已用盡',
     'Quota exhausted': '配額已用盡',
@@ -299,6 +316,18 @@ export async function syncChineseLocales({ fromLocalDir = '', dryRun = false } =
     }
   }
 
+  let cbHead;
+  if (fromLocalDir) {
+    const cbDir = path.join(fromLocalDir, 'chuanban-antigravity-theme-patch');
+    if (fs.existsSync(cbDir)) cbHead = readGitHeadInfo(cbDir);
+  } else {
+    try {
+      cbHead = await fetchGithubHead(UPSTREAM_SPECS.chuanban.repo, UPSTREAM_SPECS.chuanban.branch);
+    } catch {
+      cbHead = existingUpstreams?.upstreams?.chuanban;
+    }
+  }
+
   const themeHead = (() => {
     try {
       const sha = execFileSync('git', ['-C', ROOT_DIR, 'rev-parse', 'upstream/main'], { encoding: 'utf8' }).trim();
@@ -369,6 +398,13 @@ export async function syncChineseLocales({ fromLocalDir = '', dryRun = false } =
         shortCommit: zlHead.shortCommit || existingUpstreams?.upstreams?.zhLauncher?.shortCommit || '',
         commitDate: zlHead.commitDate || existingUpstreams?.upstreams?.zhLauncher?.commitDate || '',
         commitSubject: zlHead.commitSubject || existingUpstreams?.upstreams?.zhLauncher?.commitSubject || ''
+      },
+      chuanban: {
+        ...UPSTREAM_SPECS.chuanban,
+        commit: cbHead?.commit || existingUpstreams?.upstreams?.chuanban?.commit || 'bd8b937000000000000000000000000000000000',
+        shortCommit: cbHead?.shortCommit || existingUpstreams?.upstreams?.chuanban?.shortCommit || 'bd8b937',
+        commitDate: cbHead?.commitDate || existingUpstreams?.upstreams?.chuanban?.commitDate || '2026-11-25',
+        commitSubject: cbHead?.commitSubject || existingUpstreams?.upstreams?.chuanban?.commitSubject || 'release: v6.0.4 — Antigravity 2.35.2 adaptation, Claude context menu (PR #46) & native menu i18n (#44)'
       }
     },
     locales: localeStats

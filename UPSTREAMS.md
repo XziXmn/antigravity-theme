@@ -9,6 +9,7 @@
 | **主题与核心框架上游** | [nkjDSLcvanv/antigravity-codex-theme](https://github.com/nkjDSLcvanv/antigravity-codex-theme) | MIT | Codex 昼夜主题、CDP 守护进程架构、四态状态机与用量面板、SSH Remote 只读统计、输入预测及嵌入式设置面板 |
 | **中文系主词库上游** | [CHANPAJN/antigravity-langpack](https://github.com/CHANPAJN/antigravity-langpack) | **GPL-3.0** | 现代简体中文（`zh-CN`）、保留英文技术术语简中（`zh-SG`）、繁體中文（`zh-TW`）高覆盖率词典、翻译规范与 AI 思考/回复语言联动规则思路 |
 | **补充词库与隔离规则上游** | [guuguo/antigravity-zh-launcher](https://github.com/guuguo/antigravity-zh-launcher) | MIT | 通用 IDE 菜单补充词条（`zh-CN` / `zh-TW`）、首页欢迎语动态模板、文件动作动词模板、`data-tooltip-content` 翻译、精细聊天正文 DOM 防误伤规则与 AI 中文全链路提示词思路 |
+| **灵感与早期调研上游** | [Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) | MIT | CDP 运行时注入原理、原生西文字体桥接、多进程 SingletonLock 互斥、Antigravity 2.35.2 动态模型状态提示词拆分启发 |
 
 ## 2. 开源协议说明
 

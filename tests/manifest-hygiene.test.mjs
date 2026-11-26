@@ -53,6 +53,7 @@ test('core/i18n.json and zh-CN/zh-SG/zh-TW packs are valid JSON with clean local
   assert.equal(upstreams.upstreams.langpack.repo, 'CHANPAJN/antigravity-langpack');
   assert.equal(upstreams.upstreams.zhLauncher.repo, 'guuguo/antigravity-zh-launcher');
   assert.equal(upstreams.upstreams.theme.repo, 'nkjDSLcvanv/antigravity-codex-theme');
+  assert.equal(upstreams.upstreams.chuanban.repo, 'Anarcadia/chuanban-antigravity-theme-patch');
 });
 
 test('Assembled runtime JS and CSS parts pass syntax validation and define Codex presets', () => {
@@ -135,11 +136,12 @@ test('Repository contains zero upstream branding, removed warm presets, or Drive
     const rel = path.relative(ROOT_DIR, full).replace(/\\/g, '/');
     if (rel === 'tests/manifest-hygiene.test.mjs' || rel.startsWith('assets/')) continue;
     const text = fs.readFileSync(full, 'utf8');
-    // Allow explicit upstream attribution only inside README.md while keeping code/configs/scripts clean
-    const scopedForbidden =
-      rel === 'README.md'
-        ? forbiddenPatterns.filter((p) => String(p) !== '/chuanban/i' && String(p) !== '/anarcadia/i')
-        : forbiddenPatterns;
+    // Allow explicit upstream attribution only inside README, UPSTREAMS and sync metadata while keeping runtime code/styles clean
+    const isAttributionFile =
+      rel === 'README.md' || rel === 'UPSTREAMS.md' || rel === 'core/upstreams.json' || rel === 'scripts/sync-i18n.mjs';
+    const scopedForbidden = isAttributionFile
+      ? forbiddenPatterns.filter((p) => String(p) !== '/chuanban/i' && String(p) !== '/anarcadia/i')
+      : forbiddenPatterns;
     for (const pat of scopedForbidden) {
       if (pat.test(text)) {
         violations.push({ file: rel, pattern: String(pat) });

@@ -105,20 +105,20 @@
       "bytes": 7042
     },
     "i18n.json": {
-      "sha256": "6a3fec944b9629766e95b7c021959146e437961fc6956ba4a4608b4f98d4875f",
-      "bytes": 164879
+      "sha256": "304f91ca88a8ab857e8c35edce5a93f371c46fcb6220ed1e1450189a6d1d733d",
+      "bytes": 167535
     },
     "i18n/zh-CN.json": {
-      "sha256": "6a3fec944b9629766e95b7c021959146e437961fc6956ba4a4608b4f98d4875f",
-      "bytes": 164879
+      "sha256": "304f91ca88a8ab857e8c35edce5a93f371c46fcb6220ed1e1450189a6d1d733d",
+      "bytes": 167535
     },
     "i18n/zh-SG.json": {
-      "sha256": "d5d01ff293fa7fa788c779f9dc486a49b087e1f8f0b9622bd17ae6b54de7fd2a",
-      "bytes": 161512
+      "sha256": "baee50e73f9eb8bc8ca5a0e904b5e1ede109f6bb0ae9fe8ca176ed74468734be",
+      "bytes": 164177
     },
     "i18n/zh-TW.json": {
-      "sha256": "10fc8042dfa536a1451db048ec30caa7f5d2b269f0e208338993edc77396418d",
-      "bytes": 166145
+      "sha256": "3adc6d45b3d17d5e79b19d048f830f619f400d69865d0273ad0b58eaf47e01f1",
+      "bytes": 168822
     },
     "installer/cdp-launch.mjs": {
       "sha256": "6685ab162b5c8bfc6a6f9909d9646d257f7978d40337d71390e05c59f598f51d",
@@ -153,8 +153,8 @@
       "bytes": 6481
     },
     "runtime/30-antigravity-probe.js": {
-      "sha256": "658bacc6649f47059af2a54a158bf5a03169428ee5c8f0b51262989d8900d5e1",
-      "bytes": 9035
+      "sha256": "ff5a520c7025937ba8623e1ad35d761364d931c5917369b773c97e168cd8eece",
+      "bytes": 9141
     },
     "runtime/40-status-machine.js": {
       "sha256": "a7e942771d6cc41982e44f5b9849dbd99b0f4d5153ede54710f5beece4fb12d6",
@@ -165,8 +165,8 @@
       "bytes": 75195
     },
     "runtime/60-i18n-engine.js": {
-      "sha256": "6b6b0254829a70d11d89f2899fc691325d190892468a3e361b43bed875f364de",
-      "bytes": 63873
+      "sha256": "ae79f9d072dc74a5010dce84619a63648f792a98e61683c41bfd28b715a5e49f",
+      "bytes": 64389
     },
     "runtime/70-prompt-suggestions.js": {
       "sha256": "ec3967100ca7f28c1e59073e8294f80bc432dc45414469946197a6a3e344e545",
@@ -217,8 +217,8 @@
       "bytes": 5463
     },
     "upstreams.json": {
-      "sha256": "bb461d3e9ad6f734c393f8618da1fcedf63d939c530bb1319b45eada7238adc5",
-      "bytes": 2221
+      "sha256": "9606a47d7719e2ee048d24bfe6e7aa2b47a51e6665cc52264d64b4b446230f26",
+      "bytes": 2819
     }
   }
 }

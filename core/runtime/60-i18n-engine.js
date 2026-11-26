@@ -1154,13 +1154,23 @@
       if (mModel) {
         let mName = mModel[1].trim();
         let noteZh = '';
-        const commaIdx = mName.indexOf(', ');
-        if (commaIdx > 0) {
-          const maybeNote = mName.slice(commaIdx + 2).trim();
-          const noteHit = lookupRawDict(maybeNote);
-          if (typeof noteHit === 'string' && noteHit) {
-            mName = mName.slice(0, commaIdx).trim();
-            noteZh = '（' + noteHit + '）';
+        const mNoteSplit = mName.match(
+          /^(.+?)(?:\.\s+(Applies to\b.*)$|,\s+(Model cannot be changed\b.*|[A-Z].*)$)/i
+        );
+        if (mNoteSplit) {
+          mName = mNoteSplit[1].trim();
+          const rawTailNote = (mNoteSplit[2] || mNoteSplit[3] || '').trim().replace(/\.$/, '');
+          const noteHit = lookupRawDict(rawTailNote) || computeTextTranslation(rawTailNote, el) || rawTailNote;
+          if (noteHit) noteZh = '（' + noteHit + '）';
+        } else {
+          const commaIdx = mName.indexOf(', ');
+          if (commaIdx > 0) {
+            const maybeNote = mName.slice(commaIdx + 2).trim();
+            const noteHit = lookupRawDict(maybeNote);
+            if (typeof noteHit === 'string' && noteHit) {
+              mName = mName.slice(0, commaIdx).trim();
+              noteZh = '（' + noteHit + '）';
+            }
           }
         }
         if (mName === 'Select model') return L.ariaModelCur + L.ariaSelectModel + noteZh;
