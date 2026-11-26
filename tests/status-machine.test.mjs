@@ -20,13 +20,14 @@ function loadPureRuntimeHelpers() {
     part30 +
       '\n' +
       part40 +
-      '\nthis.__exports = { normalizeModelMatchKey, isSupersededStepError, selectBestLoadingText, WAIT_DEFAULTS, fmtWaitDuration, isUserCancelError, escapeStatusHtml, computeStatusSnapshot };',
+      '\nthis.__exports = { cleanModelLabel, normalizeModelMatchKey, isSupersededStepError, selectBestLoadingText, WAIT_DEFAULTS, fmtWaitDuration, isUserCancelError, escapeStatusHtml, computeStatusSnapshot };',
     ctx
   );
   return ctx.__exports;
 }
 
 const {
+  cleanModelLabel,
   normalizeModelMatchKey,
   isSupersededStepError,
   selectBestLoadingText,
@@ -41,6 +42,18 @@ test('Part 30 helpers normalize model labels, detect superseded step errors, and
   assert.equal(normalizeModelMatchKey('Gemini 4 Hydrogen Extra'), normalizeModelMatchKey('Gemini 4 Hydrogen (XHigh)'));
   assert.equal(normalizeModelMatchKey('Gemini 4 Neon Extra High'), normalizeModelMatchKey('Gemini 4 Neon (XHigh)'));
   assert.equal(normalizeModelMatchKey('Gemini 4 Neon Extra High'), normalizeModelMatchKey('Gemini 4 Neon (Extra High)'));
+  assert.equal(
+    cleanModelLabel('Model, current: Gemini 4 Neon Extra High, Model cannot be changed while the agent is running'),
+    'Gemini 4 Neon Extra High'
+  );
+  assert.equal(
+    cleanModelLabel('模型，当前：Gemini 4 Neon Extra High（智能体运行期间无法切换模型）'),
+    'Gemini 4 Neon Extra High'
+  );
+  assert.equal(
+    normalizeModelMatchKey('Gemini 4 Neon Extra High, Model cannot be changed while the agent is running'),
+    normalizeModelMatchKey('Gemini 4 Neon (Extra High)')
+  );
   assert.equal(
     isSupersededStepError({
       lastStepType: 15,
@@ -129,17 +142,18 @@ test('Waiting >= 60s transitions to amber slow pulse and notes model switch cold
   assert.ok(snap.noteHtml.includes('Gemini 4 Hydrogen (Extra High)'));
   assert.ok(snap.noteHtml.includes('Gemini 4 Carbon (Medium)'));
 
-  // Same model with Extra High vs legacy (XHigh) label must NOT trigger false model-switch warning
+  // Same model with Extra High vs legacy (XHigh) label and Antigravity 2.35.1 running-state aria suffix must NOT trigger false model-switch warning
   const sameModelSnap = computeStatusSnapshot({
     now: NOW,
     st: { pendingKind: 'llm', lastModelLabel: 'Gemini 4 Neon (XHigh)' },
     live: { matched: true, hasProvider: true, hasTrajectory: true, effRunStatus: 2 },
     waitSec: 120,
     lastHb: NOW - 1000,
-    curModel: 'Gemini 4 Neon Extra High'
+    curModel: 'Gemini 4 Neon Extra High, Model cannot be changed while the agent is running'
   });
   assert.equal(sameModelSnap.visualState, 'slow');
-  assert.ok(!sameModelSnap.noteHtml.includes('模型已切换'), 'Extra High and (XHigh) must match as the same model');
+  assert.ok(!sameModelSnap.noteHtml.includes('模型已切换'), 'Extra High + running-state suffix must match as the same model');
+  assert.ok(!sameModelSnap.noteHtml.includes('Model cannot be changed'), 'running-state suffix must never leak into tooltip');
   assert.ok(sameModelSnap.noteHtml.includes('长上下文预填充或后端排队耗时较长'));
 });
 

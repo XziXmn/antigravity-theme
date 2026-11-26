@@ -3,8 +3,29 @@
  * Pure helpers (isSupersededStepError, selectBestLoadingText, normalizeModelMatchKey)
  * have no DOM dependencies so unit tests can import/evaluate this file cleanly.
  */
+  function cleanModelLabel(raw) {
+    let s = String(raw || '').trim();
+    if (!s) return '';
+    s = s
+      .replace(/^(?:Select model|Model(?:\s+selector)?)(?:,\s*current)?:\s*/i, '')
+      .replace(/^模型(?:选择器)?(?:[，,]\s*当前)?[：:]\s*/, '')
+      .trim();
+    s = s
+      .replace(/,\s*(?:Model\s+cannot\s+be\s+changed|Cannot\s+be\s+changed|Disabled|Locked)[\s\S]*$/i, '')
+      .replace(
+        /\s*[（(]\s*(?:Model\s+cannot\s+be\s+changed|Cannot\s+be\s+changed|智能体运行期间无法切换模型|会话中途无法更改)[^）)]*[）)]\s*$/i,
+        ''
+      )
+      .replace(/\s*,\s*[^,]+$/i, (m) =>
+        /(?:cannot|while|running|disabled|locked|unavailable|无法|运行期间)/i.test(m) ? '' : m
+      )
+      .trim();
+    if (/^(?:Select model|选择模型)$/i.test(s)) return '';
+    return s;
+  }
+
   function normalizeModelMatchKey(label) {
-    return String(label || '')
+    return cleanModelLabel(label)
       .toLowerCase()
       .replace(/\(\s*extra[\s_-]*high\s*\)|\bextra[\s_-]*high\b/g, 'extrahigh')
       .replace(/\(\s*x[\s_-]*high\s*\)|\bx[\s_-]*high\b/g, 'extrahigh')
@@ -52,16 +73,23 @@
         let f = el[fk];
         for (let i = 0; i < 6 && f; i++, f = f.return) {
           const al = f.memoizedProps && f.memoizedProps['aria-label'];
-          if (typeof al === 'string' && /Model selector|Select model/i.test(al)) {
-            return al.replace(/^(?:Select model|Model(?:\s+selector)?)(?:,\s*current)?:\s*/i, '').trim();
+          if (typeof al === 'string' && /^(?:Select model|Model(?:\s+selector)?)(?:,\s*current)?:/i.test(al)) {
+            const cleaned = cleanModelLabel(al);
+            if (cleaned) return cleaned;
           }
         }
       }
       const origAl = el.getAttribute('data-ag-orig-aria-label');
       if (origAl) {
-        return origAl.replace(/^(?:Select model|Model(?:\s+selector)?)(?:,\s*current)?:\s*/i, '').trim();
+        const cleaned = cleanModelLabel(origAl);
+        if (cleaned) return cleaned;
       }
-      return String(el.innerText || '').trim();
+      const curAl = el.getAttribute('aria-label');
+      if (curAl) {
+        const cleaned = cleanModelLabel(curAl);
+        if (cleaned) return cleaned;
+      }
+      return cleanModelLabel(el.innerText || '');
     } catch {
       return '';
     }

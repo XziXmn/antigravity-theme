@@ -43,8 +43,21 @@
       .replace(/'/g, '&#39;');
   }
 
+  function _fallbackCleanModelLabel(raw) {
+    return String(raw || '')
+      .trim()
+      .replace(/^(?:Select model|Model(?:\s+selector)?)(?:,\s*current)?:\s*/i, '')
+      .replace(/^模型(?:选择器)?(?:[，,]\s*当前)?[：:]\s*/, '')
+      .replace(/,\s*(?:Model\s+cannot\s+be\s+changed|Cannot\s+be\s+changed|Disabled|Locked)[\s\S]*$/i, '')
+      .replace(
+        /\s*[（(]\s*(?:Model\s+cannot\s+be\s+changed|Cannot\s+be\s+changed|智能体运行期间无法切换模型|会话中途无法更改)[^）)]*[）)]\s*$/i,
+        ''
+      )
+      .trim();
+  }
+
   function _fallbackNormalizeModelKey(label) {
-    return String(label || '')
+    return _fallbackCleanModelLabel(label)
       .toLowerCase()
       .replace(/\(\s*extra[\s_-]*high\s*\)|\bextra[\s_-]*high\b/g, 'extrahigh')
       .replace(/\(\s*x[\s_-]*high\s*\)|\bx[\s_-]*high\b/g, 'extrahigh')
@@ -53,8 +66,8 @@
   }
 
   function _formatDisplayModelLabel(label) {
-    return String(label || '')
-      .trim()
+    const cleanFn = typeof cleanModelLabel === 'function' ? cleanModelLabel : _fallbackCleanModelLabel;
+    return cleanFn(label)
       .replace(/\(\s*(?:x[\s_-]*high|extra[\s_-]*high)\s*\)/gi, '(Extra High)')
       .replace(/\bx[\s_-]*high\b/gi, 'Extra High');
   }

@@ -23,12 +23,12 @@
   <img src="https://img.shields.io/static/v1?label=Antigravity&message=2.30.x%20~%202.35.1%2B&color=2B7FFF&labelColor=363636" alt="Antigravity 2.30.x ~ 2.35.1+">
   <img src="https://img.shields.io/static/v1?label=Node.js&message=%3E%3D%2022.13.0&color=339933&labelColor=363636&logo=nodedotjs&logoColor=white" alt="Node.js >= 22.13.0">
   <img src="https://img.shields.io/static/v1?label=platform&message=macOS%20%C2%B7%20Windows%20%C2%B7%20Linux&color=4B5563&labelColor=363636" alt="macOS · Windows · Linux">
-  <img src="https://img.shields.io/static/v1?label=version&message=v1.3.4&color=2B7FFF&labelColor=363636" alt="version v1.3.4">
+  <img src="https://img.shields.io/static/v1?label=version&message=v1.3.5&color=2B7FFF&labelColor=363636" alt="version v1.3.5">
   <a href="LICENSE"><img src="https://img.shields.io/static/v1?label=license&message=GPL--3.0&color=10B981&labelColor=363636" alt="GPL-3.0 License"></a>
 </p>
 
 <p>
-  <a href="#命令行安装"><img src="https://img.shields.io/static/v1?label=CLI%20INSTALL&message=v1.3.4&color=2B7FFF&style=for-the-badge&labelColor=181818&logo=gnubash&logoColor=white" alt="CLI Install"></a>
+  <a href="#命令行安装"><img src="https://img.shields.io/static/v1?label=CLI%20INSTALL&message=v1.3.5&color=2B7FFF&style=for-the-badge&labelColor=181818&logo=gnubash&logoColor=white" alt="CLI Install"></a>
   <a href="#ai-一键安装"><img src="https://img.shields.io/static/v1?label=AI%20ONE-CLICK&message=SKILL.md&color=0D9488&style=for-the-badge&labelColor=181818&logo=googlegemini&logoColor=white" alt="AI One-Click Install"></a>
   <a href="#按需安装"><img src="https://img.shields.io/static/v1?label=SELECTIVE%20INSTALL&message=--only&color=6366F1&style=for-the-badge&labelColor=181818&logo=codesandbox&logoColor=white" alt="Selective Install"></a>
 </p>

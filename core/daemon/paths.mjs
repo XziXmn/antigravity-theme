@@ -98,7 +98,7 @@ export const I18N_DIR = path.join(CORE_DIR, 'i18n');
 export const STYLES_DIR = path.join(CORE_DIR, 'styles');
 export const RUNTIME_DIR = path.join(CORE_DIR, 'runtime');
 export const USER_DIR = path.join(ROOT_DIR, 'user');
-export const BASE_VERSION = '1.3.4';
+export const BASE_VERSION = '1.3.5';
 
 export const SUPPORTED_I18N_LOCALES = Object.freeze(['zh-CN', 'zh-SG', 'zh-TW', 'en']);
 export const AI_LANG_RULE_FILENAME = '99_antigravity_codex_lang.md';

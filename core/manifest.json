@@ -1,6 +1,6 @@
 {
   "name": "antigravity-codex-theme",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "minNodeVersion": "22.13.0",
   "fullMetricsNodeVersion": "22.13.0",
   "files": {
@@ -37,7 +37,7 @@
       "bytes": 2123
     },
     "daemon/paths.mjs": {
-      "sha256": "757ca2b231caeb3c987691a1b6b280fcef5baf192709f3eadc02001b0ef15fee",
+      "sha256": "4aee59a2fb48ed0bc5431f35cb7f752a463f61ec3ca21663bc3236e231a3a6fc",
       "bytes": 28253
     },
     "daemon/prompt-suggest.mjs": {
@@ -121,7 +121,7 @@
       "bytes": 166145
     },
     "installer/cdp-launch.mjs": {
-      "sha256": "5328ebb67558bc67df6d4ce973987bfd146039a79b358e9bd90844d86247e254",
+      "sha256": "6685ab162b5c8bfc6a6f9909d9646d257f7978d40337d71390e05c59f598f51d",
       "bytes": 28826
     },
     "installer/env.mjs": {
@@ -141,7 +141,7 @@
       "bytes": 20363
     },
     "runtime/00-head.js": {
-      "sha256": "4b0f5ecf55e9d66800cd0988f2f3e0e73ac208e8de70e11d366fa032726dc9fd",
+      "sha256": "d72ce7af5b0282d5f5c7cfdde067419e0c12644dbb37c06fb058c92a3372ab64",
       "bytes": 13751
     },
     "runtime/10-guards.js": {
@@ -153,12 +153,12 @@
       "bytes": 6481
     },
     "runtime/30-antigravity-probe.js": {
-      "sha256": "9847c4ec37e79ba5fd81c19f4ad680ef5db8f674014afd22f1523a260a199149",
-      "bytes": 8037
+      "sha256": "658bacc6649f47059af2a54a158bf5a03169428ee5c8f0b51262989d8900d5e1",
+      "bytes": 9035
     },
     "runtime/40-status-machine.js": {
-      "sha256": "1692f0b2a222f624f4bf0811f58ef63a3647343f40bb29ffd902adc431dcf1b5",
-      "bytes": 12471
+      "sha256": "a7e942771d6cc41982e44f5b9849dbd99b0f4d5153ede54710f5beece4fb12d6",
+      "bytes": 13135
     },
     "runtime/50-telemetry-ui.js": {
       "sha256": "f4d6b428f8bb07c258ee9385b0c0d79974d6dbd3c73a6e8a5a92ca9767e714c4",
