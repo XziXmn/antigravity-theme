@@ -194,6 +194,396 @@
     } catch (e) {}
   }
 
+  function syncTooltipFlowOverlay(tt, paneKey) {
+    if (!tt) return;
+    const wrap = tt.querySelector('.ag-tt-wrap');
+    if (!wrap) return;
+    let bar = wrap.querySelector('.ag-tt-flow-bar');
+    if (!MODULES.flow) {
+      if (bar) bar.remove();
+      return;
+    }
+    const cache = window.__ag_flow_status_state;
+    const pk = paneKey === 'side' ? 'side' : 'main';
+    const paneSt = (cache && cache.panes && cache.panes[pk]) || {
+      mode: (boot.flow && boot.flow.defaultMode) || 'default',
+      runtime: null
+    };
+    const proxy = (cache && cache.proxy) || { running: false, port: (boot.flow && boot.flow.port) || 18100 };
+    const asar = (cache && cache.asar) || { found: false, patched: false };
+
+    const loc = I18N_LOCALE || 'zh-CN';
+    const isEn = loc === 'en';
+    const isTw = loc === 'zh-TW';
+    const modeMap = isEn
+      ? { default: 'Default', writing: 'Writing', engineering: 'Eng', full: 'Full' }
+      : isTw
+      ? { default: '預設', writing: '寫作', engineering: '工程', full: '全面' }
+      : { default: '默认', writing: '写作', engineering: '工程', full: '全面' };
+    const modeLabel = modeMap[paneSt.mode] || modeMap.default;
+
+    const relayText = proxy.running
+      ? (isEn ? 'Relay :' : isTw ? '轉發 :' : '转发 :') +
+        proxy.port +
+        ' · ' +
+        (asar.patched
+          ? isEn ? 'Active' : isTw ? '已接管' : '已接管'
+          : isEn ? 'Direct' : isTw ? '未接管' : '未接管')
+      : isEn ? 'Relay Off' : isTw ? '轉發未啟' : '转发未启';
+
+    const detail = paneSt.runtime && paneSt.runtime.lastDetail ? String(paneSt.runtime.lastDetail) : '';
+    const msStr = paneSt.runtime && paneSt.runtime.ms ? ' · ' + (paneSt.runtime.ms / 1000).toFixed(1) + 's' : '';
+    const lastText =
+      (isEn ? 'Last: ' : isTw ? '上輪：' : '上轮：') +
+      (detail ? detail + msStr : isEn ? 'Idle' : isTw ? '待命' : '待命');
+
+    const v = (paneSt.runtime && paneSt.runtime.lastVerdict) || '';
+    const tone =
+      v === 'refused' || v === 'blocked'
+        ? 'is-err'
+        : v === 'continued' || v === 'staged' || v === 'empty'
+        ? 'is-warn'
+        : proxy.running && paneSt.mode !== 'default'
+        ? 'is-ok'
+        : 'is-idle';
+
+    const nextSig = modeLabel + '|' + relayText + '|' + lastText + '|' + tone;
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'ag-tt-flow-bar';
+      const footer = wrap.querySelector('.ag-tt-footer');
+      if (footer) {
+        wrap.insertBefore(bar, footer);
+      } else {
+        wrap.appendChild(bar);
+      }
+    }
+    if (bar.getAttribute('data-ag-flow-sig') !== nextSig) {
+      bar.setAttribute('data-ag-flow-sig', nextSig);
+      bar.innerHTML =
+        '<span class="ag-tt-flow-left">' +
+        '<span class="ag-tt-flow-dot ' +
+        tone +
+        '"></span>' +
+        '<span class="ag-tt-flow-mode">' +
+        escapeStatusHtml(modeLabel) +
+        '</span>' +
+        '<span class="ag-tt-flow-relay">' +
+        escapeStatusHtml(relayText) +
+        '</span>' +
+        '</span>' +
+        '<span class="ag-tt-flow-last">' +
+        escapeStatusHtml(lastText) +
+        '</span>';
+    }
+  }
+
+  window.__ag_refresh_telemetry_flow = function () {
+    const tt = document.getElementById('ag-live-metrics-tooltip');
+    if (!tt) return;
+    syncTooltipQuotaOverlay(tt);
+    syncTooltipFlowOverlay(tt, window.__ag_tt_owner_pane || 'main');
+  };
+
+  function formatQuotaResetDuration(sec, loc) {
+    if (typeof sec !== 'number' || !Number.isFinite(sec) || sec < 0) return '';
+    if (sec < 60) return loc === 'en' ? '<1m' : '<1分';
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return d + 'd' + (h > 0 ? h + 'h' : '');
+    if (h > 0) return h + 'h' + (m > 0 ? m + 'm' : '');
+    return m + 'm';
+  }
+
+  function requestQuotaStatus(force = false, minGapMs = 3000) {
+    if (typeof window.__agGetQuotaStatus !== 'function') return;
+    const now = Date.now();
+    const last = window.__ag_quota_state;
+    if (window.__ag_quota_loading) return;
+    if (last && last.fetchedAt && now - last.fetchedAt < minGapMs) return;
+    window.__ag_quota_loading = true;
+    const tt = document.getElementById('ag-live-metrics-tooltip');
+    if (tt) {
+      tt.querySelectorAll('.ag-tt-quota-refresh').forEach((btn) => btn.classList.add('is-loading'));
+    }
+    try {
+      window.__agGetQuotaStatus(JSON.stringify({ reqId: 'q-' + now, force: Boolean(force) }));
+    } catch {
+      window.__ag_quota_loading = false;
+    }
+  }
+
+  function syncTooltipQuotaOverlay(tt) {
+    if (!tt) return;
+    const wrap = tt.querySelector('.ag-tt-wrap');
+    if (!wrap) return;
+    const l2 = wrap.querySelector('.ag-tt-l2');
+    const host = l2 || wrap;
+    // Remove any stale quota box from wrong container (e.g. L1 -> L2 migration)
+    wrap.querySelectorAll('.ag-tt-quota-box').forEach((el) => {
+      if (el.parentElement !== host) el.remove();
+    });
+    const q = window.__ag_quota_state;
+    const loading = Boolean(window.__ag_quota_loading);
+    const groups =
+      q && Array.isArray(q.groups) && q.groups.length > 0
+        ? q.groups
+        : q && Array.isArray(q.buckets)
+        ? q.buckets.map((b) => ({
+            key: b.key,
+            label: b.label,
+            fiveHour: { remainingPct: b.remainingPct, resetInSec: b.resetInSec },
+            weekly: null
+          }))
+        : [];
+    let box = host.querySelector('.ag-tt-quota-box');
+    if (!groups.length && !loading) {
+      if (box) box.remove();
+      const staleL1 = wrap.querySelector('.ag-tt-quota-l1');
+      if (staleL1) staleL1.remove();
+      return;
+    }
+
+    const loc = I18N_LOCALE || 'zh-CN';
+    const isEn = loc === 'en';
+    const isTw = loc === 'zh-TW';
+    const titleText = isEn ? 'Model Quota' : isTw ? '模型額度' : '模型额度';
+    const title5hText = isEn ? '5h Quota' : isTw ? '5h 額度' : '5h 额度';
+    const refreshTitle = isEn ? 'Refresh quota' : isTw ? '重新整理額度' : '刷新额度';
+    const lbl5h = '5h';
+    const lblWeek = isEn ? '7d' : isTw ? '週額' : '周额';
+    const planText = q && q.planName ? String(q.planName) : '';
+
+    // L1 compact quota strip (visible when collapsed; hidden when L2 expanded)
+    let l1Box = wrap.querySelector('.ag-tt-quota-l1');
+    if (l2 && (groups.length > 0 || loading)) {
+      const l1RowsHtml = groups.length
+        ? groups
+            .slice(0, 4)
+            .map((g) => {
+              const win5h = g.fiveHour;
+              const winWeek = g.weekly;
+              const primaryWin = win5h || winWeek;
+              const pct5h =
+                win5h && typeof win5h.remainingPct === 'number' ? Math.max(0, Math.min(100, win5h.remainingPct)) : null;
+              const pctWeek =
+                winWeek && typeof winWeek.remainingPct === 'number' ? Math.max(0, Math.min(100, winWeek.remainingPct)) : null;
+              const primaryPct = pct5h ?? pctWeek;
+              const tone = primaryPct === null ? 'is-ok' : primaryPct <= 20 ? 'is-crit' : primaryPct <= 50 ? 'is-warn' : 'is-ok';
+              // Only display countdown when quota has actually been consumed (< 100%)
+              const reset5hStr =
+                win5h && pct5h !== null && pct5h < 100 && win5h.resetInSec > 0
+                  ? formatQuotaResetDuration(win5h.resetInSec, loc)
+                  : '';
+              const resetWeekStr =
+                winWeek && pctWeek !== null && pctWeek < 100 && winWeek.resetInSec > 0
+                  ? formatQuotaResetDuration(winWeek.resetInSec, loc)
+                  : '';
+              const resetStr = reset5hStr || resetWeekStr;
+              return (
+                '<div class="ag-tt-quota-row">' +
+                '<span class="ag-tt-quota-name">' +
+                escapeStatusHtml(g.label || g.key || 'Model') +
+                '</span>' +
+                '<span class="ag-tt-quota-track"><span class="ag-tt-quota-fill ' +
+                tone +
+                '" style="width:' +
+                (primaryPct === null ? 0 : primaryPct) +
+                '%"></span></span>' +
+                '<span class="ag-tt-quota-val ' +
+                tone +
+                '">' +
+                escapeStatusHtml(primaryPct === null ? '—' : primaryPct + '%') +
+                '</span>' +
+                (resetStr ? '<span class="ag-tt-quota-reset">' + escapeStatusHtml(resetStr) + '</span>' : '') +
+                '</div>'
+              );
+            })
+            .join('')
+        : '<div class="ag-tt-quota-empty">' + escapeStatusHtml(isEn ? 'Loading…' : isTw ? '讀取中…' : '获取中…') + '</div>';
+      const l1Sig =
+        'l1|' +
+        planText +
+        '|' +
+        (loading ? '1' : '0') +
+        '|' +
+        groups
+          .map((g) => `${g.key}:${g.fiveHour?.remainingPct ?? ''}:${g.weekly?.remainingPct ?? ''}:${Math.floor(((g.fiveHour || g.weekly)?.resetInSec || 0) / 60)}`)
+          .join(',');
+      if (!l1Box) {
+        l1Box = document.createElement('div');
+        l1Box.className = 'ag-tt-quota-l1';
+        const l1Anchor = wrap.querySelector('.ag-tt-flow-bar') || wrap.querySelector('.ag-tt-footer');
+        if (l1Anchor) {
+          wrap.insertBefore(l1Box, l1Anchor);
+        } else {
+          wrap.appendChild(l1Box);
+        }
+      }
+      if (l1Box.getAttribute('data-ag-quota-sig') !== l1Sig) {
+        l1Box.setAttribute('data-ag-quota-sig', l1Sig);
+        l1Box.innerHTML =
+          '<div class="ag-tt-quota-hdr">' +
+          '<span class="ag-tt-quota-hdr-left">' +
+          '<span>' +
+          escapeStatusHtml(title5hText) +
+          '</span>' +
+          (planText ? '<span class="ag-tt-quota-plan">' + escapeStatusHtml(planText) + '</span>' : '') +
+          '</span>' +
+          '<button type="button" class="ag-tt-quota-refresh' +
+          (loading ? ' is-loading' : '') +
+          '" title="' +
+          escapeStatusHtml(refreshTitle) +
+          '" aria-label="' +
+          escapeStatusHtml(refreshTitle) +
+          '">' +
+          '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
+          '</button>' +
+          '</div>' +
+          '<div class="ag-tt-quota-l1-rows">' +
+          l1RowsHtml +
+          '</div>';
+      }
+    } else if (l1Box) {
+      l1Box.remove();
+    }
+
+    const renderWinRow = (tag, win) => {
+      if (!win) return '';
+      const pct = typeof win.remainingPct === 'number' ? Math.max(0, Math.min(100, win.remainingPct)) : null;
+      const tone = pct === null ? 'is-ok' : pct <= 20 ? 'is-crit' : pct <= 50 ? 'is-warn' : 'is-ok';
+      // Hide misleading countdown when quota is fully available (100%)
+      const showReset = pct !== null && pct < 100 && win.resetInSec > 0;
+      const resetStr = showReset ? formatQuotaResetDuration(win.resetInSec, loc) : '';
+      const pctStr = pct === null ? '—' : pct + '%';
+      return (
+        '<div class="ag-tt-quota-row">' +
+        '<span class="ag-tt-quota-win">' +
+        escapeStatusHtml(tag) +
+        '</span>' +
+        '<span class="ag-tt-quota-track"><span class="ag-tt-quota-fill ' +
+        tone +
+        '" style="width:' +
+        (pct === null ? 0 : pct) +
+        '%"></span></span>' +
+        '<span class="ag-tt-quota-val ' +
+        tone +
+        '">' +
+        escapeStatusHtml(pctStr) +
+        '</span>' +
+        (resetStr ? '<span class="ag-tt-quota-reset">' + escapeStatusHtml(resetStr) + '</span>' : '<span class="ag-tt-quota-reset"></span>') +
+        '</div>'
+      );
+    };
+
+    const groupsHtml = groups.length
+      ? groups
+          .slice(0, 4)
+          .map((g) => {
+            const hasBoth = Boolean(g.fiveHour && g.weekly);
+            if (!hasBoth) {
+              const singleWin = g.fiveHour || g.weekly;
+              const pct =
+                singleWin && typeof singleWin.remainingPct === 'number'
+                  ? Math.max(0, Math.min(100, singleWin.remainingPct))
+                  : null;
+              const tone = pct === null ? 'is-ok' : pct <= 20 ? 'is-crit' : pct <= 50 ? 'is-warn' : 'is-ok';
+              const showReset = pct !== null && pct < 100 && singleWin && singleWin.resetInSec > 0;
+              const resetStr = showReset ? formatQuotaResetDuration(singleWin.resetInSec, loc) : '';
+              return (
+                '<div class="ag-tt-quota-group">' +
+                '<div class="ag-tt-quota-row">' +
+                '<span class="ag-tt-quota-name">' +
+                escapeStatusHtml(g.label || g.key || 'Model') +
+                '</span>' +
+                '<span class="ag-tt-quota-track"><span class="ag-tt-quota-fill ' +
+                tone +
+                '" style="width:' +
+                (pct === null ? 0 : pct) +
+                '%"></span></span>' +
+                '<span class="ag-tt-quota-val ' +
+                tone +
+                '">' +
+                escapeStatusHtml(pct === null ? '—' : pct + '%') +
+                '</span>' +
+                (resetStr ? '<span class="ag-tt-quota-reset">' + escapeStatusHtml(resetStr) + '</span>' : '') +
+                '</div>' +
+                '</div>'
+              );
+            }
+            return (
+              '<div class="ag-tt-quota-group">' +
+              '<div class="ag-tt-quota-gname">' +
+              escapeStatusHtml(g.label || g.key || 'Model') +
+              '</div>' +
+              renderWinRow(lbl5h, g.fiveHour) +
+              renderWinRow(lblWeek, g.weekly) +
+              '</div>'
+            );
+          })
+          .join('')
+      : '<div class="ag-tt-quota-empty">' + escapeStatusHtml(isEn ? 'Loading…' : isTw ? '讀取中…' : '获取中…') + '</div>';
+
+    const nextSig =
+      planText +
+      '|' +
+      (loading ? '1' : '0') +
+      '|' +
+      groups
+        .map(
+          (g) =>
+            `${g.key}:${g.fiveHour?.remainingPct ?? ''}:${Math.floor((g.fiveHour?.resetInSec || 0) / 60)}:${g.weekly?.remainingPct ?? ''}:${Math.floor((g.weekly?.resetInSec || 0) / 600)}`
+        )
+        .join(',');
+
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'ag-tt-quota-box';
+      host.appendChild(box);
+    }
+    if (box.getAttribute('data-ag-quota-sig') !== nextSig) {
+      box.setAttribute('data-ag-quota-sig', nextSig);
+      box.innerHTML =
+        '<div class="ag-tt-quota-hdr">' +
+        '<span class="ag-tt-quota-hdr-left">' +
+        '<span>' +
+        escapeStatusHtml(titleText) +
+        '</span>' +
+        (planText ? '<span class="ag-tt-quota-plan">' + escapeStatusHtml(planText) + '</span>' : '') +
+        '</span>' +
+        '<button type="button" class="ag-tt-quota-refresh' +
+        (loading ? ' is-loading' : '') +
+        '" title="' +
+        escapeStatusHtml(refreshTitle) +
+        '" aria-label="' +
+        escapeStatusHtml(refreshTitle) +
+        '">' +
+        '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
+        '</button>' +
+        '</div>' +
+        '<div class="ag-tt-quota-rows">' +
+        groupsHtml +
+        '</div>';
+    }
+  }
+
+  window.__ag_on_quota_status = function (_reqId, payload) {
+    window.__ag_quota_loading = false;
+    if (payload && typeof payload === 'object' && Array.isArray(payload.buckets)) {
+      window.__ag_quota_state = payload;
+    }
+    const tt = document.getElementById('ag-live-metrics-tooltip');
+    if (!tt) return;
+    syncTooltipQuotaOverlay(tt);
+    if (tt.getAttribute('data-visible') === '1') {
+      const ownerKey = window.__ag_tt_owner_pane || 'main';
+      const ownerPane = getPaneByKey(ownerKey);
+      const pill = document.getElementById(ownerKey === 'side' ? 'ag-side-metrics-pill' : 'ag-live-metrics-pill');
+      if (pill) positionMetricsTooltip(pill, tt, ownerPane ? ownerPane.inputBox : null);
+    }
+  };
+
   function syncTooltipLiveOverlay(tt, snap, ownerPill, ownerBox) {
     if (!tt || !snap) return;
     const chipEl = tt.querySelector('.ag-tt-live-chip');
@@ -214,6 +604,8 @@
         }
       }
     }
+    syncTooltipQuotaOverlay(tt);
+    syncTooltipFlowOverlay(tt, window.__ag_tt_owner_pane || 'main');
   }
 
   function ensureMetricsTooltipEl() {
@@ -244,6 +636,13 @@
           clearTimeout(window.__ag_tt_hide_timer);
           window.__ag_tt_hide_timer = null;
         }
+        const qBtn = e.target && e.target.closest ? e.target.closest('.ag-tt-quota-refresh') : null;
+        if (qBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+          requestQuotaStatus(true);
+          return;
+        }
         const btn = e.target && e.target.closest ? e.target.closest('.ag-tt-btn-toggle') : null;
         if (!btn) return;
         e.preventDefault();
@@ -253,6 +652,7 @@
           tt.removeAttribute('data-expanded');
         } else {
           tt.setAttribute('data-expanded', '1');
+          requestQuotaStatus(true);
         }
         const ownerKey = window.__ag_tt_owner_pane || 'main';
         const ownerPane = getPaneByKey(ownerKey);
@@ -280,7 +680,11 @@
     if (ps && ps.lastSnap) {
       const pill = document.getElementById(pane ? pane.pillId : 'ag-live-metrics-pill');
       syncTooltipLiveOverlay(tt, ps.lastSnap, pill, pane ? pane.inputBox : null);
+    } else {
+      syncTooltipQuotaOverlay(tt);
+      syncTooltipFlowOverlay(tt, paneKey);
     }
+    requestQuotaStatus(false);
     return { tt, pane };
   }
 
@@ -423,6 +827,7 @@
           }
           positionMetricsTooltip(pill, res.tt, res.pane ? res.pane.inputBox : inputBox);
           res.tt.setAttribute('data-visible', '1');
+          requestQuotaStatus(true);
         }, 85);
       });
 
@@ -466,11 +871,13 @@
           tt.setAttribute('data-visible', '1');
           window.__ag_tt_pinned = true;
           window.__ag_tt_hover_opened_at = 0;
+          requestQuotaStatus(true);
         } else if (!isExpanded) {
           // 2nd click: expand L2 detail breakdown
           tt.setAttribute('data-expanded', '1');
           tt.setAttribute('data-visible', '1');
           window.__ag_tt_pinned = true;
+          requestQuotaStatus(true);
         } else {
           // 3rd click: close panel
           tt.removeAttribute('data-expanded');
@@ -671,6 +1078,9 @@
     } else {
       ps.waitStartMs = 0;
       ps.pendingKind = 'idle';
+      if (ps.lastSteps > 0 || ps.lastGens > 0 || ps.lastStreamLen > 0) {
+        requestQuotaStatus(true, 5000);
+      }
       ps.lastSteps = stSteps;
       ps.lastGens = stGens;
       ps.lastStreamLen = curStreamLen;

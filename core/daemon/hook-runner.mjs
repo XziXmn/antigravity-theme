@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { stripUtf8Bom } from '../shared.mjs';
 
@@ -18,6 +19,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '../..');
 const USER_CONFIG_PATH = path.join(ROOT_DIR, 'user', 'config.json');
+const FLOW_SESSIONS_PATH = path.join(ROOT_DIR, 'user', 'flow-sessions.json');
+const HOOK_PROMPT_STATE_PATH = path.join(ROOT_DIR, 'user', '.hook-prompt-state.json');
+const HOOK_UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+
+let buildSubagentRoutingPrompt = () => '';
+if (fs.existsSync(path.join(__dirname, '..', 'flow', 'subagent-routing.mjs'))) {
+  try {
+    const srMod = await import('../flow/subagent-routing.mjs');
+    if (typeof srMod.buildSubagentRoutingPrompt === 'function') {
+      buildSubagentRoutingPrompt = srMod.buildSubagentRoutingPrompt;
+    }
+  } catch {}
+}
 
 const FILE_WRITE_TOOLS = new Set([
   'write_file',
@@ -48,29 +62,152 @@ export function isDestructiveCommandLine(cmdLine) {
   return DESTRUCTIVE_COMMAND_PATTERNS.some((re) => re.test(s));
 }
 
-export function evaluateSystemPromptHook(payload = {}, userCfg = {}) {
+function extractHookConversationMeta(payload = {}) {
+  const candidates = [
+    payload.cascadeId,
+    payload.conversationId,
+    payload.trajectoryId,
+    payload.sessionId,
+    payload.session_id,
+    payload.conversation_id,
+    payload.trajectory_id,
+    payload.transcriptPath,
+    payload.transcript_path
+  ];
+  let cid = '';
+  for (const c of candidates) {
+    if (typeof c !== 'string' || !c.trim()) continue;
+    const m = c.match(HOOK_UUID_RE);
+    if (m && m[1]) {
+      cid = m[1];
+      break;
+    }
+  }
+  const parentCandidates = [
+    payload.parentCascadeId,
+    payload.parentConversationId,
+    payload.parentTrajectoryId,
+    payload.parent_conversation_id,
+    payload.parent_trajectory_id
+  ];
+  let parentId = '';
+  for (const p of parentCandidates) {
+    if (typeof p !== 'string' || !p.trim()) continue;
+    const m = p.match(HOOK_UUID_RE);
+    if (m && m[1]) {
+      parentId = m[1];
+      break;
+    }
+  }
+  const roleStr = String(payload.agentRole || payload.subagentRole || payload.role || '');
+  const isSubagent = Boolean(
+    parentId ||
+      payload.isSubagent === true ||
+      payload.is_subagent === true ||
+      payload.subagent === true ||
+      /subagent|worker/i.test(roleStr)
+  );
+  return { cid, parentId, isSubagent };
+}
+
+function getFlowModePromptText(mode, flowCfg) {
+  if (!flowCfg || typeof flowCfg !== 'object') return '';
+  if (mode === 'writing') return String(flowCfg.writingSeat || '').trim();
+  if (mode === 'engineering') return String(flowCfg.engineeringSeat || '').trim();
+  if (mode === 'full') {
+    const explicitFull = String(flowCfg.fullSeat || '').trim();
+    if (explicitFull) return explicitFull;
+    return [String(flowCfg.writingSeat || '').trim(), String(flowCfg.engineeringSeat || '').trim()]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+  return String(flowCfg.defaultSeat || '').trim();
+}
+
+function dedupePush(list, text) {
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  if (list.some((x) => x === clean)) return;
+  list.push(clean);
+}
+
+function hashPromptFingerprint(mode, text) {
+  return crypto.createHash('sha256').update(`${mode}\n---\n${text}`).digest('hex').slice(0, 16);
+}
+
+export function evaluateSystemPromptHook(payload = {}, userCfg = {}, flowSessions = null, hookState = null) {
   if (!userCfg || userCfg.enabled === false) return {};
-  const sp = userCfg.customSystemPrompt;
-  if (!sp || sp.enabled !== true) return {};
-  const text = typeof sp.text === 'string' ? sp.text.trim() : '';
-  if (!text) return {};
-  const mode = sp.mode || 'system-dual';
-  if (mode !== 'system-dual' && mode !== 'session-start' && mode !== 'pre-invocation') return {};
+  const sp = userCfg.customSystemPrompt && typeof userCfg.customSystemPrompt === 'object' ? userCfg.customSystemPrompt : {};
+  const mode = sp.mode || 'flow-proxy';
+  const flowEnabled = userCfg.modules?.flow !== false;
+  const subRoutingCfg = userCfg.subagentRouting && typeof userCfg.subagentRouting === 'object' ? userCfg.subagentRouting : null;
+  const hasSubRouting = Boolean(
+    subRoutingCfg && subRoutingCfg.enabled && Array.isArray(subRoutingCfg.allowedModels) && subRoutingCfg.allowedModels.length > 0
+  );
+
+  const isHookMode = mode === 'system-dual' || mode === 'session-start' || mode === 'pre-invocation';
+  const spActive = Boolean(sp.enabled === true && isHookMode);
+  const subHookActive = Boolean(hasSubRouting && (isHookMode || !flowEnabled));
+  if (!spActive && !subHookActive) return {};
 
   const eventName = String(payload?.hookEventName || '');
-  if (eventName === 'PreInvocation') {
-    if (mode !== 'pre-invocation') return {};
-    const invNum = Number(payload?.invocationNum || 0);
-    // By default inject once on the first invocation to protect prompt cache;
-    // when everyInvocation is enabled, re-assert as systemMessage before every model call.
-    if (!sp.everyInvocation && invNum > 1) return {};
+  if (eventName === 'PreInvocation' && mode !== 'pre-invocation' && !subHookActive) return {};
+
+  const globalText = spActive && typeof sp.text === 'string' ? sp.text.trim() : '';
+  const flowCfg = userCfg.flow && typeof userCfg.flow === 'object' ? userCfg.flow : {};
+  const sessionsMap =
+    flowSessions && typeof flowSessions === 'object' && flowSessions.sessions && typeof flowSessions.sessions === 'object'
+      ? flowSessions.sessions
+      : {};
+
+  const { cid, parentId, isSubagent } = extractHookConversationMeta(payload);
+  let activeSessionRec = cid && sessionsMap[cid] ? sessionsMap[cid] : null;
+  let activeFlowMode = activeSessionRec?.mode || flowCfg.defaultMode || 'default';
+  if (isSubagent && !activeSessionRec && parentId && sessionsMap[parentId]) {
+    activeFlowMode = sessionsMap[parentId].mode || activeFlowMode;
+  }
+
+  const parts = [];
+  const modeText = spActive && flowEnabled ? getFlowModePromptText(activeFlowMode, flowCfg) : '';
+  const sessionNote =
+    spActive && flowEnabled && activeSessionRec?.seatOverride ? String(activeSessionRec.seatOverride).trim() : '';
+  const subRoutingPrompt = !isSubagent && subHookActive ? buildSubagentRoutingPrompt(subRoutingCfg) : '';
+
+  dedupePush(parts, globalText);
+  dedupePush(parts, modeText);
+  dedupePush(parts, sessionNote);
+  dedupePush(parts, subRoutingPrompt);
+
+  const assembled = parts.join('\n\n').trim();
+  if (!assembled) return {};
+
+  if (eventName === 'PreInvocation' && !sp.everyInvocation) {
+    const fp = hashPromptFingerprint(activeFlowMode, assembled);
+    if (cid && hookState && typeof hookState === 'object') {
+      const prev = hookState[cid];
+      if (prev && prev.hash === fp) {
+        return {};
+      }
+      hookState[cid] = { hash: fp, mode: activeFlowMode, at: Date.now() };
+      hookState.__dirty = true;
+    } else {
+      const invNum = Number(payload?.invocationNum || 0);
+      if (invNum > 1) return {};
+    }
+  } else if (eventName === 'PreInvocation' && cid && hookState && typeof hookState === 'object') {
+    hookState[cid] = {
+      hash: hashPromptFingerprint(activeFlowMode, assembled),
+      mode: activeFlowMode,
+      at: Date.now()
+    };
+    hookState.__dirty = true;
   }
 
   return {
     injectSteps: [
       {
         systemMessage: {
-          systemMessage: text
+          systemMessage: assembled
         }
       }
     ]
@@ -145,14 +282,42 @@ function readStdinJson() {
   });
 }
 
+function writeHookStateSafe(stateObj, statePath = HOOK_PROMPT_STATE_PATH) {
+  if (!stateObj || !stateObj.__dirty) return;
+  try {
+    const clean = {};
+    const entries = Object.entries(stateObj)
+      .filter(([k, v]) => k !== '__dirty' && v && typeof v === 'object' && typeof v.hash === 'string')
+      .sort((a, b) => Number(b[1].at || 0) - Number(a[1].at || 0))
+      .slice(0, 120);
+    for (const [k, v] of entries) {
+      clean[k] = { hash: v.hash, mode: v.mode || 'default', at: Number(v.at || Date.now()) };
+    }
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    const tmp = `${statePath}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify(clean, null, 2) + '\n', 'utf8');
+    try {
+      fs.renameSync(tmp, statePath);
+    } catch {
+      fs.writeFileSync(statePath, JSON.stringify(clean, null, 2) + '\n', 'utf8');
+      try {
+        fs.unlinkSync(tmp);
+      } catch {}
+    }
+  } catch {}
+}
+
 const isDirect = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename);
 if (isDirect) {
   const action = process.argv[2] || '';
   const payload = await readStdinJson();
   const cfg = readUserConfigSafe();
+  const flowSessions = readUserConfigSafe(FLOW_SESSIONS_PATH);
   let result = {};
   if (action === 'system-prompt') {
-    result = evaluateSystemPromptHook(payload, cfg);
+    const hookState = readUserConfigSafe(HOOK_PROMPT_STATE_PATH);
+    result = evaluateSystemPromptHook(payload, cfg, flowSessions, hookState);
+    writeHookStateSafe(hookState);
   } else if (action === 'auto-allow') {
     result = evaluateAutoAllowHook(payload, cfg);
   }

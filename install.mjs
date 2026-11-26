@@ -6,6 +6,7 @@
  *   node install.mjs install      [--channel auto|stable|insiders] [--preset codex-pure-white|codex-dark] [--only <features>] [--without <features>] [--minimal] [--with-launcher] [--target-dir <dir>] [--sync-user]
  *   node install.mjs relaunch     [--channel auto|stable|insiders] [--force] [--target-dir <dir>]
  *   node install.mjs doctor       [--channel auto|stable|insiders] [--target-dir <dir>]
+ *   node install.mjs ensure       [--port <n>] [--no-wait] [--target-dir <dir>]
  *   node install.mjs verify       [--safe-mode] [--channel auto|stable|insiders] [--target-dir <dir>]
  *   node install.mjs rollback     [--target-dir <dir>]
  *   node install.mjs uninstall    [--target-dir <dir>]
@@ -40,6 +41,8 @@ import {
 import { checkForUpdates, applyPluginUpdate } from './core/daemon/updater.mjs';
 import { syncAgentLanguageRule } from './core/daemon/paths.mjs';
 import { syncSystemPromptAndHooks } from './core/daemon/hooks-sync.mjs';
+import { getAsarPatchStatus, rollbackAsarPatch } from './core/flow/asar-patch.mjs';
+import { probeTcpEndpoint, readConfiguredFlowPort, runFlowWatchdog } from './core/daemon/flow-watchdog.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +94,22 @@ async function runDoctor() {
   const env = await detectEnvironment(channel);
   const integrity = verifyCoreIntegrity(targetDir);
   const live = await inspectLiveWindow(env);
+  const flowPort = readConfiguredFlowPort({ homeDir: os.homedir() });
+  const relayListening = await probeTcpEndpoint(flowPort);
+  const asarStatus = (() => {
+    try {
+      return getAsarPatchStatus({
+        port: flowPort,
+        backupDir: path.join(targetDir, 'user', 'flow-backups')
+      });
+    } catch {
+      return null;
+    }
+  })();
+  const relayDegraded = Boolean(asarStatus?.patched && !relayListening);
+  const relayRemediation = relayDegraded
+    ? `node ${JSON.stringify(path.join(targetDir, 'install.mjs'))} ensure`
+    : null;
 
   const cdpMissingFlag = !live.reachable && env.cdpStatus === 'missing_opt_in_flag';
   const remediation = cdpMissingFlag ? `node ${JSON.stringify(path.join(targetDir, 'install.mjs'))} relaunch` : null;
@@ -101,7 +120,7 @@ async function runDoctor() {
   const duplicateDaemons = daemonPids.length > 1;
 
   const report = {
-    ok: Boolean(env.nodeMinOk && integrity.ok && !cdpMissingFlag && !duplicateDaemons),
+    ok: Boolean(env.nodeMinOk && integrity.ok && !cdpMissingFlag && !duplicateDaemons && !relayDegraded),
     node: {
       version: env.nodeVer,
       execPath: process.execPath,
@@ -131,6 +150,16 @@ async function runDoctor() {
       clean: integrity.ok,
       modifiedFiles: integrity.modified
     },
+    flow: {
+      port: flowPort,
+      relayListening,
+      asarStatus: asarStatus?.status || 'unknown',
+      asarPatched: Boolean(asarStatus?.patched),
+      asarPath: asarStatus?.asarPath || '',
+      hasBackup: Boolean(asarStatus?.hasBackup),
+      degraded: relayDegraded,
+      remediation: relayRemediation
+    },
     liveWindow: live
   };
 
@@ -139,6 +168,49 @@ async function runDoctor() {
     console.error('\n[ERROR] Node.js >= 22.13.0 is required. Current:', env.nodeVer);
     process.exit(1);
   }
+}
+
+async function runEnsure() {
+  const targetDir = path.resolve(getArg('--target-dir', resolveDefaultTargetDir()));
+  const portArg = getArg('--port', null);
+  const port = portArg && Number.isInteger(Number(portArg)) ? Number(portArg) : undefined;
+  const result = await runFlowWatchdog({
+    entryPath: path.join(targetDir, 'core', 'daemon.mjs'),
+    port,
+    settleMs: hasFlag('--no-wait') ? 0 : 10000
+  });
+  const asar = (() => {
+    try {
+      return getAsarPatchStatus({ port: result.port, backupDir: path.join(targetDir, 'user', 'flow-backups') });
+    } catch {
+      return null;
+    }
+  })();
+  const relayListening = result.proxyListening ? true : await probeTcpEndpoint(result.port);
+  const degraded = Boolean(asar?.patched && !relayListening);
+  console.log(
+    JSON.stringify(
+      {
+        ok: !degraded,
+        action: result.action,
+        reason: result.reason,
+        port: result.port,
+        relayListening,
+        daemonPids: result.daemonPids,
+        spawnedPid: result.spawnedPid,
+        error: result.error,
+        asar: asar
+          ? { status: asar.status, patched: asar.patched, hasBackup: asar.hasBackup, asarPath: asar.asarPath }
+          : null,
+        remediation: degraded
+          ? `node ${JSON.stringify(path.join(targetDir, 'install.mjs'))} rollback  # 或检查 ${result.port} 端口占用`
+          : null
+      },
+      null,
+      2
+    )
+  );
+  if (degraded) process.exit(1);
 }
 
 async function runInstall() {
@@ -259,6 +331,7 @@ async function runInstall() {
     'metrics',
     'sshRemote',
     'promptSuggestions',
+    'flow',
     'deadlockHealer',
     'zoomShortcuts',
     'cdpAutoRelaunch',
@@ -292,6 +365,12 @@ async function runInstall() {
   ) {
     currentCfg.modules.promptSuggestions = false;
   }
+  if (
+    !fs.existsSync(path.join(targetCore, 'runtime', '78-flow-mode-picker.js')) ||
+    !fs.existsSync(path.join(targetCore, 'flow', 'proxy.mjs'))
+  ) {
+    currentCfg.modules.flow = false;
+  }
   if (!fs.existsSync(path.join(targetCore, 'runtime', '10-guards.js'))) {
     currentCfg.modules.deadlockHealer = false;
     currentCfg.modules.zoomShortcuts = false;
@@ -313,11 +392,38 @@ async function runInstall() {
     { encoding: 'utf8', mode: 0o755 }
   );
 
-  const serviceInfo = registerSystemService(targetDir, wrapperDaemon);
+  const flowPort = Number(currentCfg.flow?.port) || readConfiguredFlowPort({ homeDir: os.homedir() });
+  const asarPost = (() => {
+    try {
+      return getAsarPatchStatus({ port: flowPort, backupDir: path.join(targetDir, 'user', 'flow-backups') });
+    } catch {
+      return null;
+    }
+  })();
 
-  spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', realDaemon, '--once'], {
-    stdio: 'inherit'
-  });
+  const forceRestart = hasFlag('--force-restart') || hasFlag('--restart');
+  const runningPids = findRunningDaemonPids({ platform: process.platform });
+  let relayListening = await probeTcpEndpoint(flowPort);
+  const daemonHealthy = runningPids.length === 1 && (!currentCfg.modules?.flow || relayListening);
+
+  let serviceInfo = null;
+  if (!daemonHealthy || forceRestart) {
+    serviceInfo = registerSystemService(targetDir, wrapperDaemon);
+    if (!relayListening && currentCfg.enabled !== false && currentCfg.modules?.flow !== false) {
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline && !relayListening) {
+        await new Promise((r) => setTimeout(r, 250));
+        relayListening = await probeTcpEndpoint(flowPort);
+      }
+    }
+  } else {
+    serviceInfo = {
+      platform: process.platform,
+      runningNow: true,
+      reusedExisting: true,
+      daemonPid: runningPids[0]
+    };
+  }
 
   const postEnv = await detectEnvironment(currentCfg.channel);
   const live = await inspectLiveWindow(postEnv);
@@ -325,13 +431,15 @@ async function runInstall() {
   const remediation =
     !live.reachable && cdpStatus === 'missing_opt_in_flag'
       ? `node ${JSON.stringify(path.join(targetDir, 'install.mjs'))} relaunch`
+      : Boolean(asarPost?.patched && !relayListening)
+      ? `node ${JSON.stringify(path.join(targetDir, 'install.mjs'))} ensure`
       : null;
 
   console.log(
     '\n[Install Complete]',
     JSON.stringify(
       {
-        ok: true,
+        ok: !(asarPost?.patched && !relayListening),
         targetDir,
         appVersion: postEnv.appVersion,
         cdpStatus,
@@ -342,6 +450,11 @@ async function runInstall() {
         backupCreated,
         argvStatus,
         serviceInfo,
+        flow: {
+          port: flowPort,
+          relayListening,
+          asarPatched: Boolean(asarPost?.patched)
+        },
         config: currentCfg,
         liveWindow: live
       },
@@ -462,6 +575,21 @@ async function runUninstall() {
   const userConfigPath = path.join(targetDir, 'user', 'config.json');
   const realDaemon = path.join(targetDir, 'core', 'daemon.mjs');
 
+  // Always restore app.asar before stopping the daemon so Antigravity never gets stranded pointing at a dead local port.
+  try {
+    const flowPort = readConfiguredFlowPort({ homeDir: os.homedir() });
+    const backupDir = path.join(targetDir, 'user', 'flow-backups');
+    const asar = getAsarPatchStatus({ port: flowPort, backupDir });
+    if (asar?.patched) {
+      const rb = rollbackAsarPatch({ port: flowPort, backupDir });
+      if (rb?.ok) {
+        console.log(`[Uninstall] Restored app.asar endpoint to upstream (${rb.asarPath || 'app.asar'}).`);
+      } else {
+        console.warn(`[Uninstall] Warning: could not restore app.asar automatically: ${rb?.error || 'unknown'}`);
+      }
+    }
+  } catch {}
+
   uninstallSystemService(targetDir);
   removeCdpLaunchers();
   syncAgentLanguageRule('en', false);
@@ -528,6 +656,9 @@ switch (subcommand) {
   case 'doctor':
     await runDoctor();
     break;
+  case 'ensure':
+    await runEnsure();
+    break;
   case 'install':
     await runInstall();
     break;
@@ -577,6 +708,7 @@ switch (subcommand) {
   node install.mjs update         [--check] [--ref <branch|tag>]
   node install.mjs relaunch       [--channel auto|stable|insiders] [--force]
   node install.mjs doctor         [--channel auto|stable|insiders]
+  node install.mjs ensure         [--port <n>] [--no-wait]   # 转发失效时一键拉起守护进程（幂等）
   node install.mjs verify         [--safe-mode] [--channel auto|stable|insiders]
   node install.mjs rollback
   node install.mjs uninstall

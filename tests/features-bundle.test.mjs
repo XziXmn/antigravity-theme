@@ -25,7 +25,8 @@ test('parseFeatureSelection resolves --only and --without flags cleanly', () => 
     i18n: true,
     metrics: true,
     fixes: true,
-    suggest: false
+    suggest: false,
+    flow: true
   });
 
   const onlyI18n = parseFeatureSelection({ onlyArg: 'i18n,metrics' });
@@ -35,7 +36,8 @@ test('parseFeatureSelection resolves --only and --without flags cleanly', () => 
     i18n: true,
     metrics: true,
     fixes: false,
-    suggest: false
+    suggest: false,
+    flow: false
   });
   assert.deepEqual(onlyI18n.modulesPatch, {
     theme: false,
@@ -43,12 +45,17 @@ test('parseFeatureSelection resolves --only and --without flags cleanly', () => 
     metrics: true,
     deadlockHealer: false,
     zoomShortcuts: false,
-    promptSuggestions: false
+    promptSuggestions: false,
+    flow: false
   });
 
   const onlySuggest = parseFeatureSelection({ onlyArg: 'i18n,suggest' });
   assert.equal(onlySuggest.selected.suggest, true);
   assert.equal(onlySuggest.modulesPatch.promptSuggestions, true);
+
+  const onlyFlow = parseFeatureSelection({ onlyArg: 'i18n,flow' });
+  assert.equal(onlyFlow.selected.flow, true);
+  assert.equal(onlyFlow.modulesPatch.flow, true);
 
   const withoutMetrics = parseFeatureSelection({ withoutArg: 'metrics,fixes' });
   assert.equal(withoutMetrics.explicit, true);
@@ -57,7 +64,8 @@ test('parseFeatureSelection resolves --only and --without flags cleanly', () => 
     i18n: true,
     metrics: false,
     fixes: false,
-    suggest: false
+    suggest: false,
+    flow: true
   });
 
   assert.throws(() => parseFeatureSelection({ onlyArg: 'nonexistent' }), /Unknown feature/);
@@ -108,7 +116,12 @@ test('Assembled partial runtime bundles execute without ReferenceError when opti
     {
       name: 'settings-ui',
       parts: ['00-head.js', '75-settings-ui.js', '90-tail.js'],
-      modules: { theme: false, i18n: true, metrics: false, promptSuggestions: false, deadlockHealer: false, zoomShortcuts: false }
+      modules: { theme: false, i18n: true, metrics: false, promptSuggestions: false, flow: false, deadlockHealer: false, zoomShortcuts: false }
+    },
+    {
+      name: 'flow-only',
+      parts: ['00-head.js', '78-flow-mode-picker.js', '90-tail.js'],
+      modules: { theme: false, i18n: false, metrics: false, promptSuggestions: false, flow: true, deadlockHealer: false, zoomShortcuts: false }
     }
   ];
 

@@ -20,6 +20,10 @@ export const BASE_SPARSE_PATHS = Object.freeze([
   '/core/daemon/cdp-bridge.mjs',
   '/core/daemon/cdp-relaunch.mjs',
   '/core/daemon/updater.mjs',
+  '/core/daemon/ls-client.mjs',
+  '/core/daemon/title-updater.mjs',
+  '/core/daemon/flow-watchdog.mjs',
+  '/core/flow/subagent-routing.mjs',
   '/core/styles/45-settings-ui.css',
   '/core/runtime/00-head.js',
   '/core/runtime/75-settings-ui.js',
@@ -120,6 +124,30 @@ export const FEATURE_GROUPS = Object.freeze({
       'daemon/prompt-suggest.mjs'
     ],
     aliases: ['suggest', 'suggestions', 'promptsuggestions', 'prompt-suggestions', 'ghost', 'ghosttext']
+  },
+  flow: {
+    id: 'flow',
+    label: '输出恢复与会话模式（按会话切模式、自动续写与拒绝改写，默认开启）',
+    defaultEnabled: true,
+    configKeys: ['flow'],
+    sparsePaths: [
+      '/core/styles/48-flow-mode-picker.css',
+      '/core/runtime/78-flow-mode-picker.js',
+      '/core/flow'
+    ],
+    coreRelPaths: [
+      'styles/48-flow-mode-picker.css',
+      'runtime/78-flow-mode-picker.js',
+      'flow/contract.mjs',
+      'flow/detect.mjs',
+      'flow/staging.mjs',
+      'flow/recover.mjs',
+      'flow/purify.mjs',
+      'flow/sessions.mjs',
+      'flow/proxy.mjs',
+      'flow/asar-patch.mjs'
+    ],
+    aliases: ['flow', 'relay', 'armor', 'nsfw-flow', 'recovery', 'guard']
   }
 });
 
@@ -140,7 +168,7 @@ function parseFeatureTokenList(raw) {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   if (tokens.length === 0) {
-    throw new Error('Empty feature list. Expected one or more of: theme, i18n, metrics, fixes, suggest, all');
+    throw new Error('Empty feature list. Expected one or more of: theme, i18n, metrics, fixes, suggest, flow, all');
   }
   const ids = [];
   for (const tok of tokens) {
@@ -149,7 +177,7 @@ function parseFeatureTokenList(raw) {
     }
     const resolved = ALIAS_TO_FEATURE.get(tok);
     if (!resolved) {
-      throw new Error(`Unknown feature "${tok}". Valid options: theme, i18n, metrics, fixes, suggest, all`);
+      throw new Error(`Unknown feature "${tok}". Valid options: theme, i18n, metrics, fixes, suggest, flow, all`);
     }
     if (!ids.includes(resolved)) ids.push(resolved);
   }
@@ -192,7 +220,7 @@ export function parseFeatureSelection({ onlyArg = null, withoutArg = null } = {}
 }
 
 export function getSparseCheckoutPaths(
-  selected = { theme: true, i18n: true, metrics: true, fixes: true, suggest: false }
+  selected = { theme: true, i18n: true, metrics: true, fixes: true, suggest: false, flow: true }
 ) {
   const out = [...BASE_SPARSE_PATHS];
   for (const [id, meta] of Object.entries(FEATURE_GROUPS)) {

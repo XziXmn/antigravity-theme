@@ -30,13 +30,14 @@ export const VALID_SYSTEM_PROMPT_MODES = Object.freeze([
   'global-gemini',
   'rule',
   'session-start',
-  'pre-invocation'
+  'pre-invocation',
+  'flow-proxy'
 ]);
 export const VALID_AUTO_ALLOW_MODES = Object.freeze(['files', 'safe-cmd', 'all']);
 
 export const DEFAULT_CUSTOM_SYSTEM_PROMPT = Object.freeze({
   enabled: false,
-  mode: 'system-dual',
+  mode: 'flow-proxy',
   text: '',
   everyInvocation: false
 });
@@ -48,7 +49,7 @@ export const DEFAULT_HOOK_AUTO_ALLOW = Object.freeze({
 
 export function normalizeCustomSystemPrompt(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
-  const mode = VALID_SYSTEM_PROMPT_MODES.includes(src.mode) ? src.mode : 'system-dual';
+  const mode = VALID_SYSTEM_PROMPT_MODES.includes(src.mode) ? src.mode : 'flow-proxy';
   const text = typeof src.text === 'string' ? src.text.slice(0, MAX_CUSTOM_PROMPT_LENGTH) : '';
   return {
     enabled: Boolean(src.enabled),
@@ -105,10 +106,27 @@ function buildHookCommand(nodeExec, runnerPath, action) {
   return `${quotedNode} ${quotedRunner} ${action}`;
 }
 
-function writeFileAtomicIfChanged(filePath, content) {
+export function hasUtf8Bom(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const head = Buffer.alloc(3);
+      const n = fs.readSync(fd, head, 0, 3, 0);
+      return n === 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function writeFileAtomicIfChanged(filePath, content, { stripBom = false } = {}) {
   if (fs.existsSync(filePath)) {
     try {
-      if (fs.readFileSync(filePath, 'utf8') === content) return false;
+      const hasBom = stripBom && hasUtf8Bom(filePath);
+      if (!hasBom && fs.readFileSync(filePath, 'utf8') === content) return false;
     } catch {}
   }
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -171,7 +189,13 @@ export function syncManagedGeminiMd(geminiPath, promptText, active) {
 }
 
 export function syncSystemPromptAndHooks(
-  { enabled = true, customSystemPrompt = DEFAULT_CUSTOM_SYSTEM_PROMPT, hookAutoAllow = DEFAULT_HOOK_AUTO_ALLOW } = {},
+  {
+    enabled = true,
+    customSystemPrompt = DEFAULT_CUSTOM_SYSTEM_PROMPT,
+    hookAutoAllow = DEFAULT_HOOK_AUTO_ALLOW,
+    flow = null,
+    subagentRouting = null
+  } = {},
   {
     customHome = '',
     runnerPath = path.join(__dirname, 'hook-runner.mjs'),
@@ -190,13 +214,32 @@ export function syncSystemPromptAndHooks(
   const aa = normalizeHookAutoAllow(hookAutoAllow);
 
   const spTextTrimmed = sp.text.trim();
-  const spActive = Boolean(enabled && sp.enabled && spTextTrimmed);
+  const hasModeSeat = Boolean(
+    flow &&
+      typeof flow === 'object' &&
+      ['defaultSeat', 'writingSeat', 'engineeringSeat', 'fullSeat'].some(
+        (k) => typeof flow[k] === 'string' && flow[k].trim().length > 0
+      )
+  );
+  const hasSubagentRouting = Boolean(
+    subagentRouting &&
+      typeof subagentRouting === 'object' &&
+      subagentRouting.enabled &&
+      Array.isArray(subagentRouting.allowedModels) &&
+      subagentRouting.allowedModels.length > 0
+  );
+  const spFileActive = Boolean(enabled && sp.enabled && spTextTrimmed);
+  const spHookActive = Boolean(enabled && ((sp.enabled && (spTextTrimmed || hasModeSeat)) || hasSubagentRouting));
   const aaActive = Boolean(enabled && aa.enabled);
 
-  const useGeminiMd = spActive && (sp.mode === 'system-dual' || sp.mode === 'global-gemini');
-  const useRuleMd = spActive && sp.mode === 'rule';
+  const useGeminiMd = spFileActive && (sp.mode === 'system-dual' || sp.mode === 'global-gemini');
+  const useRuleMd = spFileActive && sp.mode === 'rule';
   const useHookPrompt =
-    spActive && (sp.mode === 'system-dual' || sp.mode === 'session-start' || sp.mode === 'pre-invocation');
+    spHookActive &&
+    (sp.mode === 'system-dual' ||
+      sp.mode === 'session-start' ||
+      sp.mode === 'pre-invocation' ||
+      (hasSubagentRouting && !flow));
 
   // 1. Sync system-wide ~/.gemini/GEMINI.md (managed block, preserves any user-authored text)
   const syncedGeminiPath = syncManagedGeminiMd(geminiMdPath, spTextTrimmed, useGeminiMd);
@@ -292,9 +335,9 @@ export function syncSystemPromptAndHooks(
         fs.unlinkSync(hooksPath);
       } catch {}
     }
-  } else if (useHookPrompt || aaActive || hadSpKey || hadAaKey) {
+  } else if (useHookPrompt || aaActive || hadSpKey || hadAaKey || (hooksFileExisted && hasUtf8Bom(hooksPath))) {
     try {
-      writeFileAtomicIfChanged(hooksPath, JSON.stringify(hooksObj, null, 2) + '\n');
+      writeFileAtomicIfChanged(hooksPath, JSON.stringify(hooksObj, null, 2) + '\n', { stripBom: true });
     } catch {}
   }
 

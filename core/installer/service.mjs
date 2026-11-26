@@ -200,6 +200,60 @@ export function cleanupLegacyServices() {
   }
 }
 
+/**
+ * Windows had no equivalent of `LaunchAgent KeepAlive` / `systemd Restart=always`: a one-shot
+ * `schtasks /SC ONLOGON` entry that died (crash, kill, battery suspension) stayed dead until the
+ * next logon. Once app.asar is redirected to the local relay that means every model request fails.
+ * This tune step gives the same task (a) battery-proof settings, (b) a 5-minute keep-alive trigger
+ * that runs the idempotent watchdog, and (c) restart-on-failure.
+ */
+export function buildWindowsTaskTuneScript() {
+  return [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    '$name = $env:AG_TASK_NAME',
+    '$vbs = $env:AG_VBS_PATH',
+    "if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { Write-Output 'task-missing'; exit 0 }",
+    "$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //NoLogo \"' + $vbs + '\"')",
+    '$logon = New-ScheduledTaskTrigger -AtLogOn',
+    '$keepAlive = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)',
+    '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)',
+    'Set-ScheduledTask -TaskName $name -Action $action -Trigger @($logon, $keepAlive) -Settings $settings | Out-Null',
+    "if ($?) { Write-Output 'tuned' } else { Write-Output 'tune-failed' }"
+  ].join('\n');
+}
+
+export function tuneWindowsScheduledTask({ taskName, vbsPath, spawnSyncImpl = spawnSync } = {}) {
+  if (!taskName || !vbsPath) return { ok: false, stdout: '', stderr: 'taskName/vbsPath required' };
+  const script = buildWindowsTaskTuneScript();
+  for (const shellBin of ['powershell', 'pwsh']) {
+    try {
+      const res = spawnSyncImpl(
+        shellBin,
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+        {
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 20000,
+          env: { ...process.env, AG_TASK_NAME: taskName, AG_VBS_PATH: vbsPath }
+        }
+      );
+      const stdout = String(res?.stdout || '').trim();
+      const stderr = String(res?.stderr || '').trim();
+      if (res?.status === 0 && /tuned/.test(stdout)) {
+        return { ok: true, stdout, stderr, shell: shellBin };
+      }
+      if (res?.status === 0 && /task-missing/.test(stdout)) {
+        return { ok: false, stdout, stderr, shell: shellBin, reason: 'task-missing' };
+      }
+    } catch (err) {
+      if (shellBin === 'pwsh') {
+        return { ok: false, stdout: '', stderr: err?.message || String(err) };
+      }
+    }
+  }
+  return { ok: false, stdout: '', stderr: 'scheduled task tuning failed' };
+}
+
 export function registerSystemService(targetDir, wrapperDaemon) {
   const home = os.homedir();
   const nodeExecPath = resolveStableNodeExecPath();
@@ -294,7 +348,12 @@ WantedBy=default.target
     const startupDir = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
     const vbsFile = path.join(startupDir, SERVICE_IDS.winVbsName);
     const localVbsFile = path.join(targetDir, SERVICE_IDS.winVbsName);
-    const cmd = `""${nodeExecPath}"" --disable-warning=ExperimentalWarning ""${wrapperDaemon}""`;
+    // Boot through the watchdog when it is deployed: it starts the daemon only when no live
+    // instance exists, which makes the repeating task below a cheap keep-alive instead of a
+    // restart storm.
+    const watchdogScript = path.join(targetDir, 'core', 'daemon', 'flow-watchdog.mjs');
+    const bootScript = fs.existsSync(watchdogScript) ? watchdogScript : wrapperDaemon;
+    const cmd = `""${nodeExecPath}"" --disable-warning=ExperimentalWarning ""${bootScript}""`;
     const vbsContent = `\uFEFFSet WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "${cmd}", 0, False\r\n`;
     try {
       fs.writeFileSync(localVbsFile, vbsContent, 'utf16le');
@@ -302,6 +361,7 @@ WantedBy=default.target
 
     let autostartMethod = 'none';
     let scheduledTaskStarted = false;
+    let taskTuning = null;
     try {
       const createRes = spawnSync(
         'schtasks',
@@ -310,6 +370,10 @@ WantedBy=default.target
       );
       if (createRes.status === 0) {
         autostartMethod = 'schtasks';
+        taskTuning = tuneWindowsScheduledTask({
+          taskName: SERVICE_IDS.winTaskName,
+          vbsPath: localVbsFile
+        });
         try {
           if (fs.existsSync(vbsFile)) fs.unlinkSync(vbsFile);
         } catch {}
@@ -320,11 +384,10 @@ WantedBy=default.target
             { stdio: 'ignore', windowsHide: true }
           );
         } catch {}
-        const runRes = spawnSync('schtasks', ['/Run', '/TN', SERVICE_IDS.winTaskName], {
-          stdio: 'ignore',
-          windowsHide: true
-        });
-        scheduledTaskStarted = runRes.status === 0;
+        // Scheduled task runs the idempotent watchdog every 5 minutes as keep-alive,
+        // while install/rollback always spawns wrapperDaemon directly below so an older daemon
+        // is cleanly superseded by the newly deployed code via acquireDaemonPidLock.
+        scheduledTaskStarted = false;
       }
     } catch {}
 
@@ -380,8 +443,10 @@ WantedBy=default.target
       autostartMethod,
       serviceFile: autostartMethod === 'startup-vbs' ? vbsFile : localVbsFile,
       localVbsFile,
+      bootScript,
       scheduledTask: autostartMethod === 'schtasks' ? SERVICE_IDS.winTaskName : null,
       scheduledTaskStarted,
+      taskTuning,
       spawnedPid,
       runningNow: Boolean(scheduledTaskStarted || spawnedPid)
     };

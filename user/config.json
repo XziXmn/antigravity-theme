@@ -6,13 +6,22 @@
   "syncAiOutputLang": false,
   "customSystemPrompt": {
     "enabled": false,
-    "mode": "system-dual",
+    "mode": "flow-proxy",
     "text": "",
     "everyInvocation": false
   },
   "hookAutoAllow": {
     "enabled": false,
     "mode": "files"
+  },
+  "autoTitle": {
+    "enabled": false,
+    "turnInterval": 4,
+    "minIntervalMin": 5
+  },
+  "subagentRouting": {
+    "enabled": false,
+    "allowedModels": []
   },
   "telemetryLayout": "compact",
   "telemetryCacheMode": "session",
@@ -23,6 +32,7 @@
     "metrics": true,
     "sshRemote": false,
     "promptSuggestions": false,
+    "flow": true,
     "deadlockHealer": true,
     "zoomShortcuts": true,
     "cdpAutoRelaunch": true,

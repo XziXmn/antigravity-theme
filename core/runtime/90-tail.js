@@ -67,6 +67,9 @@
     if (typeof mountCodexSettingsUi === 'function') {
       mountCodexSettingsUi();
     }
+    if (typeof mountFlowModePicker === 'function') {
+      mountFlowModePicker();
+    }
     ensureStylesAtEndOfHead();
   }
 

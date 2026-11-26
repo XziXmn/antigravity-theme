@@ -1,0 +1,1437 @@
+/**
+ * core/flow/proxy.mjs — Local Streaming Relay & Dual-Track Recovery Proxy
+ *
+ * Listens on 127.0.0.1:<port> (default 50100), managed by core/daemon.mjs.
+ *   - Non-GenerateContent endpoints (auth, account, model list, experiments) always pass through untouched.
+ *   - GenerateContent endpoints route by per-session mode (`default` / `writing` / `engineering` / `full`):
+ *       * Outbound purification (echo/refusal history scrub, BLOCK_NONE, dynamic seat injection)
+ *       * Truncation auto-continuation & stitching (nsfw-flow)
+ *       * Keysmith Staging same-model refusal rewrite + trajectory_id rotation (preserving original session accounting)
+ *       * Engineering escalation ladder + phrasing softening + context narrowing
+ *       * Optional lightweight judge reusing cached in-memory OAuth header (zero extra API keys)
+ *       * Optional fallback model remap, HTTP/2 circuit breaker to h1, and 60s 429 cooldown
+ */
+import http from 'node:http';
+import https from 'node:https';
+import http2 from 'node:http2';
+import zlib from 'node:zlib';
+import {
+  Outcome,
+  OUTPUT_CHANNEL_FRAME,
+  classifyFinishReason,
+  compileModelPattern,
+  normalizeFlowConfig
+} from './contract.mjs';
+import {
+  analyzeDeliverable,
+  analyzeRefusal,
+  detectLang,
+  escalationFor,
+  isPolicyBlockText,
+  looksAbnormalStop,
+  requestText
+} from './detect.mjs';
+import { buildStagedGeminiContents } from './staging.mjs';
+import { createJudge, createRecoverer } from './recover.mjs';
+import {
+  SAFE_DELIVERABLE_DIRECTIVE,
+  buildGeminiSse,
+  extractSseText,
+  extractTrajectoryId,
+  injectProxySystemMessage,
+  injectSafetyNone,
+  injectSystemSeat,
+  narrowContext,
+  normalizeV1Path,
+  rotateRequestIdentity,
+  scrubRefusalHistory,
+  softenRequest,
+  stripBlockEcho,
+  stripManagedPromptBlocks
+} from './purify.mjs';
+import { buildDynamicSeat } from './sessions.mjs';
+import { buildSubagentRoutingPrompt, resolveSubagentTargetModel } from './subagent-routing.mjs';
+
+const MAX_BUFFER_BYTES = 16 * 1024 * 1024; // 16 MiB guard (supports 500k+ token sessions)
+const MAX_RESP_BYTES = 32 * 1024 * 1024;
+const QUOTA_COOLDOWN_MS = 60_000;
+const QUOTA_FALLBACK_TEXT =
+  '当前模型上游额度已达上限（HTTP 429），代理已进入 60 秒冷却保护，请稍后重试或切换模型。';
+const BLOCK_FALLBACK_TEXT =
+  '本轮请求被上游内容过滤器拦截且重试未通过，代理已拦截原始过滤提示以防污染后续对话。';
+
+function decodeRequestBody(bodyBuf, headers = {}) {
+  const enc = String(headers['content-encoding'] || '').trim().toLowerCase();
+  const isGzipMagic = bodyBuf.length >= 2 && bodyBuf[0] === 0x1f && bodyBuf[1] === 0x8b;
+  if (enc.includes('gzip') || isGzipMagic) {
+    return { buf: zlib.gunzipSync(bodyBuf), encoding: 'gzip' };
+  }
+  if (enc.includes('deflate')) {
+    return { buf: zlib.inflateSync(bodyBuf), encoding: 'deflate' };
+  }
+  if (enc.includes('br') && typeof zlib.brotliDecompressSync === 'function') {
+    return { buf: zlib.brotliDecompressSync(bodyBuf), encoding: 'br' };
+  }
+  return { buf: bodyBuf, encoding: enc || 'identity' };
+}
+
+function isInternalUtilityRequest(payload) {
+  const modelName = String(payload?.model || payload?.request?.model || '');
+  if (/MODEL_TIER_FLASH_LITE|sir_flash_lite|flash[-_]?lite/i.test(modelName)) return true;
+
+  const reqObj = payload?.request || payload || {};
+  const sys = reqObj.systemInstruction || reqObj.system_instruction;
+  const sysParts = Array.isArray(sys?.parts) ? sys.parts : [];
+  const sysHead = sysParts
+    .map((p) => (typeof p?.text === 'string' ? p.text : ''))
+    .join('\n')
+    .slice(0, 1200);
+  if (/\b(?:severe_internal_risks|sir_flash_lite|safety monitor|evaluate whether the trajectory)\b/i.test(sysHead)) {
+    return true;
+  }
+
+  const hasTools = Array.isArray(reqObj.tools) && reqObj.tools.length > 0;
+  const contents = Array.isArray(reqObj.contents) ? reqObj.contents : [];
+  if (!hasTools && contents.length <= 2) {
+    const firstUserText = contents
+      .flatMap((c) => (Array.isArray(c?.parts) ? c.parts : []))
+      .map((p) => (typeof p?.text === 'string' ? p.text : ''))
+      .join('\n')
+      .slice(0, 1200);
+    const combinedHead = `${sysHead}\n${firstUserText}`;
+    if (
+      /\b(?:generate (?:a )?(?:short |concise |brief )?title|conversation title|title for this (?:conversation|chat|thread)|name this (?:conversation|chat)|summarize the (?:conversation|user'?s request) into a (?:short )?title)\b/i.test(
+        combinedHead
+      )
+    ) {
+      return true;
+    }
+    const maxOut = Number(reqObj.generationConfig?.maxOutputTokens || 0);
+    if (maxOut > 0 && maxOut <= 64 && contents.length === 1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function dedupePushText(list, text) {
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  if (list.some((existing) => existing === clean)) return;
+  list.push(clean);
+}
+
+function isValidationError(rawBody) {
+  return /Invalid value at|Unknown name|INVALID_ARGUMENT/i.test(String(rawBody || ''));
+}
+
+function isBlockedStatus(status, rawBody) {
+  if (status === 400 && /PROHIBITED_CONTENT|SAFETY|blocked/i.test(String(rawBody || ''))) return true;
+  return false;
+}
+
+const SUBAGENT_SYSTEM_RE =
+  /\b(?:you are a subagent|subagent role|sub-agent|swarm worker|browser subagent|research subagent|invoked as a subagent|parent conversation|spawned by the coordinator)\b|<subagent\b/i;
+
+const ORCHESTRATOR_WORKER_MODEL_RE = /(?:^|\/)(?:gemini-flash-worker-agy|MODEL_PLACEHOLDER_M669)$/i;
+
+export function detectSubagentRequest(payload, origTraj = '', activeMainIds = [], hasExplicitSession = false) {
+  const reqObj = payload?.request || payload || {};
+  const labels = reqObj.labels && typeof reqObj.labels === 'object' ? reqObj.labels : {};
+  const meta = reqObj.metadata && typeof reqObj.metadata === 'object' ? reqObj.metadata : {};
+  const modelId = String(payload?.model || reqObj.model || '').trim();
+  const mains = Array.isArray(activeMainIds) ? activeMainIds.filter(Boolean) : [];
+
+  // 0. Native Antigravity Orchestrator Worker (Plan-Execute executionModel: gemini-flash-worker-agy / M669)
+  if (ORCHESTRATOR_WORKER_MODEL_RE.test(modelId)) {
+    const parentId = String(
+      labels.parent_trajectory_id ||
+        labels.parent_cascade_id ||
+        meta.parent_trajectory_id ||
+        meta.parent_cascade_id ||
+        mains[0] ||
+        ''
+    ).trim();
+    return { isSubagent: true, isOrchestratorWorker: true, parentId };
+  }
+
+  // 1. Explicit parent/subagent metadata or labels
+  const parentId = String(
+    labels.parent_trajectory_id ||
+      labels.parent_cascade_id ||
+      meta.parent_trajectory_id ||
+      meta.parent_cascade_id ||
+      ''
+  ).trim();
+  if (parentId) return { isSubagent: true, isOrchestratorWorker: false, parentId };
+  if (
+    labels.subagent === 'true' ||
+    labels.is_subagent === 'true' ||
+    Boolean(labels.subagent_role) ||
+    Boolean(labels.agent_role && /subagent|worker|research|browser/i.test(String(labels.agent_role))) ||
+    meta.isSubagent === true
+  ) {
+    return { isSubagent: true, isOrchestratorWorker: false, parentId: '' };
+  }
+
+  // 2. System instruction subagent signature
+  const sysParts = Array.isArray(reqObj.systemInstruction?.parts) ? reqObj.systemInstruction.parts : [];
+  const sysText = sysParts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('\n');
+  if (sysText && SUBAGENT_SYSTEM_RE.test(sysText)) {
+    return { isSubagent: true, isOrchestratorWorker: false, parentId: '' };
+  }
+
+  // 3. Heuristic: active main sessions known from CDP, and this trajectory is a brand-new unknown background trajectory
+  if (origTraj && mains.length > 0 && !mains.includes(origTraj) && !hasExplicitSession) {
+    return { isSubagent: true, isOrchestratorWorker: false, parentId: mains[0] };
+  }
+
+  return { isSubagent: false, isOrchestratorWorker: false, parentId: '' };
+}
+
+function extractLatestUserTurnText(payload) {
+  const reqObj = payload?.request || payload || {};
+  const contents = Array.isArray(reqObj.contents) ? reqObj.contents : [];
+  if (contents.length === 0) return '';
+  const last = contents[contents.length - 1];
+  if (!last || last.role !== 'user' || !Array.isArray(last.parts)) return '';
+  const hasToolResponse = last.parts.some((p) => p && (p.functionResponse || p.function_response));
+  const texts = [];
+  for (const p of last.parts) {
+    if (!p || typeof p.text !== 'string') continue;
+    const cleaned = p.text
+      .replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/gi, '')
+      .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, '')
+      .replace(/\[model:\s*[a-zA-Z0-9._:/-]{2,80}\s*\]/gi, '')
+      .trim();
+    if (cleaned) texts.push(cleaned);
+  }
+  const joined = texts.join(' ').replace(/\s+/g, ' ').trim();
+  if (!joined || (hasToolResponse && joined.length < 12)) return '';
+  return joined.slice(0, 240);
+}
+
+export function createFlowProxyServer({
+  getConfig = () => normalizeFlowConfig({}),
+  getSystemPrompt = () => null,
+  getSubagentRouting = () => null,
+  getActiveMainSessions = () => [],
+  sessionStore,
+  onEvent = null,
+  onMainTurn = null,
+  log = () => {}
+} = {}) {
+  if (!sessionStore) {
+    throw new TypeError('createFlowProxyServer requires a sessionStore');
+  }
+
+  let lastAuthHeaders = null;
+  let h2ConsecutiveFails = 0;
+  let quotaCooldownUntil = 0;
+  const recentDiag = [];
+  const lastMainTurnTextByCid = new Map();
+
+  function pushDiag(entry) {
+    recentDiag.push({ at: Date.now(), ...entry });
+    if (recentDiag.length > 20) recentDiag.shift();
+  }
+
+  function emit(type, payload) {
+    if (typeof onEvent === 'function') {
+      try {
+        onEvent({ type, ...payload, at: Date.now() });
+      } catch {}
+    }
+  }
+
+  function cleanForwardHeaders(headers, targetHost, bodyLength, { stripContentEncoding = true } = {}) {
+    const out = {};
+    for (const [k, v] of Object.entries(headers || {})) {
+      const lk = k.toLowerCase();
+      if (
+        [
+          'host',
+          'connection',
+          'keep-alive',
+          'proxy-connection',
+          'transfer-encoding',
+          'upgrade',
+          'content-length',
+          'accept-encoding'
+        ].includes(lk)
+      ) {
+        continue;
+      }
+      if (stripContentEncoding && lk === 'content-encoding') continue;
+      if (lk.startsWith(':')) continue;
+      out[lk] = v;
+    }
+    out.host = targetHost;
+    if (bodyLength !== undefined) out['content-length'] = String(bodyLength);
+    return out;
+  }
+
+  function relayHttp2({ origin, reqPath, headers, bodyBuf, timeoutMs = 60000 }) {
+    return new Promise((resolve, reject) => {
+      const client = http2.connect(origin);
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        h2ConsecutiveFails += 1;
+        try {
+          client.close();
+        } catch {}
+        reject(err);
+      };
+      const done = (val) => {
+        if (settled) return;
+        settled = true;
+        h2ConsecutiveFails = 0;
+        try {
+          client.close();
+        } catch {}
+        resolve(val);
+      };
+      client.on('error', fail);
+      const timer = setTimeout(() => fail(Object.assign(new Error('h2 timeout'), { code: 'ETIMEDOUT' })), timeoutMs);
+      const u = new URL(origin);
+      const h2Headers = cleanForwardHeaders(headers, u.hostname);
+      delete h2Headers.host;
+      const rq = client.request({
+        ':method': 'POST',
+        ':path': reqPath,
+        ':authority': u.host,
+        ...h2Headers
+      });
+      let status = 0;
+      let respHeaders = {};
+      const chunks = [];
+      let bytes = 0;
+      let overflowed = false;
+      rq.on('response', (hdrs) => {
+        status = Number(hdrs[':status']) || 502;
+        respHeaders = { ...hdrs };
+      });
+      rq.on('data', (chunk) => {
+        const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += b.length;
+        if (bytes <= MAX_RESP_BYTES) {
+          chunks.push(b);
+        } else {
+          overflowed = true;
+        }
+      });
+      rq.on('end', () => {
+        clearTimeout(timer);
+        done({ status, headers: respHeaders, body: Buffer.concat(chunks).toString('utf8'), overflowed });
+      });
+      rq.on('error', (err) => {
+        clearTimeout(timer);
+        fail(err);
+      });
+      rq.end(bodyBuf);
+    });
+  }
+
+  function relayHttp1({ upstreamUrl, method = 'POST', reqPath, headers, bodyBuf, timeoutMs = 120000 }) {
+    return new Promise((resolve, reject) => {
+      const mod = upstreamUrl.protocol === 'http:' ? http : https;
+      const fwdHeaders = cleanForwardHeaders(headers, upstreamUrl.host, bodyBuf.length);
+      const req = mod.request(
+        {
+          protocol: upstreamUrl.protocol,
+          hostname: upstreamUrl.hostname,
+          port: upstreamUrl.port || (upstreamUrl.protocol === 'http:' ? 80 : 443),
+          method,
+          path: reqPath,
+          timeout: timeoutMs,
+          headers: fwdHeaders
+        },
+        (pres) => {
+          const chunks = [];
+          let bytes = 0;
+          let overflowed = false;
+          pres.on('data', (c) => {
+            const b = Buffer.isBuffer(c) ? c : Buffer.from(c);
+            bytes += b.length;
+            if (bytes <= MAX_RESP_BYTES) {
+              chunks.push(b);
+            } else {
+              overflowed = true;
+            }
+          });
+          pres.on('end', () => {
+            resolve({
+              status: pres.statusCode || 502,
+              headers: pres.headers || {},
+              body: Buffer.concat(chunks).toString('utf8'),
+              overflowed
+            });
+          });
+          pres.on('error', reject);
+        }
+      );
+      req.on('timeout', () => {
+        try {
+          req.destroy(Object.assign(new Error('upstream timeout'), { code: 'ETIMEDOUT' }));
+        } catch {}
+      });
+      req.on('error', reject);
+      req.end(bodyBuf);
+    });
+  }
+
+  async function sendUpstream({ upstream, reqPath, headers, payloadObj, useHttp2 = true, timeoutMs = 120000 }) {
+    const u = new URL(upstream);
+    const bodyBuf = Buffer.from(JSON.stringify(payloadObj), 'utf8');
+    const canH2 = useHttp2 && u.protocol === 'https:' && h2ConsecutiveFails < 3;
+    if (canH2) {
+      try {
+        return await relayHttp2({ origin: u.origin, reqPath, headers, bodyBuf, timeoutMs });
+      } catch (err) {
+        log(`[Flow] h2 fallback to h1: ${err.message}`);
+      }
+    }
+    return await relayHttp1({ upstreamUrl: u, method: 'POST', reqPath, headers, bodyBuf, timeoutMs });
+  }
+
+  function pipePassThrough(req, res, bodyBuf, upstream, reqPath, { stripContentEncoding = false } = {}) {
+    const u = new URL(upstream);
+    const mod = u.protocol === 'http:' ? http : https;
+    const fwdHeaders = cleanForwardHeaders(req.headers, u.host, bodyBuf.length, { stripContentEncoding });
+    const preq = mod.request(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'http:' ? 80 : 443),
+        method: req.method,
+        path: reqPath,
+        timeout: 180000,
+        headers: fwdHeaders
+      },
+      (pres) => {
+        const code = pres.statusCode || 502;
+        if (code === 401 || code === 403) {
+          log(`[Flow] Upstream auth ${code} on ${reqPath.slice(0, 64)} (session login expired)`);
+          emit('auth-error', { status: code, path: reqPath });
+        }
+        pres.on('error', (err) => {
+          log(`[Flow] Upstream stream error: ${err.message}`);
+          if (!res.writableEnded && !res.destroyed) {
+            try {
+              res.end();
+            } catch {}
+          }
+        });
+        if (!res.headersSent) res.writeHead(code, pres.headers);
+        pres.pipe(res);
+      }
+    );
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        try {
+          preq.destroy();
+        } catch {}
+      }
+    });
+    preq.on('timeout', () => {
+      try {
+        preq.destroy(Object.assign(new Error('passthrough timeout'), { code: 'ETIMEDOUT' }));
+      } catch {}
+    });
+    preq.on('error', (err) => {
+      log(`[Flow] Passthrough error: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+      }
+      if (!res.writableEnded) res.end(JSON.stringify({ error: { code: 502, message: err.message } }));
+    });
+    preq.end(bodyBuf);
+  }
+
+  function resolveProxyCustomPrompt(flowCfg) {
+    try {
+      const sp = typeof getSystemPrompt === 'function' ? getSystemPrompt() : null;
+      if (!sp || !sp.enabled) return { active: false, text: '', everyInvocation: false };
+      const text = typeof sp.text === 'string' ? sp.text.trim() : '';
+      const active = sp.mode === 'flow-proxy' || flowCfg.systemPromptStrategy === 'seat-only';
+      return { active, text, everyInvocation: Boolean(sp.everyInvocation) };
+    } catch {
+      return { active: false, text: '', everyInvocation: false };
+    }
+  }
+
+  function getModeSeatText(mode, flowCfg) {
+    if (mode === 'writing') return String(flowCfg.writingSeat || '').trim();
+    if (mode === 'engineering') return String(flowCfg.engineeringSeat || '').trim();
+    if (mode === 'full') {
+      const explicitFull = String(flowCfg.fullSeat || '').trim();
+      if (explicitFull) return explicitFull;
+      return [String(flowCfg.writingSeat || '').trim(), String(flowCfg.engineeringSeat || '').trim()]
+        .filter(Boolean)
+        .join('\n\n');
+    }
+    return String(flowCfg.defaultSeat || '').trim();
+  }
+
+  function payloadAlreadyContainsText(origPayload, snippet) {
+    const clean = String(snippet || '').trim();
+    if (clean.length < 24) return false;
+    const fp = clean.slice(0, Math.min(120, clean.length));
+    const reqObj = origPayload?.request || origPayload || {};
+    const sys = reqObj.systemInstruction || reqObj.system_instruction;
+    if (sys && Array.isArray(sys.parts)) {
+      for (const p of sys.parts) {
+        if (typeof p?.text === 'string' && p.text.includes(fp)) return true;
+      }
+    }
+    for (const c of reqObj.contents || []) {
+      if (!c || !Array.isArray(c.parts)) continue;
+      for (const p of c.parts) {
+        if (typeof p?.text === 'string' && p.text.includes(fp)) return true;
+      }
+    }
+    return false;
+  }
+
+  function buildPromptAssembly({
+    mode,
+    flowCfg,
+    sessionCfg,
+    runtimeState,
+    customPromptText = '',
+    extraPromptText = '',
+    includeDynamic = true,
+    origPayload = null,
+    dedupeAgainstPayload = false
+  }) {
+    const parts = [];
+    const modeText = getModeSeatText(mode, flowCfg);
+    const maybeAdd = (txt) => {
+      const clean = String(txt || '').trim();
+      if (!clean) return;
+      if (dedupeAgainstPayload && origPayload && payloadAlreadyContainsText(origPayload, clean)) return;
+      dedupePushText(parts, clean);
+    };
+
+    if (customPromptText) dedupePushText(parts, customPromptText);
+    maybeAdd(modeText);
+    if (extraPromptText) dedupePushText(parts, extraPromptText);
+
+    if ((mode === 'writing' || mode === 'full') && flowCfg.outputChannelHardening) {
+      dedupePushText(parts, OUTPUT_CHANNEL_FRAME);
+    }
+
+    if (includeDynamic) {
+      const hasUserPrompt = Boolean(customPromptText || modeText);
+      const streak = Number(runtimeState?.streak || 0);
+      if (!hasUserPrompt || streak > 0) {
+        const dyn = buildDynamicSeat(runtimeState, {
+          mode: mode === 'writing' ? 'writing' : 'engineering',
+          extra: sessionCfg.seatOverride || ''
+        });
+        dedupePushText(parts, dyn.text);
+      } else if (sessionCfg.seatOverride && String(sessionCfg.seatOverride).trim()) {
+        maybeAdd(sessionCfg.seatOverride);
+      }
+    } else if (sessionCfg.seatOverride && String(sessionCfg.seatOverride).trim()) {
+      maybeAdd(sessionCfg.seatOverride);
+    }
+
+    return parts.filter(Boolean).join('\n\n');
+  }
+
+  function prepareOutboundPayload(
+    origPayload,
+    {
+      flowCfg,
+      mode,
+      scene,
+      seatText,
+      useSafety = true,
+      rung = '',
+      stripManaged = false,
+      injectContentMsg = false,
+      everyTurn = false
+    }
+  ) {
+    const fresh = structuredClone(origPayload);
+    stripBlockEcho(fresh);
+    scrubRefusalHistory(fresh, { scene });
+    if (stripManaged || flowCfg.systemPromptStrategy === 'seat-only') {
+      stripManagedPromptBlocks(fresh);
+    }
+    if (useSafety) {
+      injectSafetyNone(fresh);
+    }
+    injectSystemSeat(fresh, seatText, rung);
+    if (injectContentMsg && seatText) {
+      injectProxySystemMessage(fresh, seatText, { everyTurn });
+    }
+    return fresh;
+  }
+
+  function createUpstreamJudge({ flowCfg, reqPath }) {
+    if (!flowCfg.judgeEnabled || !lastAuthHeaders) return null;
+    return createJudge({
+      call: async (prompt) => {
+        const judgePayload = {
+          project: 'aicode-consumers',
+          requestId: `ag-flow-judge-${Date.now()}`,
+          model: flowCfg.judgeModel || 'gemini-3.8-flash-low',
+          request: {
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 32, temperature: 0 }
+          }
+        };
+        const r = await sendUpstream({
+          upstream: flowCfg.upstream,
+          reqPath,
+          headers: lastAuthHeaders,
+          payloadObj: judgePayload,
+          useHttp2: false,
+          timeoutMs: flowCfg.judgeTimeoutMs || 20000
+        });
+        if (r.status !== 200) throw new Error(`JUDGE_HTTP_${r.status}`);
+        const sse = extractSseText(r.body);
+        const text = sse.text.trim();
+        if (!text) throw new Error('JUDGE_EMPTY_REPLY');
+        return text;
+      }
+    });
+  }
+
+  function buildContinuationPayload(basePayload, accumulatedText, continuationText) {
+    const next = structuredClone(basePayload);
+    const reqObj = next.request || next;
+    const contents = Array.isArray(reqObj.contents) ? reqObj.contents.slice() : [];
+    contents.push({ role: 'model', parts: [{ text: accumulatedText }] });
+    contents.push({
+      role: 'user',
+      parts: [{ text: continuationText || '继续输出正文：从中断处无缝续写，不要重复。' }]
+    });
+    reqObj.contents = contents;
+    return next;
+  }
+
+  function sendSseResult(res, rawOrBuiltSse, status = 200) {
+    if (res.destroyed || res.writableEnded) return;
+    if (!res.headersSent) {
+      res.writeHead(status, {
+        'Content-Type': status === 200 ? 'text/event-stream; charset=utf-8' : 'application/json; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive'
+      });
+    }
+    res.end(rawOrBuiltSse);
+  }
+
+  async function handleGenerateContent(req, res, bodyBuf, reqPath) {
+    const t0 = Date.now();
+    const flowCfg = normalizeFlowConfig(getConfig());
+
+    // Remember auth headers in memory only for optional lightweight judge
+    if (req.headers.authorization) {
+      lastAuthHeaders = { ...req.headers };
+    }
+
+    // 429 cooldown short-circuit
+    if (Date.now() < quotaCooldownUntil) {
+      sendSseResult(res, buildGeminiSse(QUOTA_FALLBACK_TEXT, { finishReason: 'STOP' }), 200);
+      return;
+    }
+
+    // Oversized request (> 16 MiB) passes straight through to stay memory-bounded
+    if (bodyBuf.length > MAX_BUFFER_BYTES) {
+      pushDiag({
+        bytes: bodyBuf.length,
+        encoding: req.headers['content-encoding'] || 'identity',
+        bypass: 'oversized'
+      });
+      pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath);
+      return;
+    }
+
+    let decodedBuf = bodyBuf;
+    let bodyEncoding = 'identity';
+    try {
+      const dec = decodeRequestBody(bodyBuf, req.headers);
+      decodedBuf = dec.buf;
+      bodyEncoding = dec.encoding;
+    } catch (err) {
+      pushDiag({
+        bytes: bodyBuf.length,
+        encoding: req.headers['content-encoding'] || 'unknown',
+        bypass: 'decode-error',
+        error: err.message
+      });
+      pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath);
+      return;
+    }
+
+    let origPayload;
+    try {
+      origPayload = JSON.parse(decodedBuf.toString('utf8'));
+    } catch {
+      pushDiag({
+        bytes: bodyBuf.length,
+        decodedBytes: decodedBuf.length,
+        encoding: bodyEncoding,
+        bypass: 'json-parse-error'
+      });
+      pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath);
+      return;
+    }
+
+    if (isInternalUtilityRequest(origPayload)) {
+      pushDiag({
+        bytes: bodyBuf.length,
+        encoding: bodyEncoding,
+        model: String(origPayload?.model || origPayload?.request?.model || ''),
+        bypass: 'internal-utility'
+      });
+      pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath);
+      return;
+    }
+
+    const activeMainIds = typeof getActiveMainSessions === 'function' ? getActiveMainSessions() || [] : [];
+    const origTraj = extractTrajectoryId(origPayload, req.headers);
+    const existingCfg = sessionStore.getSessionConfig(origTraj, { autoClaim: false });
+    const subInfo = detectSubagentRequest(origPayload, origTraj, activeMainIds, existingCfg.explicit);
+    const isSubagent = subInfo.isSubagent;
+    const sessionCfg = isSubagent ? existingCfg : sessionStore.getSessionConfig(origTraj, { autoClaim: true });
+
+    let mode = sessionCfg.mode || 'default';
+    if (!sessionCfg.explicit) {
+      const candidateParents = [subInfo.parentId, ...activeMainIds].filter(Boolean);
+      for (const pid of candidateParents) {
+        const pCfg = sessionStore.getSessionConfig(pid, { autoClaim: false });
+        if (pCfg && pCfg.explicit && pCfg.mode) {
+          mode = pCfg.mode;
+          break;
+        }
+      }
+      if (mode === 'default') {
+        const draftMain = sessionStore.getSessionConfig('', { paneKey: 'main', autoClaim: false });
+        if (draftMain && draftMain.explicit && draftMain.mode) {
+          mode = draftMain.mode;
+        }
+      }
+    }
+
+    const subRoutingCfg = typeof getSubagentRouting === 'function' ? getSubagentRouting() : null;
+    const subRoutingPrompt = !isSubagent ? buildSubagentRoutingPrompt(subRoutingCfg) : '';
+
+    // Notify progress-based auto-title tracker on each distinct new main user turn (skipping tool-result loops)
+    if (!isSubagent && typeof onMainTurn === 'function') {
+      const targetCid = origTraj || activeMainIds[0] || '';
+      const userTurnText = extractLatestUserTurnText(origPayload);
+      if (targetCid && userTurnText && lastMainTurnTextByCid.get(targetCid) !== userTurnText) {
+        lastMainTurnTextByCid.set(targetCid, userTurnText);
+        if (lastMainTurnTextByCid.size > 40) {
+          const oldest = lastMainTurnTextByCid.keys().next().value;
+          if (oldest) lastMainTurnTextByCid.delete(oldest);
+        }
+        try {
+          onMainTurn({ cascadeId: targetCid, userText: userTurnText });
+        } catch {}
+      }
+    }
+
+    // Apply subagent whitelist routing (strips explicit [model:<id>] tag and rewrites target model)
+    let subRoute = { matched: false, targetModel: '', reason: '' };
+    let workingPayload = origPayload;
+    if (isSubagent && subRoutingCfg?.enabled) {
+      const cloned = structuredClone(origPayload);
+      subRoute = resolveSubagentTargetModel(cloned, subRoutingCfg);
+      if (subRoute.matched && subRoute.targetModel) {
+        cloned.model = subRoute.targetModel;
+        if (cloned.request && typeof cloned.request === 'object' && typeof cloned.request.model === 'string') {
+          cloned.request.model = subRoute.targetModel;
+        }
+        workingPayload = cloned;
+      }
+    }
+
+    const modelName = String(workingPayload?.model || workingPayload?.request?.model || '');
+    const modelRe = compileModelPattern(flowCfg.modelPattern);
+    const modelMatchesRecovery = !modelRe || !modelName || modelRe.test(modelName);
+    const customPrompt = resolveProxyCustomPrompt(flowCfg);
+    const dedupeAgainstPayload = !customPrompt.active;
+    const everyTurn = Boolean(customPrompt.active && customPrompt.everyInvocation);
+    const reqShape = workingPayload?.request || workingPayload || {};
+    const sysPartsCount = Array.isArray((reqShape.systemInstruction || reqShape.system_instruction)?.parts)
+      ? (reqShape.systemInstruction || reqShape.system_instruction).parts.length
+      : 0;
+    const contentsLen = Array.isArray(reqShape.contents) ? reqShape.contents.length : 0;
+
+    if (mode === 'default' || !modelMatchesRecovery) {
+      const lightSeat = buildPromptAssembly({
+        mode,
+        flowCfg,
+        sessionCfg,
+        runtimeState: null,
+        customPromptText: customPrompt.active ? customPrompt.text : '',
+        extraPromptText: subRoutingPrompt,
+        isSubagent,
+        includeDynamic: false,
+        origPayload: workingPayload,
+        dedupeAgainstPayload
+      });
+      let injectPos = 'none';
+      if (lightSeat) {
+        const seatOnlyPayload = structuredClone(workingPayload);
+        if (customPrompt.active || flowCfg.systemPromptStrategy === 'seat-only') {
+          stripManagedPromptBlocks(seatOnlyPayload);
+        }
+        injectSystemSeat(seatOnlyPayload, lightSeat);
+        if (customPrompt.active || Boolean(subRoutingPrompt)) {
+          const msgRes = injectProxySystemMessage(seatOnlyPayload, lightSeat, { everyTurn });
+          injectPos = msgRes.position;
+        } else {
+          injectPos = 'sys-only';
+        }
+        pushDiag({
+          bytes: bodyBuf.length,
+          encoding: bodyEncoding,
+          model: modelName,
+          routedModel: subRoute.matched ? subRoute.targetModel : '',
+          routeReason: subRoute.reason || '',
+          traj: origTraj.slice(0, 12),
+          mode,
+          isSubagent,
+          route: 'light-seat-passthrough',
+          injectedChars: lightSeat.length,
+          injectPos,
+          everyTurn,
+          sysParts: sysPartsCount,
+          contentsLen
+        });
+        const nextBuf = Buffer.from(JSON.stringify(seatOnlyPayload), 'utf8');
+        pipePassThrough(req, res, nextBuf, flowCfg.upstream, reqPath, { stripContentEncoding: true });
+        return;
+      }
+      pushDiag({
+        bytes: bodyBuf.length,
+        encoding: bodyEncoding,
+        model: modelName,
+        routedModel: subRoute.matched ? subRoute.targetModel : '',
+        routeReason: subRoute.reason || '',
+        traj: origTraj.slice(0, 12),
+        mode,
+        isSubagent,
+        route: subRoute.matched ? 'subagent-model-routed' : 'passthrough',
+        injectedChars: 0,
+        injectPos,
+        everyTurn,
+        sysParts: sysPartsCount,
+        contentsLen
+      });
+      if (subRoute.matched) {
+        const nextBuf = Buffer.from(JSON.stringify(workingPayload), 'utf8');
+        pipePassThrough(req, res, nextBuf, flowCfg.upstream, reqPath, { stripContentEncoding: true });
+      } else {
+        pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath);
+      }
+      return;
+    }
+
+    const scene = mode === 'writing' ? 'writing' : 'engineering';
+    const runtimeState = origTraj ? sessionStore.getRuntimeState(origTraj) : null;
+    const seatText =
+      buildPromptAssembly({
+        mode,
+        flowCfg,
+        sessionCfg,
+        runtimeState,
+        customPromptText: customPrompt.active ? customPrompt.text : '',
+        extraPromptText: subRoutingPrompt,
+        isSubagent,
+        includeDynamic: true,
+        origPayload: workingPayload,
+        dedupeAgainstPayload
+      }) || SAFE_DELIVERABLE_DIRECTIVE;
+    const injectContentMsg = Boolean(customPrompt.active || getModeSeatText(mode, flowCfg) || subRoutingPrompt);
+    const lang = detectLang(requestText(workingPayload));
+    const actions = [];
+
+    let useSafety = true;
+    let activePayload = prepareOutboundPayload(workingPayload, {
+      flowCfg,
+      mode,
+      scene,
+      seatText,
+      useSafety,
+      stripManaged: customPrompt.active,
+      injectContentMsg,
+      everyTurn
+    });
+    pushDiag({
+      bytes: bodyBuf.length,
+      encoding: bodyEncoding,
+      model: modelName,
+      routedModel: subRoute.matched ? subRoute.targetModel : '',
+      routeReason: subRoute.reason || '',
+      traj: origTraj.slice(0, 12),
+      mode,
+      isSubagent,
+      route: 'managed-recovery',
+      injectedChars: seatText.length,
+      injectPos: injectContentMsg ? (everyTurn ? 'tail-user' : 'head-user') : 'sys-only',
+      everyTurn,
+      sysParts: sysPartsCount,
+      contentsLen
+    });
+
+    let primaryRes;
+    try {
+      primaryRes = await sendUpstream({
+        upstream: flowCfg.upstream,
+        reqPath,
+        headers: req.headers,
+        payloadObj: activePayload
+      });
+    } catch (err) {
+      sendSseResult(res, JSON.stringify({ error: { code: 502, message: `[ag-flow] ${err.message}` } }), 502);
+      return;
+    }
+
+    // Degrade gracefully if upstream rejects safetySettings field
+    if (primaryRes.status === 400 && isValidationError(primaryRes.body)) {
+      useSafety = false;
+      actions.push({ type: 'degrade-no-safety' });
+      activePayload = prepareOutboundPayload(workingPayload, {
+        flowCfg,
+        mode,
+        scene,
+        seatText,
+        useSafety: false,
+        stripManaged: customPrompt.active,
+        injectContentMsg,
+        everyTurn
+      });
+      primaryRes = await sendUpstream({
+        upstream: flowCfg.upstream,
+        reqPath,
+        headers: req.headers,
+        payloadObj: activePayload
+      });
+    }
+
+    if (primaryRes.status === 429) {
+      quotaCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+      sessionStore.observeOutcome(origTraj, {
+        verdict: 'blocked',
+        actions: [...actions, { type: 'quota-429' }],
+        model: modelName,
+        ms: Date.now() - t0,
+        detail: '429 quota'
+      });
+      emit('outcome', { cascadeId: origTraj, mode, verdict: 'blocked', detail: '429 quota' });
+      sendSseResult(res, buildGeminiSse(QUOTA_FALLBACK_TEXT, { finishReason: 'STOP', model: modelName }), 200);
+      return;
+    }
+
+    if (primaryRes.status === 401 || primaryRes.status === 403) {
+      emit('auth-error', { status: primaryRes.status, cascadeId: origTraj });
+      sendSseResult(res, primaryRes.body, primaryRes.status);
+      return;
+    }
+
+    const primarySse = primaryRes.status === 200 ? extractSseText(primaryRes.body) : { text: '', thought: '', finish: '', toolCalls: 0, frames: 0, usageMetadata: null };
+
+    // Pass tool-call-only agentic turns straight through untouched
+    if (primaryRes.status === 200 && primarySse.toolCalls > 0 && !primarySse.text.trim()) {
+      sessionStore.observeOutcome(origTraj, {
+        verdict: 'pass',
+        actions: [...actions, { type: 'tool-pass' }],
+        model: modelName,
+        ms: Date.now() - t0,
+        detail: 'tool'
+      });
+      emit('outcome', { cascadeId: origTraj, mode, verdict: 'pass', detail: 'tool' });
+      sendSseResult(res, primaryRes.body, 200);
+      return;
+    }
+
+    const judge = createUpstreamJudge({ flowCfg, reqPath });
+    const allowContinue = (mode === 'writing' || mode === 'full') && flowCfg.maxContinuations > 0;
+    const allowStaging = (mode === 'writing' || mode === 'full') && flowCfg.refusalRewrite !== false;
+    const allowEscalation = mode === 'engineering' || mode === 'full';
+    const allowRemap = mode === 'full' && flowCfg.remapEnabled && Boolean(flowCfg.remapTargetModel);
+
+    const makeContinuationTransport = (basePayload) => async ({ accumulatedText }) => {
+      const contPayload = buildContinuationPayload(basePayload, accumulatedText, flowCfg.continuationText);
+      const r = await sendUpstream({
+        upstream: flowCfg.upstream,
+        reqPath,
+        headers: req.headers,
+        payloadObj: contPayload
+      });
+      if (r.status !== 200) throw new Error(`CONT_HTTP_${r.status}`);
+      const sse = extractSseText(r.body);
+      return { text: sse.text, finishReason: sse.finish || 'STOP' };
+    };
+
+    const runRecover = async (basePayload, sse) => {
+      if (!allowContinue) {
+        const effText = analyzeDeliverable(sse.text, { scene }).hasDeliverable ? sse.text : `${sse.text}\n${sse.thought}`.trim();
+        const ref = analyzeRefusal(effText, { scene });
+        const finishOut = classifyFinishReason(sse.finish || (sse.text.trim() ? 'STOP' : ''));
+        const outcome = isPolicyBlockText(sse.text)
+          ? Outcome.FILTER_TRIGGERED
+          : ref.isRefusal
+            ? Outcome.REFUSED
+            : finishOut;
+        return { text: sse.text, finishReason: sse.finish || 'STOP', outcome, actions: [] };
+      }
+      const recover = createRecoverer({
+        transport: makeContinuationTransport(basePayload),
+        judge,
+        continuationFrame: flowCfg.continuationText,
+        maxContinuations: flowCfg.maxContinuations,
+        scene
+      });
+      return await recover(
+        { messages: [{ role: 'user', content: requestText(basePayload) }] },
+        { text: sse.text, finishReason: sse.finish || (sse.text.trim() ? 'STOP' : '') }
+      );
+    };
+
+    let bestSse = primarySse;
+    let bestRaw = primaryRes.body;
+    let bestStatus = primaryRes.status;
+    let recovered = primaryRes.status === 200
+      ? await runRecover(activePayload, primarySse)
+      : { text: '', finishReason: 'BLOCKED', outcome: Outcome.FILTER_TRIGGERED, actions: [] };
+    actions.push(...recovered.actions);
+
+    const isBadPrimary =
+      primaryRes.status !== 200 ||
+      isBlockedStatus(primaryRes.status, primaryRes.body) ||
+      isPolicyBlockText(primarySse.text) ||
+      recovered.outcome === Outcome.REFUSED ||
+      recovered.outcome === Outcome.FILTER_TRIGGERED ||
+      (!primarySse.text.trim() && primarySse.toolCalls === 0);
+
+    let changedByRecovery = recovered.actions.some((a) => a.type === 'continue');
+    let finalText = recovered.text;
+    let finalFinish = recovered.finishReason || 'STOP';
+    let finalOutcome = recovered.outcome;
+
+    // Track A: Keysmith Staging same-model rewrite (writing & full)
+    // Always re-inject the active session's system prompt into the retry turn tail regardless of the everyInvocation button state.
+    if (isBadPrimary && allowStaging) {
+      const stagedPayload = prepareOutboundPayload(workingPayload, {
+        flowCfg,
+        mode,
+        scene,
+        seatText,
+        useSafety,
+        stripManaged: customPrompt.active,
+        injectContentMsg: false,
+        everyTurn: false
+      });
+      const reqObj = stagedPayload.request || stagedPayload;
+      const stagedContents = buildStagedGeminiContents(reqObj.contents || [], {
+        frame: flowCfg.outputChannelHardening ? OUTPUT_CHANNEL_FRAME : '',
+        lang
+      });
+      if (stagedContents) {
+        reqObj.contents = stagedContents;
+        if (seatText) {
+          injectProxySystemMessage(stagedPayload, seatText, { everyTurn: true });
+        }
+        // Rotate upstream trajectory_id/sessionId so server-side poisoned refusal history is bypassed
+        // while local accounting keeps using origTraj.
+        rotateRequestIdentity(stagedPayload);
+        try {
+          const r = await sendUpstream({
+            upstream: flowCfg.upstream,
+            reqPath,
+            headers: req.headers,
+            payloadObj: stagedPayload
+          });
+          if (r.status === 200) {
+            const sse = extractSseText(r.body);
+            const stRec = await runRecover(stagedPayload, sse);
+            const rejected =
+              stRec.outcome === Outcome.REFUSED ||
+              stRec.outcome === Outcome.FILTER_TRIGGERED ||
+              isPolicyBlockText(stRec.text) ||
+              !stRec.text.trim();
+            if (!rejected) {
+              actions.push({ type: 'staging-rewrite' }, ...stRec.actions);
+              finalText = stRec.text;
+              finalFinish = stRec.finishReason || 'STOP';
+              finalOutcome = stRec.outcome;
+              bestSse = sse;
+              bestRaw = r.body;
+              bestStatus = 200;
+              changedByRecovery = true;
+            } else {
+              actions.push({ type: 'staging-rewrite-failed' });
+            }
+          }
+        } catch (err) {
+          actions.push({ type: 'staging-error', message: err.message });
+        }
+      }
+    }
+
+    // Track B: Engineering escalation ladder + softening + context narrowing (engineering & full)
+    const stillBad =
+      bestStatus !== 200 ||
+      finalOutcome === Outcome.REFUSED ||
+      finalOutcome === Outcome.FILTER_TRIGGERED ||
+      isPolicyBlockText(finalText) ||
+      (!finalText.trim() && bestSse.toolCalls === 0);
+
+    if (stillBad && allowEscalation) {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const rungText = escalationFor(attempt, lang);
+        const escPayload = prepareOutboundPayload(workingPayload, {
+          flowCfg,
+          mode,
+          scene,
+          seatText,
+          useSafety,
+          rung: rungText,
+          stripManaged: customPrompt.active,
+          injectContentMsg: false,
+          everyTurn: false
+        });
+        if (flowCfg.softenEnabled) softenRequest(escPayload);
+        if (attempt >= 2) {
+          narrowContext(escPayload, { keepTurns: 2, toolResultChars: 800, maxContents: 30 });
+          rotateRequestIdentity(escPayload);
+        }
+        // Force tail re-injection AFTER softening/narrowContext so long-context truncation never strips the session prompt
+        const retryBlock = [seatText, rungText].filter(Boolean).join('\n\n');
+        if (retryBlock) {
+          injectProxySystemMessage(escPayload, retryBlock, { everyTurn: true });
+        }
+        try {
+          const r = await sendUpstream({
+            upstream: flowCfg.upstream,
+            reqPath,
+            headers: req.headers,
+            payloadObj: escPayload
+          });
+          if (r.status !== 200) continue;
+          const sse = extractSseText(r.body);
+          const eff = analyzeDeliverable(sse.text, { scene }).hasDeliverable ? sse.text : `${sse.text}\n${sse.thought}`;
+          const ref = analyzeRefusal(eff, { scene });
+          if (!isPolicyBlockText(sse.text) && !ref.isRefusal && sse.text.trim()) {
+            const escRec = allowContinue ? await runRecover(escPayload, sse) : { text: sse.text, finishReason: sse.finish || 'STOP', outcome: Outcome.OK, actions: [] };
+            actions.push({ type: 'escalate-retry', attempt }, ...escRec.actions);
+            finalText = escRec.text;
+            finalFinish = escRec.finishReason || 'STOP';
+            finalOutcome = escRec.outcome;
+            bestSse = sse;
+            bestRaw = r.body;
+            bestStatus = 200;
+            changedByRecovery = true;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    // Track C: Optional fallback model remap (full mode only)
+    const stillBadAfterEsc =
+      bestStatus !== 200 ||
+      finalOutcome === Outcome.REFUSED ||
+      finalOutcome === Outcome.FILTER_TRIGGERED ||
+      isPolicyBlockText(finalText) ||
+      (!finalText.trim() && bestSse.toolCalls === 0);
+
+    if (stillBadAfterEsc && allowRemap) {
+      const remapPayload = prepareOutboundPayload(workingPayload, {
+        flowCfg,
+        mode,
+        scene,
+        seatText,
+        useSafety,
+        stripManaged: customPrompt.active,
+        injectContentMsg: Boolean(seatText),
+        everyTurn: true
+      });
+      remapPayload.model = flowCfg.remapTargetModel;
+      rotateRequestIdentity(remapPayload);
+      try {
+        const r = await sendUpstream({
+          upstream: flowCfg.upstream,
+          reqPath,
+          headers: req.headers,
+          payloadObj: remapPayload
+        });
+        if (r.status === 200) {
+          const sse = extractSseText(r.body);
+          if (sse.text.trim() && !isPolicyBlockText(sse.text)) {
+            actions.push({ type: 'model-remap', targetModel: flowCfg.remapTargetModel });
+            finalText = sse.text;
+            finalFinish = sse.finish || 'STOP';
+            finalOutcome = Outcome.OK;
+            bestSse = sse;
+            bestRaw = r.body;
+            bestStatus = 200;
+            changedByRecovery = true;
+          }
+        }
+      } catch {}
+    }
+
+    // Compute concise verdict for UI status indicator
+    let verdict = 'pass';
+    let detail = 'OK';
+    if (actions.some((a) => a.type === 'staging-rewrite')) {
+      verdict = 'staged';
+      detail = '拒答已重试通过';
+    } else if (actions.some((a) => a.type === 'continue')) {
+      const contCount = actions.filter((a) => a.type === 'continue').length;
+      verdict = 'continued';
+      detail = `自动续写 ×${contCount}`;
+    } else if (actions.some((a) => a.type === 'model-remap')) {
+      verdict = 'staged';
+      detail = `已切备用模型 ${flowCfg.remapTargetModel}`;
+    } else if (actions.some((a) => a.type === 'escalate-retry')) {
+      verdict = 'staged';
+      detail = '改写措辞重试通过';
+    } else if (finalOutcome === Outcome.REFUSED) {
+      verdict = 'refused';
+      detail = '被拒';
+    } else if (finalOutcome === Outcome.FILTER_TRIGGERED || isPolicyBlockText(finalText)) {
+      verdict = 'blocked';
+      detail = '上游拦截';
+    } else if (!finalText.trim()) {
+      verdict = 'empty';
+      detail = '空响应';
+    }
+
+    sessionStore.observeOutcome(origTraj, {
+      verdict,
+      actions,
+      model: modelName,
+      ms: Date.now() - t0,
+      detail
+    });
+    emit('outcome', { cascadeId: origTraj, mode, verdict, detail, actions, ms: Date.now() - t0 });
+
+    // Prevent upstream filter text from entering client history and poisoning subsequent turns
+    if (isPolicyBlockText(finalText)) {
+      sendSseResult(res, buildGeminiSse(BLOCK_FALLBACK_TEXT, { finishReason: 'STOP', model: modelName }), 200);
+      return;
+    }
+
+    if (changedByRecovery && finalText) {
+      const built = buildGeminiSse(finalText, {
+        finishReason: finalFinish === 'MAX_TOKENS' ? 'MAX_TOKENS' : 'STOP',
+        model: modelName,
+        usageMetadata: bestSse.usageMetadata
+      });
+      sendSseResult(res, built, 200);
+      return;
+    }
+
+    sendSseResult(res, bestRaw, bestStatus);
+  }
+
+  async function callUtilityModel(
+    prompt,
+    { model = 'gemini-3.5-flash-lite', maxOutputTokens = 64, timeoutMs = 15000 } = {}
+  ) {
+    const cleanPrompt = String(prompt || '').trim();
+    if (!cleanPrompt || !lastAuthHeaders) return '';
+    const flowCfg = normalizeFlowConfig(getConfig());
+    const utilityPayload = {
+      project: 'aicode-consumers',
+      requestId: `ag-flow-util-${Date.now()}`,
+      model: model || 'gemini-3.5-flash-lite',
+      request: {
+        contents: [{ role: 'user', parts: [{ text: cleanPrompt }] }],
+        generationConfig: { maxOutputTokens, temperature: 0.2 }
+      }
+    };
+    try {
+      const r = await sendUpstream({
+        upstream: flowCfg.upstream,
+        reqPath: '/v1internal:streamGenerateContent?alt=sse',
+        headers: lastAuthHeaders,
+        payloadObj: utilityPayload,
+        useHttp2: false,
+        timeoutMs
+      });
+      if (r.status !== 200) return '';
+      return extractSseText(r.body).text.trim();
+    } catch {
+      return '';
+    }
+  }
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('error', (err) => log(`[Flow] req error: ${err.message}`));
+    req.on('data', (c) => chunks.push(c));
+    res.on('error', (err) => log(`[Flow] res error: ${err.message}`));
+    req.on('end', () => {
+      const bodyBuf = Buffer.concat(chunks);
+      const reqPath = normalizeV1Path(req.url || '/');
+      if (req.headers.authorization) {
+        lastAuthHeaders = { ...req.headers };
+      }
+      if (req.method === 'GET' && reqPath === '/ag-flow/health') {
+        const cfg = normalizeFlowConfig(getConfig());
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            port: cfg.port,
+            defaultMode: cfg.defaultMode,
+            quotaCooldownMs: Math.max(0, quotaCooldownUntil - Date.now())
+          })
+        );
+        return;
+      }
+      if (req.method === 'GET' && reqPath === '/ag-flow/diag') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            h2Degraded: h2ConsecutiveFails >= 3,
+            quotaCooldownMs: Math.max(0, quotaCooldownUntil - Date.now()),
+            recent: recentDiag.slice(-15)
+          })
+        );
+        return;
+      }
+      if (req.method === 'POST' && reqPath.includes('GenerateContent')) {
+        void handleGenerateContent(req, res, bodyBuf, reqPath).catch((err) => {
+          log(`[Flow] handleGenerateContent unhandled error (degrading to passthrough): ${err?.message || err}`);
+          if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+            try {
+              const cfg = normalizeFlowConfig(getConfig());
+              pipePassThrough(req, res, bodyBuf, cfg.upstream, reqPath);
+            } catch (passErr) {
+              if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+              if (!res.writableEnded) {
+                res.end(JSON.stringify({ error: { code: 502, message: passErr?.message || 'proxy fallback failed' } }));
+              }
+            }
+          }
+        });
+        return;
+      }
+      const cfg = normalizeFlowConfig(getConfig());
+      pipePassThrough(req, res, bodyBuf, cfg.upstream, reqPath);
+    });
+  });
+
+  return {
+    server,
+    callUtilityModel,
+    getHealth: () => ({
+      listening: Boolean(server.listening),
+      quotaCooldownMs: Math.max(0, quotaCooldownUntil - Date.now()),
+      hasAuthCache: Boolean(lastAuthHeaders),
+      h2Degraded: h2ConsecutiveFails >= 3
+    })
+  };
+}
+
+export function createFlowProxyController({
+  getConfig,
+  getSystemPrompt = () => null,
+  getSubagentRouting = () => null,
+  getActiveMainSessions = () => [],
+  sessionStore,
+  onEvent = null,
+  onMainTurn = null,
+  log = () => {}
+} = {}) {
+  let activeServer = null;
+  let activePort = 0;
+  let activeApi = null;
+  let lastError = '';
+  let starting = false;
+
+  async function stop() {
+    const srv = activeServer;
+    activeServer = null;
+    activeApi = null;
+    activePort = 0;
+    if (!srv) return;
+    await new Promise((resolve) => {
+      try {
+        srv.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+
+  async function syncState({ enabled = false } = {}) {
+    const flowCfg = normalizeFlowConfig(getConfig());
+    if (!enabled) {
+      await stop();
+      lastError = '';
+      return getStatus();
+    }
+    if (activeServer && activeServer.listening && activePort === flowCfg.port) {
+      return getStatus();
+    }
+    if (starting) return getStatus();
+    starting = true;
+    try {
+      await stop();
+      const created = createFlowProxyServer({
+        getConfig,
+        getSystemPrompt,
+        getSubagentRouting,
+        getActiveMainSessions,
+        sessionStore,
+        onEvent,
+        onMainTurn,
+        log
+      });
+      await new Promise((resolve, reject) => {
+        created.server.once('error', reject);
+        created.server.listen(flowCfg.port, '127.0.0.1', () => {
+          created.server.off('error', reject);
+          resolve();
+        });
+      });
+      activeServer = created.server;
+      activeApi = created;
+      activePort = flowCfg.port;
+      lastError = '';
+      log(`[Flow] Local proxy listening on http://127.0.0.1:${activePort}`);
+    } catch (err) {
+      lastError = err?.message || String(err || 'listen failed');
+      log(`[Flow] Failed to start proxy: ${lastError}`);
+      await stop();
+    } finally {
+      starting = false;
+    }
+    return getStatus();
+  }
+
+  function getStatus() {
+    const flowCfg = normalizeFlowConfig(getConfig());
+    const health = activeApi ? activeApi.getHealth() : { listening: false, quotaCooldownMs: 0, hasAuthCache: false, h2Degraded: false };
+    return {
+      running: Boolean(activeServer && activeServer.listening),
+      port: activePort || flowCfg.port,
+      error: lastError,
+      ...health
+    };
+  }
+
+  async function callUtilityModel(prompt, opts) {
+    if (!activeApi || typeof activeApi.callUtilityModel !== 'function') return '';
+    return await activeApi.callUtilityModel(prompt, opts);
+  }
+
+  return { syncState, stop, getStatus, callUtilityModel };
+}

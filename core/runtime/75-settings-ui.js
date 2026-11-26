@@ -164,6 +164,8 @@
       let hoverSwitchTimer = null;
       let lastSubAnchorBtn = null;
       let hoveredFamilyKey = '';
+      let activeModelPickerTarget = 'promptSuggestionModel';
+      let activeModelPickerTriggerId = 'ag-s-model-trigger';
       let addingHost = false;
       let invalidHost = false;
       let refreshingModels = false;
@@ -173,11 +175,63 @@
       let boundSidebarClick = null;
       let boundNavBtn = null;
       let boundPane = null;
-      let promptDraft =
-        typeof window.__ag_settings_prompt_draft === 'string' ? window.__ag_settings_prompt_draft : null;
-      function setPromptDraft(val) {
-        promptDraft = typeof val === 'string' ? val : null;
-        window.__ag_settings_prompt_draft = promptDraft;
+      const SECTION_TAB_KEYS = ['appearance', 'prompts', 'flow', 'advanced'];
+      let activeSectionTab =
+        typeof window.__ag_settings_section_tab === 'string' && SECTION_TAB_KEYS.includes(window.__ag_settings_section_tab)
+          ? window.__ag_settings_section_tab
+          : 'appearance';
+      function setActiveSectionTab(tab) {
+        activeSectionTab = SECTION_TAB_KEYS.includes(tab) ? tab : 'appearance';
+        window.__ag_settings_section_tab = activeSectionTab;
+      }
+      const PROMPT_TAB_KEYS = ['global', 'default', 'writing', 'engineering', 'full'];
+      let activePromptTab =
+        typeof window.__ag_settings_prompt_tab === 'string' && PROMPT_TAB_KEYS.includes(window.__ag_settings_prompt_tab)
+          ? window.__ag_settings_prompt_tab
+          : 'global';
+      const promptDrafts =
+        window.__ag_settings_prompt_drafts && typeof window.__ag_settings_prompt_drafts === 'object'
+          ? window.__ag_settings_prompt_drafts
+          : {};
+      window.__ag_settings_prompt_drafts = promptDrafts;
+      function setActivePromptTab(tab) {
+        activePromptTab = PROMPT_TAB_KEYS.includes(tab) ? tab : 'global';
+        window.__ag_settings_prompt_tab = activePromptTab;
+      }
+      function getSavedPromptForTab(tab) {
+        if (tab === 'global') return (uiState.config.customSystemPrompt && uiState.config.customSystemPrompt.text) || '';
+        const fl = uiState.config.flow || {};
+        if (tab === 'default') return fl.defaultSeat || '';
+        if (tab === 'writing') return fl.writingSeat || '';
+        if (tab === 'engineering') return fl.engineeringSeat || '';
+        if (tab === 'full') return fl.fullSeat || '';
+        return '';
+      }
+      function getDraftForTab(tab) {
+        return typeof promptDrafts[tab] === 'string' ? promptDrafts[tab] : getSavedPromptForTab(tab);
+      }
+      function setDraftForTab(tab, val) {
+        if (typeof val === 'string') {
+          promptDrafts[tab] = val;
+        } else {
+          delete promptDrafts[tab];
+        }
+      }
+      function commitPromptForTab(tab, text) {
+        const clean = String(text || '');
+        setDraftForTab(tab, clean);
+        if (tab === 'global') {
+          commitPatch({ customSystemPrompt: { text: clean } });
+          return;
+        }
+        const keyMap = {
+          default: 'defaultSeat',
+          writing: 'writingSeat',
+          engineering: 'engineeringSeat',
+          full: 'fullSeat'
+        };
+        const field = keyMap[tab];
+        if (field) commitPatch({ flow: { [field]: clean } });
       }
 
       const bootUserCfg = boot.userConfig && typeof boot.userConfig === 'object' ? boot.userConfig : {};
@@ -193,6 +247,47 @@
           : boot.hookAutoAllow && typeof boot.hookAutoAllow === 'object'
           ? boot.hookAutoAllow
           : {};
+      const bootFlowCfg =
+        bootUserCfg.flow && typeof bootUserCfg.flow === 'object'
+          ? bootUserCfg.flow
+          : boot.flow && typeof boot.flow === 'object'
+          ? boot.flow
+          : {};
+      const DEFAULT_FLOW_UI = {
+        port: 18100,
+        defaultMode: 'default',
+        modelPattern: 'gemini',
+        maxContinuations: 3,
+        refusalRewrite: true,
+        outputChannelHardening: false,
+        judgeEnabled: false,
+        judgeModel: 'gemini-3.8-flash-low',
+        softenEnabled: true,
+        remapEnabled: false,
+        remapTargetModel: 'gpt-oss-120b-medium',
+        systemPromptStrategy: 'keep',
+        defaultSeat: '',
+        writingSeat: '',
+        engineeringSeat: '',
+        fullSeat: ''
+      };
+      const DEFAULT_AUTO_TITLE_UI = { enabled: false, turnInterval: 4, minIntervalMin: 5 };
+      const DEFAULT_SUBAGENT_ROUTING_UI = { enabled: false, allowedModels: [] };
+      const bootAutoTitleCfg =
+        bootUserCfg.autoTitle && typeof bootUserCfg.autoTitle === 'object'
+          ? bootUserCfg.autoTitle
+          : boot.autoTitle && typeof boot.autoTitle === 'object'
+          ? boot.autoTitle
+          : {};
+      const bootSubRoutingCfg =
+        bootUserCfg.subagentRouting && typeof bootUserCfg.subagentRouting === 'object'
+          ? bootUserCfg.subagentRouting
+          : boot.subagentRouting && typeof boot.subagentRouting === 'object'
+          ? boot.subagentRouting
+          : {};
+      let flowAsarMsg = '';
+      let autoTitleStatusMsg = '';
+      let autoTitleBusy = false;
 
       const uiState = {
         config: {
@@ -200,7 +295,7 @@
           syncAiOutputLang: Boolean(bootUserCfg.syncAiOutputLang ?? boot.syncAiOutputLang),
           customSystemPrompt: {
             enabled: Boolean(bootPromptCfg.enabled),
-            mode: bootPromptCfg.mode || 'system-dual',
+            mode: bootPromptCfg.mode || 'flow-proxy',
             text: typeof bootPromptCfg.text === 'string' ? bootPromptCfg.text : '',
             everyInvocation: Boolean(bootPromptCfg.everyInvocation)
           },
@@ -208,12 +303,21 @@
             enabled: Boolean(bootHookAllowCfg.enabled),
             mode: bootHookAllowCfg.mode || 'files'
           },
+          flow: Object.assign({}, DEFAULT_FLOW_UI, bootFlowCfg),
+          autoTitle: Object.assign({}, DEFAULT_AUTO_TITLE_UI, bootAutoTitleCfg),
+          subagentRouting: {
+            enabled: Boolean(bootSubRoutingCfg.enabled),
+            allowedModels: Array.isArray(bootSubRoutingCfg.allowedModels)
+              ? bootSubRoutingCfg.allowedModels.map((m) => Object.assign({}, m))
+              : []
+          },
           telemetryLayout: bootUserCfg.telemetryLayout || boot.telemetryLayout || 'compact',
           telemetryCacheMode: bootUserCfg.telemetryCacheMode || boot.telemetryCacheMode || 'session',
           promptSuggestionModel: bootUserCfg.promptSuggestionModel || 'gemini-3.8-flash-low',
           sshHosts: Array.isArray(bootUserCfg.sshHosts) ? bootUserCfg.sshHosts.slice() : [],
           modules: Object.assign({}, MODULES, bootUserCfg.modules || {})
         },
+        flowStatus: null,
         agyStatus: (window.__ag_settings_agy_cache && Object.assign({}, window.__ag_settings_agy_cache)) || {
           available: true,
           running: false,
@@ -256,62 +360,118 @@
           return {
             navTitle: '增強設定',
             pageTitle: '增強設定',
-            manualRefreshLabel: '手動重新整理主題與設定',
+            manualRefreshLabel: '重新整理設定',
             savedBadge: '已同步',
             refreshedBadge: '已重新整理',
             githubLabel: 'GitHub',
             feedbackLabel: '回報問題',
-            subtitlePrefix: '管理主題配色、介面語言、工作階段統計與可選增強模組，變更即時同步至 ',
-            subtitleSuffix: '。',
-            secCore: '核心模組',
+            tabAppearance: '外觀與狀態',
+            tabPrompts: '提示詞與權限',
+            tabFlow: '代理與恢復',
+            tabAdvanced: '擴充與更新',
+            secCore: '外觀與語言',
+            secFlowProxy: '本機代理',
+            secFlowStrategy: '輸出恢復',
             modTheme: 'Codex 晝夜主題',
-            modThemeDesc: '純白淺色與中性炭灰深色配色，隨 IDE 外觀自動切換',
+            modThemeDesc: '淺色與深色自動跟隨 IDE 外觀',
             modI18n: '中文介面本地化',
-            modI18nDesc: '內建 2,300+ 精校詞條，原地更新不影響互動，關閉即還原英文',
-            localeLbl: '顯示語言與術語風格',
-            localeDesc: '即時切換介面語言，無需重啟',
+            modI18nDesc: '關閉即還原英文介面',
+            localeLbl: '介面語言',
+            localeDesc: '即時切換，無需重啟',
             locZhCn: '简体中文',
             locZhSg: '简中·英术',
             locZhTw: '繁體中文',
             locEn: 'English',
-            syncAiLangLbl: '同步 AI 思考與回覆語言',
-            syncAiLangDesc: '開啟後自動託管全域規則檔，使代理的思考與回覆跟隨目前介面語言（預設關閉）',
-            secPromptHooks: '系統提示詞與 Hooks',
-            secPromptHooksHint: '託管 GEMINI.md、rules 與 hooks.json，保留原有設定',
+            syncAiLangLbl: '同步 AI 回覆語言',
+            syncAiLangDesc: '讓代理思考與回覆跟隨介面語言',
+            secPromptHooks: '系統提示詞與權限',
+            modFlow: '對話模式與本機轉發',
+            modFlowDesc: '輸入框旁顯示模式選單並啟用本機轉發',
+            flowDefaultModeLbl: '預設模式',
+            flowDefaultModeDesc: '新對話預設套用此模式',
+            flowModeDefault: '預設',
+            flowModeWriting: '寫作',
+            flowModeEng: '工程',
+            flowModeFull: '全面',
+            flowMaxContLbl: '最大續寫',
+            flowMaxContDesc: '中斷時自動續寫次數（0 為停用）',
+            flowRewriteLbl: '拒絕改寫',
+            flowRewriteDesc: '被拒時以同一模型重試輸出',
+            flowHardeningLbl: '正文落盤',
+            flowHardeningDesc: '寫作模式下正文經寫檔儲存',
+            flowJudgeLbl: '裁判判定',
+            flowJudgeDesc: '以輕量模型判斷是否中斷',
+            flowSoftenLbl: '措辭軟化',
+            flowSoftenDesc: '重試時自動軟化敏感措辭',
+            flowRemapLbl: '備用模型',
+            flowRemapDesc: '全面模式連續失敗時切換模型',
+            flowAsarLbl: '流量接管',
+            flowAsarEnable: '開啟接管',
+            flowAsarDisable: '取消接管',
+            flowProxyOnline: '運作中',
+            flowProxyOffline: '未啟動',
+            flowAsarPatched: '已接管',
+            flowAsarOriginal: '未接管',
+            flowAsarMissing: '未找到 app.asar',
             modCustomPrompt: '系統級自訂提示詞',
-            modCustomPromptDesc: '跨所有專案與工作區生效，直接寫入全域系統指令檔與系統角色 Hook（不改動官方安裝包）',
-            promptModeLbl: '系統級注入通道',
-            promptModeDesc: '推薦「系統雙通道」：同步寫入全域 GEMINI.md 並於新對話以 systemMessage 系統角色強化注入',
-            promptModeDual: '系統雙通道',
-            promptModeGemini: '全域 GEMINI.md',
-            promptModeRule: '全域規則',
-            promptModePreInv: '每輪前強注',
-            promptEveryInvLbl: '每輪模型呼叫前重複強注（防長對話遺忘）',
-            promptEveryInvDesc: '關閉時僅首輪注入以保護 Prompt Cache；開啟後每次模型推理前皆以 systemMessage 強重申',
-            promptTargetPrefix: '系統生效目標：',
-            promptTargetDual: '~/.gemini/GEMINI.md（託管區塊）+ ~/.gemini/config/hooks.json (SessionStart · systemMessage)',
-            promptTargetGemini: '~/.gemini/GEMINI.md（託管區塊，全端通用、零延遲）',
-            promptTargetRule: '~/.gemini/config/rules/98_antigravity_theme_system_prompt.md (trigger: always_on)',
-            promptTargetSession: '~/.gemini/config/hooks.json (SessionStart · systemMessage)',
-            promptTargetPreInv: '~/.gemini/config/hooks.json (PreInvocation · systemMessage)',
-            promptPresetLbl: '系統範本：',
-            presetSystemRole: '系統級專家設定',
+            modCustomPromptDesc: '支援全域與各模式專屬提示詞，子代理自動繼承',
+            promptModeLbl: '注入方式',
+            promptModeDescProxy: '直注系統指令，不留對話歷史殘留',
+            promptModeDescHook: '透過原生 Hook 注入，內建指紋去重',
+            promptModePreInv: 'Hook 注入',
+            promptModeProxy: '代理注入',
+            promptTimingLbl: '注入時機',
+            promptTimingDescSession: '每個會話僅注入一次，不膨脹上下文',
+            promptTimingDescEvery: '每輪發包末尾附加提醒，防長對話遺忘',
+            promptTimingSession: '按會話注入',
+            promptTimingEvery: '每輪重複',
+            promptProxyWarnNeedFlow: '請先於「代理與恢復」開啟本機轉發與流量接管',
+            promptProxyWarnNeedAsar: '流量尚未接管，請至「代理與恢復」點選「開啟接管」',
+            promptScopeLbl: '生效範圍',
+            promptTabGlobal: '全域',
+            promptTabDefault: '預設',
+            promptTabWriting: '寫作',
+            promptTabEng: '工程',
+            promptTabFull: '全面',
+            promptPlaceholderMode: '輸入僅對「{tab}」生效的提示詞（留空則僅用全域）…',
+            promptPresetLbl: '範本：',
+            presetSystemRole: '系統專家',
             presetAntiHalluc: '嚴謹防幻覺',
             presetConcise: '簡潔極客',
             presetContract: '契約開發',
-            promptPlaceholder: '輸入系統級角色定義、全域工程紀律、回覆風格或操作契約（最多 20,000 字元）…',
+            promptPlaceholder: '輸入全域系統提示詞（最多 20,000 字元）…',
             promptClearBtn: '清空',
-            promptSaveBtn: '儲存系統提示詞',
-            promptUnsaved: '有未儲存的修改',
-            promptSavedTip: 'Ctrl/Cmd + Enter 快捷儲存',
-            modAutoAllow: '工具自動放行 Hook (PreToolUse)',
-            modAutoAllowDesc: '透過 ~/.gemini/config/hooks.json 自動核准指定工具，減少重複確認彈窗',
+            promptSaveBtn: '儲存',
+            promptUnsaved: '未儲存',
+            promptSavedTip: 'Ctrl/Cmd + Enter 儲存',
+            modAutoAllow: '工具自動放行',
+            modAutoAllowDesc: '透過 Hook 自動核准指定工具操作',
             autoAllowModeLbl: '放行範圍',
-            autoAllowModeDesc: '「含安全指令」內建高危破壞性指令攔截，高危操作仍交由人工確認',
+            autoAllowModeDesc: '「含安全指令」會攔截高危破壞性指令',
             autoAllowFiles: '僅檔案讀寫',
             autoAllowSafeCmd: '含安全指令',
             autoAllowAll: '全部放行',
-            autoAllowAllWarn: '注意：全部放行將略過所有終端機指令確認，包含具破壞性的操作，請謹慎開啟。',
+            autoAllowAllWarn: '注意：全部放行將略過所有終端指令確認，請謹慎開啟。',
+            secSubagentRouting: '子代理模型分配',
+            modSubagentRouting: '按能力自動分配子代理模型',
+            modSubagentRoutingDesc: '主會話依任務難度從白名單中分派模型（支援第三方模型 ID）',
+            subagentEmpty: '尚未新增允許用於子代理的模型，請從下方選擇或手動輸入（如 deepseek-4.1）',
+            subagentPickBtn: '+ 從可用模型選擇',
+            subagentCustomPh: '輸入模型 ID（如 deepseek-4.1）',
+            subagentAddBtn: '新增',
+            tierAuto: '自動檔位',
+            tierFast: '輕量',
+            tierBalanced: '均衡',
+            tierStrong: '高階',
+            tierToggleTip: '點選切換能力檔位',
+            modAutoTitle: '按進度自動更新標題',
+            modAutoTitleDesc: '每隔數輪依最新對話進展熱更新會話標題',
+            autoTitleTurnsLbl: '觸發輪數',
+            autoTitleTurnsUnit: '輪',
+            autoTitleCoolLbl: '冷卻間隔',
+            autoTitleCoolUnit: '分',
+            autoTitleNowBtn: '立即更新標題',
+            autoTitleUpdating: '更新中…',
             presets: {
               systemRole:
                 '## 系統級角色與執行原則\n- 你是一位資深全端系統架構師，所有技術判斷以實際讀取到的程式碼與執行結果為唯一依據。\n- 先分析根因再動手修改，避免表面修補與無關重構。\n- 每次改動後自動執行對應驗證（語法檢查／測試／建置），僅回報實際驗證通過的結果。\n- 回覆簡明直接，先給結論與關鍵改動，程式碼識別字與命令保持英文原樣。',
@@ -322,50 +482,49 @@
               contract:
                 '## 契約式開發規範\n- 動手修改前先列出受影響檔案清單與變更目標。\n- 嚴格遵守現有專案架構、命名風格與零多餘依賴原則。\n- 交付時簡明總結改動點、驗證指令與結果。'
             },
-            modMetrics: '即時工作階段狀態與用量統計',
-            modMetricsDesc: '底部四態狀態指示、一/二級明細面板與每輪對話尾部統計',
+            modMetrics: '即時狀態與用量統計',
+            modMetricsDesc: '底部狀態列、明細浮窗與每輪尾部統計',
             secOptional: '可選增強',
-            secOptionalHint: '預設關閉，按需開啟',
             modSuggest: '輸入框下一句預測',
-            modSuggestDescPre: '回覆結束後預測下一句指令，按 ',
+            modSuggestDescPre: '按 ',
             modSuggestDescMid: ' 或 ',
-            modSuggestDescPost: ' 補全（開啟後背景常駐 ',
-            modSuggestDescEnd: ' 程序）',
+            modSuggestDescPost: ' 補全下一句（需本機 ',
+            modSuggestDescEnd: '）',
             agyIdle: '未啟動',
             agyWarming: '預熱中…',
-            agyReady: 'agy 就緒',
+            agyReady: '就緒',
             agyMissing: '未偵測到 agy',
             suggestModelLbl: '預測模型',
-            suggestModelDescPre: '由 ',
-            suggestModelDescPost: ' 自動依模型與檔位分組，推薦 Gemini 3.8 Flash Low',
+            suggestModelDescPre: '來源 ',
+            suggestModelDescPost: '，推薦 Gemini 3.8 Flash Low',
             refreshModelsTitle: '重新取得 agy models',
             menuModelsHdr: '模型',
             recommendedBadge: '推薦',
-            modSsh: 'SSH Remote 遠端唯讀統計',
-            modSshDesc: '透過遠端唯讀 Python 擷取脫敏數值中繼資料，不在本機複製 .db 檔案',
-            sshHostsLbl: '允許探測的主機（sshHosts）',
+            modSsh: 'SSH 遠端統計',
+            modSshDesc: '遠端唯讀擷取數值統計，不複製資料庫',
+            sshHostsLbl: '允許主機',
             addHostBtn: '+ 新增主機',
             addHostPlaceholder: '例如 node032',
             addHostOk: '新增',
-            secTelemetry: '狀態列偏好',
-            layoutLbl: '底部狀態列密度',
-            layoutDesc: '精簡模式置中嵌於工具列內；詳細模式展開為底部置中獨立列，補充 TTFT 與本步輸出',
+            secTelemetry: '狀態列與統計',
+            layoutLbl: '狀態列密度',
+            layoutDesc: '精簡嵌於工具列內；詳細展開為獨立列',
             layoutCompact: '精簡',
             layoutDetailed: '詳細',
-            cacheLbl: '快取命中率口徑',
-            cacheDesc: '選擇狀態列顯示整個工作階段的累計命中率，或最近單步命中率',
+            cacheLbl: '快取口徑',
+            cacheDesc: '顯示工作階段累計或單步命中率',
             cacheSession: '工作階段累計',
             cacheStep: '單步',
             secUpdate: '版本與更新',
             updTitle: '外掛版本',
-            updDescIdle: '從 GitHub 倉庫檢查新版本並直接更新，保留 user/ 個人設定',
-            updDescChecking: '正在連線 GitHub 檢查最新版本與檔案清單…',
-            updDescUpToDate: '目前已與遠端最新版本保持一致',
-            updDescAhead: '目前本機版本高於遠端發佈版本',
-            updDescAvailable: '發現新版本，點擊直接更新並熱重載生效，無需重啟 Antigravity',
-            updDescMainDiff: '遠端 main 分支有檔案差異，可一鍵同步最新 main',
-            updDescUpdating: '正在下載並驗證更新檔案，同時備份舊版本，請稍候…',
-            updDescApplied: '已更新完成，背景服務正在重啟並熱重載至目前視窗…',
+            updDescIdle: '從 GitHub 檢查更新，保留個人設定',
+            updDescChecking: '正在檢查最新版本…',
+            updDescUpToDate: '已是最新版本',
+            updDescAhead: '本機版本領先遠端',
+            updDescAvailable: '發現新版本，可熱更新生效',
+            updDescMainDiff: '遠端 main 分支有更新',
+            updDescUpdating: '正在下載並驗證更新…',
+            updDescApplied: '已更新，正在熱重載…',
             updPillChecking: '檢查中…',
             updPillLatest: '已是最新',
             updPillAhead: '本機領先',
@@ -385,62 +544,118 @@
           return {
             navTitle: '增强设置',
             pageTitle: '增强设置',
-            manualRefreshLabel: '手动刷新主题与配置',
+            manualRefreshLabel: '刷新配置',
             savedBadge: '已同步',
             refreshedBadge: '已刷新',
             githubLabel: 'GitHub',
             feedbackLabel: '反馈',
-            subtitlePrefix: '管理主题配色、中文界面、会话统计与可选增强模块，修改实时同步至 ',
-            subtitleSuffix: '。',
-            secCore: '核心模块',
+            tabAppearance: '外观与状态',
+            tabPrompts: '提示词与权限',
+            tabFlow: '代理与恢复',
+            tabAdvanced: '扩展与更新',
+            secCore: '外观与语言',
+            secFlowProxy: '本地代理',
+            secFlowStrategy: '输出恢复',
             modTheme: 'Codex 昼夜主题',
-            modThemeDesc: '浅色纯白与中性炭灰深色配色，随 IDE 外观自动切换',
+            modThemeDesc: '浅色与深色自动跟随 IDE 外观',
             modI18n: '中文界面汉化',
-            modI18nDesc: '内置 2,300+ 精校词条，原地更新不影响交互，关闭即恢复英文',
-            localeLbl: '显示语言与术语风格',
-            localeDesc: '实时切换界面语言，无需重启',
+            modI18nDesc: '关闭即恢复英文界面',
+            localeLbl: '界面语言',
+            localeDesc: '实时切换，无需重启',
             locZhCn: '简体中文',
             locZhSg: '简中·英术',
             locZhTw: '繁體中文',
             locEn: 'English',
-            syncAiLangLbl: '同步 AI 思考与回复语言',
-            syncAiLangDesc: '开启后自动托管全局规则文件，让智能体的思考与回复跟随当前界面语言（默认关闭）',
-            secPromptHooks: '系统提示词与 Hooks',
-            secPromptHooksHint: '托管 GEMINI.md、rules 与 hooks.json，保留原有配置',
+            syncAiLangLbl: '同步 AI 回复语言',
+            syncAiLangDesc: '让智能体思考与回复跟随界面语言',
+            secPromptHooks: '系统提示词与权限',
+            modFlow: '会话模式与本地转发',
+            modFlowDesc: '输入框旁显示模式菜单并启用本地转发',
+            flowDefaultModeLbl: '默认模式',
+            flowDefaultModeDesc: '新会话默认套用此模式',
+            flowModeDefault: '默认',
+            flowModeWriting: '写作',
+            flowModeEng: '工程',
+            flowModeFull: '全面',
+            flowMaxContLbl: '最大续写',
+            flowMaxContDesc: '中断时自动续写次数（0 为停用）',
+            flowRewriteLbl: '拒绝改写',
+            flowRewriteDesc: '被拒时以同一模型重试输出',
+            flowHardeningLbl: '正文落盘',
+            flowHardeningDesc: '写作模式下正文经写文件保存',
+            flowJudgeLbl: '裁判判定',
+            flowJudgeDesc: '以轻量模型判断是否中断',
+            flowSoftenLbl: '措辞软化',
+            flowSoftenDesc: '重试时自动软化敏感措辞',
+            flowRemapLbl: '备用模型',
+            flowRemapDesc: '全面模式连续失败时切换模型',
+            flowAsarLbl: '流量接管',
+            flowAsarEnable: '开启接管',
+            flowAsarDisable: '取消接管',
+            flowProxyOnline: '运行中',
+            flowProxyOffline: '未启动',
+            flowAsarPatched: '已接管',
+            flowAsarOriginal: '未接管',
+            flowAsarMissing: '未找到 app.asar',
             modCustomPrompt: '系统级自定义提示词',
-            modCustomPromptDesc: '跨所有项目与工作区生效，直接写入全局系统指令文件与系统角色 Hook（零改包、不破签名）',
-            promptModeLbl: '系统级注入通道',
-            promptModeDesc: '推荐「系统双通道」：同步写入全局 GEMINI.md 并在新会话以 systemMessage 系统角色强化注入',
-            promptModeDual: '系统双通道',
-            promptModeGemini: '全局 GEMINI.md',
-            promptModeRule: '全局规则',
-            promptModePreInv: '每轮前强注',
-            promptEveryInvLbl: '每轮模型调用前重复强注（防长对话遗忘）',
-            promptEveryInvDesc: '关闭时仅首轮注入以保护 Prompt Cache；开启后每次模型推理前均以 systemMessage 强重申',
-            promptTargetPrefix: '系统生效目标：',
-            promptTargetDual: '~/.gemini/GEMINI.md（托管块）+ ~/.gemini/config/hooks.json (SessionStart · systemMessage)',
-            promptTargetGemini: '~/.gemini/GEMINI.md（托管块，App/CLI/IDE 全端通用、零延迟）',
-            promptTargetRule: '~/.gemini/config/rules/98_antigravity_theme_system_prompt.md (trigger: always_on)',
-            promptTargetSession: '~/.gemini/config/hooks.json (SessionStart · systemMessage)',
-            promptTargetPreInv: '~/.gemini/config/hooks.json (PreInvocation · systemMessage)',
-            promptPresetLbl: '系统模板：',
-            presetSystemRole: '系统级专家设定',
+            modCustomPromptDesc: '支持全局与各模式专属提示词，子代理自动继承',
+            promptModeLbl: '注入方式',
+            promptModeDescProxy: '发包时注入高权重系统指令，不污染对话历史',
+            promptModeDescHook: '通过原生 Hook 注入，内置指纹去重',
+            promptModePreInv: 'Hook 注入',
+            promptModeProxy: '代理注入',
+            promptTimingLbl: '注入时机',
+            promptTimingDescSession: '每个会话仅注入一次，不膨胀上下文',
+            promptTimingDescEvery: '每轮发包末尾附带强提醒，防长对话遗忘',
+            promptTimingSession: '按会话注入',
+            promptTimingEvery: '每轮重复',
+            promptProxyWarnNeedFlow: '请先在「代理与恢复」开启本地转发与流量接管',
+            promptProxyWarnNeedAsar: '流量尚未接管，请到「代理与恢复」点击「开启接管」',
+            promptScopeLbl: '生效范围',
+            promptTabGlobal: '全局',
+            promptTabDefault: '默认',
+            promptTabWriting: '写作',
+            promptTabEng: '工程',
+            promptTabFull: '全面',
+            promptPlaceholderMode: '输入仅对「{tab}」生效的提示词（留空则仅用全局）…',
+            promptPresetLbl: '模板：',
+            presetSystemRole: '系统专家',
             presetAntiHalluc: '严谨防幻觉',
             presetConcise: '简洁极客',
             presetContract: '契约开发',
-            promptPlaceholder: '输入系统级角色定义、全局工程纪律、回复风格或操作契约（最多 20,000 字符）…',
+            promptPlaceholder: '输入全局系统提示词（最多 20,000 字符）…',
             promptClearBtn: '清空',
-            promptSaveBtn: '保存系统提示词',
-            promptUnsaved: '有未保存的修改',
-            promptSavedTip: 'Ctrl/Cmd + Enter 快捷保存',
-            modAutoAllow: '工具自动放行 Hook (PreToolUse)',
-            modAutoAllowDesc: '通过 ~/.gemini/config/hooks.json 自动放行指定工具，减少重复确认弹窗',
+            promptSaveBtn: '保存',
+            promptUnsaved: '未保存',
+            promptSavedTip: 'Ctrl/Cmd + Enter 保存',
+            modAutoAllow: '工具自动放行',
+            modAutoAllowDesc: '通过 Hook 自动放行指定工具操作',
             autoAllowModeLbl: '放行范围',
-            autoAllowModeDesc: '「含安全命令」内置高危破坏性命令拦截守卫，高危操作仍交由人工确认',
+            autoAllowModeDesc: '「含安全命令」会拦截高危破坏性命令',
             autoAllowFiles: '仅文件读写',
             autoAllowSafeCmd: '含安全命令',
             autoAllowAll: '全部放行',
-            autoAllowAllWarn: '注意：全部放行将跳过所有终端命令审批（含潜在破坏性命令），请谨慎开启。',
+            autoAllowAllWarn: '注意：全部放行将跳过所有终端命令审批，请谨慎开启。',
+            secSubagentRouting: '子代理模型分配',
+            modSubagentRouting: '按能力自动分配子代理模型',
+            modSubagentRoutingDesc: '主会话按任务复杂度从白名单中分配模型（支持自定义第三方模型 ID）',
+            subagentEmpty: '尚未添加允许用于子代理的模型，请从下方选择或手动输入（如 deepseek-4.1）',
+            subagentPickBtn: '+ 从可用模型选择',
+            subagentCustomPh: '自定义模型 ID（如 deepseek-4.1）',
+            subagentAddBtn: '添加',
+            tierAuto: '自动档位',
+            tierFast: '轻量',
+            tierBalanced: '均衡',
+            tierStrong: '高阶',
+            tierToggleTip: '点击切换能力档位',
+            modAutoTitle: '按进度自动更新标题',
+            modAutoTitleDesc: '每隔数轮按最新对话进展自动刷新会话标题',
+            autoTitleTurnsLbl: '触发轮数',
+            autoTitleTurnsUnit: '轮',
+            autoTitleCoolLbl: '冷却间隔',
+            autoTitleCoolUnit: '分',
+            autoTitleNowBtn: '立即更新标题',
+            autoTitleUpdating: '更新中…',
             presets: {
               systemRole:
                 '## 系统级角色与执行原则\n- 你是一位资深全栈系统架构师，所有技术判断以实际读取到的代码和命令输出为唯一依据。\n- 先定位根因再动手修改，不做表面修补与无关重构。\n- 每次改动后自动执行对应的语法检查或测试验证，仅汇报实际观测到的结果。\n- 回复简洁直接，先给结论与关键修改点，代码标识符与命令保持英文原样。',
@@ -451,50 +666,49 @@
               contract:
                 '## 契约式开发规范\n- 动手修改前先列出受影响文件清单与变更目标。\n- 严格遵守现有项目架构、命名风格与最小依赖原则。\n- 交付时简明总结改动点、验证命令与结果。'
             },
-            modMetrics: '实时会话状态与用量统计',
-            modMetricsDesc: '底部四态状态指示、一/二级明细面板与每轮对话尾部统计',
+            modMetrics: '实时状态与用量统计',
+            modMetricsDesc: '底部状态栏、明细浮窗与每轮尾部统计',
             secOptional: '可选增强',
-            secOptionalHint: '默认关闭，按需开启',
             modSuggest: '输入框下一句预测',
-            modSuggestDescPre: '回复结束后预测下一句指令，按 ',
+            modSuggestDescPre: '按 ',
             modSuggestDescMid: ' 或 ',
-            modSuggestDescPost: ' 补全（开启后后台常驻 ',
-            modSuggestDescEnd: ' 进程）',
+            modSuggestDescPost: ' 补全下一句（需本机 ',
+            modSuggestDescEnd: '）',
             agyIdle: '未启动',
             agyWarming: '预热中…',
-            agyReady: 'agy 就绪',
+            agyReady: '就绪',
             agyMissing: '未检测到 agy',
             suggestModelLbl: '预测模型',
-            suggestModelDescPre: '由 ',
-            suggestModelDescPost: ' 自动按模型与档位分组，推荐 Gemini 3.8 Flash Low',
+            suggestModelDescPre: '来源 ',
+            suggestModelDescPost: '，推荐 Gemini 3.8 Flash Low',
             refreshModelsTitle: '重新拉取 agy models',
             menuModelsHdr: '模型',
             recommendedBadge: '推荐',
-            modSsh: 'SSH Remote 远端只读统计',
-            modSshDesc: '通过远端只读 Python 提取脱敏数值元数据，不在本地拷贝 .db 文件',
-            sshHostsLbl: '允许探测的主机（sshHosts）',
+            modSsh: 'SSH 远端统计',
+            modSshDesc: '远端只读提取数值统计，不拷贝数据库',
+            sshHostsLbl: '允许主机',
             addHostBtn: '+ 添加主机',
             addHostPlaceholder: '如 node032',
             addHostOk: '添加',
-            secTelemetry: '状态栏偏好',
-            layoutLbl: '底部状态栏密度',
-            layoutDesc: '紧凑模式居中嵌在工具栏内；详细模式展开为底部居中独立行，补充 TTFT 与本步输出',
+            secTelemetry: '状态栏与统计',
+            layoutLbl: '状态栏密度',
+            layoutDesc: '紧凑嵌在工具栏内；详细展开为独立行',
             layoutCompact: '紧凑',
             layoutDetailed: '详细',
-            cacheLbl: '缓存命中率口径',
-            cacheDesc: '选择状态栏展示整个会话的累计命中率，或最近单步命中率',
+            cacheLbl: '缓存口径',
+            cacheDesc: '展示会话累计或单步命中率',
             cacheSession: '会话累计',
             cacheStep: '单步',
             secUpdate: '版本与更新',
             updTitle: '插件版本',
-            updDescIdle: '从 GitHub 仓库检查新版本并直接更新，保留 user/ 个人配置',
-            updDescChecking: '正在连接 GitHub 检查最新版本与文件清单…',
-            updDescUpToDate: '当前已与远端最新版本保持一致',
-            updDescAhead: '当前本地版本高于远端发布版本',
-            updDescAvailable: '发现新版本，点击直接更新并热重载生效，无需重启 Antigravity',
-            updDescMainDiff: '远端 main 分支有文件差异（含热修复或本地未推送改动），可一键同步最新 main',
-            updDescUpdating: '正在下载并校验更新文件，同时备份旧版本，请稍候…',
-            updDescApplied: '已更新完成，后台服务正在重启并热重载到当前窗口…',
+            updDescIdle: '从 GitHub 检查更新，保留个人配置',
+            updDescChecking: '正在检查最新版本…',
+            updDescUpToDate: '已是最新版本',
+            updDescAhead: '本地版本领先远端',
+            updDescAvailable: '发现新版本，可热更新生效',
+            updDescMainDiff: '远端 main 分支有更新',
+            updDescUpdating: '正在下载并校验更新…',
+            updDescApplied: '已更新，正在热重载…',
             updPillChecking: '检查中…',
             updPillLatest: '已是最新',
             updPillAhead: '本地领先',
@@ -513,62 +727,118 @@
         return {
           navTitle: 'Enhancements',
           pageTitle: 'Enhancements',
-          manualRefreshLabel: 'Reload theme & config',
+          manualRefreshLabel: 'Reload config',
           savedBadge: 'Synced',
           refreshedBadge: 'Refreshed',
           githubLabel: 'GitHub',
           feedbackLabel: 'Issues',
-          subtitlePrefix: 'Manage theme colors, localization, live telemetry, and opt-in modules. Changes sync directly to ',
-          subtitleSuffix: '.',
-          secCore: 'Core Modules',
+          tabAppearance: 'Appearance',
+          tabPrompts: 'Prompts & Hooks',
+          tabFlow: 'Relay & Recovery',
+          tabAdvanced: 'Add-ons & Updates',
+          secCore: 'Appearance & Language',
+          secFlowProxy: 'Local Relay',
+          secFlowStrategy: 'Output Recovery',
           modTheme: 'Codex Light & Dark Theme',
-          modThemeDesc: 'Pure white light and charcoal dark palettes that follow IDE appearance automatically',
+          modThemeDesc: 'Follows IDE light/dark appearance automatically',
           modI18n: 'Chinese UI Localization',
-          modI18nDesc: '2,300+ curated UI entries applied in place; disable to restore English immediately',
+          modI18nDesc: 'Disable to restore English immediately',
           localeLbl: 'Display Language',
-          localeDesc: 'Switch interface locale live without restarting',
+          localeDesc: 'Switch live without restarting',
           locZhCn: '简体中文',
           locZhSg: '简中·英术',
           locZhTw: '繁體中文',
           locEn: 'English',
-          syncAiLangLbl: 'Sync AI Thinking & Reply Language',
-          syncAiLangDesc: 'Manages a global rule file so agent thinking and replies follow your active UI locale (off by default)',
-          secPromptHooks: 'System Prompt & Lifecycle Hooks',
-          secPromptHooksHint: 'Manages GEMINI.md, rules & hooks.json safely',
+          syncAiLangLbl: 'Sync AI Reply Language',
+          syncAiLangDesc: 'Keep agent thinking and replies in UI language',
+          secPromptHooks: 'System Prompt & Permissions',
+          modFlow: 'Chat Mode & Local Relay',
+          modFlowDesc: 'Adds per-chat mode picker and local relay',
+          flowDefaultModeLbl: 'Default Mode',
+          flowDefaultModeDesc: 'Applied to new conversations',
+          flowModeDefault: 'Default',
+          flowModeWriting: 'Writing',
+          flowModeEng: 'Engineering',
+          flowModeFull: 'Full',
+          flowMaxContLbl: 'Max Continuations',
+          flowMaxContDesc: 'Auto-continue cut-off replies (0 = off)',
+          flowRewriteLbl: 'Refusal Rewrite',
+          flowRewriteDesc: 'Retry cleanly with the same model on refusal',
+          flowHardeningLbl: 'File Output',
+          flowHardeningDesc: 'Save writing drafts to files',
+          flowJudgeLbl: 'Ending Judge',
+          flowJudgeDesc: 'Check incomplete endings via fast model',
+          flowSoftenLbl: 'Soften Retry',
+          flowSoftenDesc: 'Soften wording and trim history on retry',
+          flowRemapLbl: 'Fallback Model',
+          flowRemapDesc: 'Switch model in Full mode if still blocked',
+          flowAsarLbl: 'Traffic Redirect',
+          flowAsarEnable: 'Enable Redirect',
+          flowAsarDisable: 'Restore Default',
+          flowProxyOnline: 'Running',
+          flowProxyOffline: 'Stopped',
+          flowAsarPatched: 'Active',
+          flowAsarOriginal: 'Off',
+          flowAsarMissing: 'app.asar missing',
           modCustomPrompt: 'System-Level Custom Prompt',
-          modCustomPromptDesc: 'Applies across all workspaces via global system instruction files and system-role hooks (zero binary patching)',
-          promptModeLbl: 'System Injection Channel',
-          promptModeDesc: 'System Dual recommended: syncs global ~/.gemini/GEMINI.md plus a SessionStart systemMessage',
-          promptModeDual: 'System Dual',
-          promptModeGemini: 'Global GEMINI.md',
-          promptModeRule: 'Global Rule',
-          promptModePreInv: 'PreInvocation',
-          promptEveryInvLbl: 'Re-assert before every model invocation',
-          promptEveryInvDesc: 'Off injects once per turn (cache-friendly); On re-injects as systemMessage on every call to prevent drift',
-          promptTargetPrefix: 'Active system target: ',
-          promptTargetDual: '~/.gemini/GEMINI.md (managed block) + ~/.gemini/config/hooks.json (SessionStart · systemMessage)',
-          promptTargetGemini: '~/.gemini/GEMINI.md (managed block, App/CLI/IDE universal)',
-          promptTargetRule: '~/.gemini/config/rules/98_antigravity_theme_system_prompt.md (trigger: always_on)',
-          promptTargetSession: '~/.gemini/config/hooks.json (SessionStart · systemMessage)',
-          promptTargetPreInv: '~/.gemini/config/hooks.json (PreInvocation · systemMessage)',
-          promptPresetLbl: 'System Presets:',
-          presetSystemRole: 'System Architect',
-          presetAntiHalluc: 'Anti-Hallucination',
-          presetConcise: 'Concise Engineer',
-          presetContract: 'Contract Mode',
-          promptPlaceholder: 'Enter system-level persona, engineering standards, or operator contract (up to 20,000 chars)…',
+          modCustomPromptDesc: 'Global & per-mode prompts (inherited by subagents)',
+          promptModeLbl: 'Injection Method',
+          promptModeDescProxy: 'Injected on outbound requests with zero history bloat',
+          promptModeDescHook: 'Injected via native Hook with fingerprint dedup',
+          promptModePreInv: 'Hook',
+          promptModeProxy: 'Proxy',
+          promptTimingLbl: 'Injection Frequency',
+          promptTimingDescSession: 'Once per session, zero context growth',
+          promptTimingDescEvery: 'Reinforced on every turn tail without saving to history',
+          promptTimingSession: 'Per Session',
+          promptTimingEvery: 'Every Turn',
+          promptProxyWarnNeedFlow: 'Enable Local Relay & Traffic Redirect in Relay tab first',
+          promptProxyWarnNeedAsar: 'Redirect inactive — click Enable Redirect in Relay tab',
+          promptScopeLbl: 'Scope',
+          promptTabGlobal: 'Global',
+          promptTabDefault: 'Default',
+          promptTabWriting: 'Writing',
+          promptTabEng: 'Eng',
+          promptTabFull: 'Full',
+          promptPlaceholderMode: 'Prompt for "{tab}" mode only (blank uses Global)…',
+          promptPresetLbl: 'Presets:',
+          presetSystemRole: 'Architect',
+          presetAntiHalluc: 'Strict Verify',
+          presetConcise: 'Concise',
+          presetContract: 'Contract',
+          promptPlaceholder: 'Enter global system prompt (max 20,000 chars)…',
           promptClearBtn: 'Clear',
-          promptSaveBtn: 'Save System Prompt',
-          promptUnsaved: 'Unsaved changes',
+          promptSaveBtn: 'Save',
+          promptUnsaved: 'Unsaved',
           promptSavedTip: 'Ctrl/Cmd + Enter to save',
-          modAutoAllow: 'Tool Auto-Allow Hook (PreToolUse)',
-          modAutoAllowDesc: 'Automatically approves matching tools via ~/.gemini/config/hooks.json',
-          autoAllowModeLbl: 'Approval Scope',
-          autoAllowModeDesc: 'Safe Commands guards against destructive shell commands and escalates them to manual ask',
+          modAutoAllow: 'Auto-Allow Tools',
+          modAutoAllowDesc: 'Approve selected tools automatically via Hook',
+          autoAllowModeLbl: 'Scope',
+          autoAllowModeDesc: 'Safe Commands guards against destructive shell commands',
           autoAllowFiles: 'Files Only',
           autoAllowSafeCmd: 'Safe Commands',
           autoAllowAll: 'Allow All',
-          autoAllowAllWarn: 'Warning: Allow All skips confirmation for every run_command call, including destructive commands.',
+          autoAllowAllWarn: 'Warning: Allow All skips confirmation for every run_command call.',
+          secSubagentRouting: 'Subagent Model Routing',
+          modSubagentRouting: 'Auto-Assign Subagent Models',
+          modSubagentRoutingDesc: 'Let the main agent pick subagent models by difficulty from your whitelist (supports custom IDs)',
+          subagentEmpty: 'No allowed subagent models yet. Pick from available models or enter a custom ID (e.g. deepseek-4.1).',
+          subagentPickBtn: '+ Pick Model',
+          subagentCustomPh: 'Custom model ID (e.g. deepseek-4.1)',
+          subagentAddBtn: 'Add',
+          tierAuto: 'Auto tier',
+          tierFast: 'Fast',
+          tierBalanced: 'Balanced',
+          tierStrong: 'Strong',
+          tierToggleTip: 'Click to cycle capability tier',
+          modAutoTitle: 'Auto-Update Conversation Title',
+          modAutoTitleDesc: 'Refresh conversation title periodically as task progress evolves',
+          autoTitleTurnsLbl: 'Every N Turns',
+          autoTitleTurnsUnit: 'turns',
+          autoTitleCoolLbl: 'Cooldown',
+          autoTitleCoolUnit: 'min',
+          autoTitleNowBtn: 'Refresh Now',
+          autoTitleUpdating: 'Updating…',
           presets: {
             systemRole:
               '## System-Level Persona & Operating Rules\n- Act as a principal systems engineer; ground every claim in inspected source files and real command output.\n- Diagnose root causes before editing; avoid band-aids and unrelated refactors.\n- Run relevant checks/tests after edits and report only observed results.\n- Lead with concise conclusions and exact file/line references.',
@@ -579,50 +849,49 @@
             contract:
               '## Contract-Driven Workflow\n- Outline affected files and intent before making broad edits.\n- Follow existing codebase conventions and summarize verified changes clearly.'
           },
-          modMetrics: 'Live Session Status & Telemetry',
-          modMetricsDesc: 'Bottom 4-state status indicator, expandable L1/L2 panels, and per-turn footer stats',
-          secOptional: 'Optional Enhancements',
-          secOptionalHint: 'Off by default, opt-in',
+          modMetrics: 'Live Status & Telemetry',
+          modMetricsDesc: 'Bottom status bar, detail popover, and turn footer stats',
+          secOptional: 'Optional Add-ons',
           modSuggest: 'Prompt Suggestions',
-          modSuggestDescPre: 'Predicts the next prompt after each turn; press ',
+          modSuggestDescPre: 'Press ',
           modSuggestDescMid: ' or ',
-          modSuggestDescPost: ' to accept (runs a background ',
-          modSuggestDescEnd: ' worker when enabled)',
+          modSuggestDescPost: ' to accept (requires ',
+          modSuggestDescEnd: ')',
           agyIdle: 'Stopped',
-          agyWarming: 'Warming up…',
-          agyReady: 'agy Ready',
-          agyMissing: 'agy not found',
-          suggestModelLbl: 'Suggestion Model',
-          suggestModelDescPre: 'Grouped automatically from ',
+          agyWarming: 'Warming…',
+          agyReady: 'Ready',
+          agyMissing: 'agy missing',
+          suggestModelLbl: 'Model',
+          suggestModelDescPre: 'From ',
           suggestModelDescPost: '; Gemini 3.8 Flash Low recommended',
           refreshModelsTitle: 'Refresh agy models',
           menuModelsHdr: 'Models',
           recommendedBadge: 'Rec',
-          modSsh: 'SSH Remote Read-Only Telemetry',
-          modSshDesc: 'Extracts sanitized numeric metadata via remote read-only Python with zero local .db copy',
-          sshHostsLbl: 'Allowed SSH Hosts (sshHosts)',
+          modSsh: 'SSH Remote Stats',
+          modSshDesc: 'Read-only remote metrics without copying .db files',
+          sshHostsLbl: 'Allowed Hosts',
           addHostBtn: '+ Add host',
           addHostPlaceholder: 'e.g. node032',
           addHostOk: 'Add',
-          secTelemetry: 'Status Bar Preferences',
-          layoutLbl: 'Status Bar Density',
-          layoutDesc: 'Compact sits centered inline; Detailed expands to a centered bottom row with TTFT and step output',
+          secTelemetry: 'Status Bar & Telemetry',
+          layoutLbl: 'Bar Density',
+          layoutDesc: 'Compact inline or Detailed dedicated row',
           layoutCompact: 'Compact',
           layoutDetailed: 'Detailed',
-          cacheLbl: 'Cache Hit Rate Scope',
-          cacheDesc: 'Display cumulative session cache hit rate or last-step hit rate',
+          cacheLbl: 'Cache Scope',
+          cacheDesc: 'Cumulative session or last-step hit rate',
           cacheSession: 'Session',
           cacheStep: 'Step',
           secUpdate: 'Updates',
           updTitle: 'Plugin Version',
-          updDescIdle: 'Check GitHub for updates and apply directly; user/ config is preserved',
-          updDescChecking: 'Checking GitHub for the latest release and manifest…',
-          updDescUpToDate: 'You are running the latest version',
-          updDescAhead: 'Local build is ahead of remote release',
-          updDescAvailable: 'A newer release is available; updates apply live without restarting Antigravity',
-          updDescMainDiff: 'Remote main branch differs (hotfix or local changes); click Sync main to pull latest',
-          updDescUpdating: 'Downloading and verifying update files while backing up previous version…',
-          updDescApplied: 'Update applied; restarting background daemon to hot-reload this window…',
+          updDescIdle: 'Check GitHub for updates; user config is preserved',
+          updDescChecking: 'Checking latest release…',
+          updDescUpToDate: 'Up to date',
+          updDescAhead: 'Local build is ahead',
+          updDescAvailable: 'Update available; applies live without restart',
+          updDescMainDiff: 'Remote main branch has updates',
+          updDescUpdating: 'Downloading and verifying…',
+          updDescApplied: 'Updated; reloading window…',
           updPillChecking: 'Checking…',
           updPillLatest: 'Up to date',
           updPillAhead: 'Local ahead',
@@ -631,7 +900,7 @@
           updPillUpdating: 'Updating…',
           updPillApplied: 'Updated',
           updPillErr: 'Failed',
-          updBtnCheck: 'Check for Updates',
+          updBtnCheck: 'Check',
           updBtnChecking: 'Checking…',
           updBtnApply: 'Update Now',
           updBtnSyncMain: 'Sync main',
@@ -708,7 +977,7 @@
             res.config.customSystemPrompt && typeof res.config.customSystemPrompt === 'object'
               ? {
                   enabled: Boolean(res.config.customSystemPrompt.enabled),
-                  mode: res.config.customSystemPrompt.mode || 'system-dual',
+                  mode: res.config.customSystemPrompt.mode || 'flow-proxy',
                   text: typeof res.config.customSystemPrompt.text === 'string' ? res.config.customSystemPrompt.text : '',
                   everyInvocation: Boolean(res.config.customSystemPrompt.everyInvocation)
                 }
@@ -720,6 +989,23 @@
                   mode: res.config.hookAutoAllow.mode || 'files'
                 }
               : uiState.config.hookAutoAllow;
+          const nextFlow =
+            res.config.flow && typeof res.config.flow === 'object'
+              ? Object.assign({}, DEFAULT_FLOW_UI, uiState.config.flow || {}, res.config.flow)
+              : uiState.config.flow;
+          const nextAutoTitle =
+            res.config.autoTitle && typeof res.config.autoTitle === 'object'
+              ? Object.assign({}, DEFAULT_AUTO_TITLE_UI, uiState.config.autoTitle || {}, res.config.autoTitle)
+              : uiState.config.autoTitle;
+          const nextSubRouting =
+            res.config.subagentRouting && typeof res.config.subagentRouting === 'object'
+              ? {
+                  enabled: Boolean(res.config.subagentRouting.enabled),
+                  allowedModels: Array.isArray(res.config.subagentRouting.allowedModels)
+                    ? res.config.subagentRouting.allowedModels.map((m) => Object.assign({}, m))
+                    : []
+                }
+              : uiState.config.subagentRouting;
           uiState.config = {
             i18nLocale: res.config.i18nLocale || uiState.config.i18nLocale || 'zh-CN',
             syncAiOutputLang:
@@ -728,15 +1014,21 @@
                 : Boolean(uiState.config.syncAiOutputLang),
             customSystemPrompt: nextSp,
             hookAutoAllow: nextAa,
+            flow: nextFlow,
+            autoTitle: nextAutoTitle,
+            subagentRouting: nextSubRouting,
             telemetryLayout: res.config.telemetryLayout || uiState.config.telemetryLayout,
             telemetryCacheMode: res.config.telemetryCacheMode || uiState.config.telemetryCacheMode,
             promptSuggestionModel: res.config.promptSuggestionModel || uiState.config.promptSuggestionModel,
             sshHosts: Array.isArray(res.config.sshHosts) ? res.config.sshHosts.slice() : uiState.config.sshHosts,
             modules: Object.assign({}, uiState.config.modules, res.config.modules || {})
           };
-          if (promptDraft === null) {
-            setPromptDraft(nextSp.text);
+          if (typeof promptDrafts.global !== 'string') {
+            setDraftForTab('global', nextSp.text);
           }
+        }
+        if (res.flowStatus && typeof res.flowStatus === 'object') {
+          uiState.flowStatus = res.flowStatus;
         }
         if (res.agyStatus) {
           uiState.agyStatus = Object.assign({}, res.agyStatus);
@@ -873,11 +1165,27 @@
         if (patch.customSystemPrompt && typeof patch.customSystemPrompt === 'object') {
           uiState.config.customSystemPrompt = Object.assign({}, uiState.config.customSystemPrompt, patch.customSystemPrompt);
           if (typeof patch.customSystemPrompt.text === 'string') {
-            setPromptDraft(patch.customSystemPrompt.text);
+            setDraftForTab('global', patch.customSystemPrompt.text);
           }
         }
         if (patch.hookAutoAllow && typeof patch.hookAutoAllow === 'object') {
           uiState.config.hookAutoAllow = Object.assign({}, uiState.config.hookAutoAllow, patch.hookAutoAllow);
+        }
+        if (patch.flow && typeof patch.flow === 'object') {
+          uiState.config.flow = Object.assign({}, DEFAULT_FLOW_UI, uiState.config.flow || {}, patch.flow);
+        }
+        if (patch.autoTitle && typeof patch.autoTitle === 'object') {
+          uiState.config.autoTitle = Object.assign({}, DEFAULT_AUTO_TITLE_UI, uiState.config.autoTitle || {}, patch.autoTitle);
+        }
+        if (patch.subagentRouting && typeof patch.subagentRouting === 'object') {
+          const curSr = uiState.config.subagentRouting || { enabled: false, allowedModels: [] };
+          uiState.config.subagentRouting = {
+            enabled:
+              typeof patch.subagentRouting.enabled === 'boolean' ? patch.subagentRouting.enabled : Boolean(curSr.enabled),
+            allowedModels: Array.isArray(patch.subagentRouting.allowedModels)
+              ? patch.subagentRouting.allowedModels.map((m) => Object.assign({}, m))
+              : (curSr.allowedModels || []).slice()
+          };
         }
         if (patch.telemetryLayout) uiState.config.telemetryLayout = patch.telemetryLayout;
         if (patch.telemetryCacheMode) uiState.config.telemetryCacheMode = patch.telemetryCacheMode;
@@ -924,9 +1232,66 @@
         }, 1500);
       }
 
+      const VALID_CUSTOM_MODEL_RE = /^[a-zA-Z0-9._:/-]{2,80}$/;
+
+      function inferSubagentTierLocal(modelId) {
+        const low = String(modelId || '').toLowerCase();
+        if (/flash|lite|mini|haiku|small|fast|low$/.test(low)) return 'fast';
+        if (/opus|xhigh|max|pro|r1|reasoner|4\.1|high$/.test(low)) return 'strong';
+        return 'balanced';
+      }
+
+      function addSubagentAllowedModel(rawId, tierOverride) {
+        const id = String(rawId || '').trim();
+        if (!id || id.startsWith('-') || !VALID_CUSTOM_MODEL_RE.test(id)) return false;
+        const curSr = uiState.config.subagentRouting || { enabled: false, allowedModels: [] };
+        const list = Array.isArray(curSr.allowedModels) ? curSr.allowedModels.map((m) => Object.assign({}, m)) : [];
+        if (list.some((m) => String(m.id || '').toLowerCase() === id.toLowerCase())) {
+          return true;
+        }
+        const tier =
+          tierOverride === 'fast' || tierOverride === 'balanced' || tierOverride === 'strong'
+            ? tierOverride
+            : inferSubagentTierLocal(id);
+        list.push({ id, tier, note: '' });
+        commitPatch({ subagentRouting: { allowedModels: list } });
+        return true;
+      }
+
+      function getPickerModelId(targetKey) {
+        if (targetKey === 'subagentRouting.add') {
+          return '';
+        }
+        if (targetKey === 'flow.judgeModel') {
+          return (uiState.config.flow && uiState.config.flow.judgeModel) || DEFAULT_FLOW_UI.judgeModel;
+        }
+        if (targetKey === 'flow.remapTargetModel') {
+          return (uiState.config.flow && uiState.config.flow.remapTargetModel) || DEFAULT_FLOW_UI.remapTargetModel;
+        }
+        return uiState.config.promptSuggestionModel || 'gemini-3.8-flash-low';
+      }
+
+      function commitPickerModelId(targetKey, modelId) {
+        if (!modelId) return;
+        if (targetKey === 'subagentRouting.add') {
+          addSubagentAllowedModel(modelId, '');
+          return;
+        }
+        if (targetKey === 'flow.judgeModel') {
+          commitPatch({ flow: { judgeModel: modelId } });
+          return;
+        }
+        if (targetKey === 'flow.remapTargetModel') {
+          commitPatch({ flow: { remapTargetModel: modelId } });
+          return;
+        }
+        commitPatch({ promptSuggestionModel: modelId });
+      }
+
       function updateRefreshSpin() {
-        const icon = document.getElementById('ag-s-refresh-icon');
-        if (icon) icon.classList.toggle('ag-s-spin', Boolean(refreshingModels));
+        document.querySelectorAll('.ag-s-refresh-models-icon').forEach((icon) => {
+          icon.classList.toggle('ag-s-spin', Boolean(refreshingModels));
+        });
         const hdrIcon = document.getElementById('ag-s-manual-refresh-icon');
         if (hdrIcon) hdrIcon.classList.toggle('ag-s-spin', Boolean(refreshingAll));
       }
@@ -940,7 +1305,7 @@
         }
         const sub = document.getElementById('ag-settings-effort-menu');
         const root = document.getElementById('ag-settings-model-menu');
-        const trigger = document.getElementById('ag-s-model-trigger');
+        const trigger = activeModelPickerTriggerId ? document.getElementById(activeModelPickerTriggerId) : null;
         if (sub) {
           if (SUPPORTS_POPOVER) {
             try {
@@ -959,14 +1324,14 @@
             root.hidden = true;
           }
         }
-        if (trigger) {
-          trigger.setAttribute('aria-expanded', 'false');
-          if (restoreFocus) {
-            try {
-              trigger.focus({ focusVisible: !fromPointer });
-            } catch {
-              try { trigger.focus(); } catch {}
-            }
+        document.querySelectorAll('[data-model-picker-target]').forEach((el) => {
+          el.setAttribute('aria-expanded', 'false');
+        });
+        if (trigger && restoreFocus) {
+          try {
+            trigger.focus({ focusVisible: !fromPointer });
+          } catch {
+            try { trigger.focus(); } catch {}
           }
         }
       }
@@ -1038,7 +1403,7 @@
 
         const listEl = sub.querySelector('.ag-s-menu-list');
         if (listEl) {
-          const curId = uiState.config.promptSuggestionModel;
+          const curId = getPickerModelId(activeModelPickerTarget);
           listEl.innerHTML = fam.efforts
             .map((ef) => {
               const isSel = ef.id === curId;
@@ -1107,7 +1472,9 @@
 
         const listEl = root.querySelector('.ag-s-menu-list');
         if (!listEl) return;
-        const selInfo = findSelectedModelInfo(uiState.config.promptSuggestionModel);
+        const curModelId = getPickerModelId(activeModelPickerTarget);
+        const selInfo = findSelectedModelInfo(curModelId);
+        const showRecBadge = activeModelPickerTarget !== 'flow.remapTargetModel';
         const families = uiState.families || AG_SETTINGS_FALLBACK_FAMILIES;
 
         listEl.innerHTML = families
@@ -1138,7 +1505,7 @@
               escHtml(fam.name) +
               '</span>' +
               (displayEffort ? '<span class="ag-s-menu-row-effort">' + escHtml(displayEffort) + '</span>' : '') +
-              (fam.recommended ? '<span class="ag-s-menu-badge">' + escHtml(s.recommendedBadge) + '</span>' : '') +
+              (showRecBadge && fam.recommended ? '<span class="ag-s-menu-badge">' + escHtml(s.recommendedBadge) + '</span>' : '') +
               '</span>' +
               '<span class="ag-s-menu-row-right" aria-hidden="true">' +
               (hasSub
@@ -1203,7 +1570,7 @@
         document.body.appendChild(root);
 
         root.addEventListener('toggle', (ev) => {
-          const trigger = document.getElementById('ag-s-model-trigger');
+          const trigger = activeModelPickerTriggerId ? document.getElementById(activeModelPickerTriggerId) : null;
           const open = ev.newState === 'open';
           if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
           if (!open && isPopoverOpen(sub)) {
@@ -1265,8 +1632,9 @@
           const fam = (uiState.families || AG_SETTINGS_FALLBACK_FAMILIES).find((f) => f.key === key);
           if (!fam) return;
           if (fam.singleId) {
+            const targetKey = activeModelPickerTarget;
             hideModelMenus({ restoreFocus: true, fromPointer: ev.detail !== 0 });
-            commitPatch({ promptSuggestionModel: fam.singleId });
+            commitPickerModelId(targetKey, fam.singleId);
           } else {
             hoveredFamilyKey = key;
             openEffortSubmenu(fam, row, { focusFirst: ev.detail === 0 });
@@ -1279,8 +1647,9 @@
           if (!btn) return;
           const id = btn.getAttribute('data-pick-effort');
           if (!id) return;
+          const targetKey = activeModelPickerTarget;
           hideModelMenus({ restoreFocus: true, fromPointer: ev.detail !== 0 });
-          commitPatch({ promptSuggestionModel: id });
+          commitPickerModelId(targetKey, id);
         });
 
         // Keyboard navigation across Level 1 & Level 2
@@ -1342,11 +1711,24 @@
 
       function toggleModelMenu(triggerBtn, fromKeyboard) {
         const root = ensureModelPopovers();
-        if (isPopoverOpen(root)) {
+        const nextTarget =
+          (triggerBtn && triggerBtn.getAttribute && triggerBtn.getAttribute('data-model-picker-target')) ||
+          'promptSuggestionModel';
+        const nextTriggerId = (triggerBtn && triggerBtn.id) || 'ag-s-model-trigger';
+        const sameTrigger = isPopoverOpen(root) && activeModelPickerTriggerId === nextTriggerId;
+        if (sameTrigger) {
           hideModelMenus({ restoreFocus: fromKeyboard, fromPointer: !fromKeyboard });
           return;
         }
-        const selInfo = findSelectedModelInfo(uiState.config.promptSuggestionModel);
+        if (isPopoverOpen(root)) {
+          hideModelMenus({ restoreFocus: false });
+        }
+        activeModelPickerTarget = nextTarget;
+        activeModelPickerTriggerId = nextTriggerId;
+        const fg = root.firstElementChild;
+        if (fg && nextTriggerId) fg.setAttribute('aria-labelledby', nextTriggerId);
+
+        const selInfo = findSelectedModelInfo(getPickerModelId(activeModelPickerTarget));
         hoveredFamilyKey = selInfo.family.key || (uiState.families[0] && uiState.families[0].key) || '';
         renderModelMenuItems();
 
@@ -1525,23 +1907,90 @@
 
         const cfg = uiState.config;
         const mods = cfg.modules || {};
+        const metricsOn = mods.metrics !== false;
         const psOn = Boolean(mods.promptSuggestions);
         const sshOn = Boolean(mods.sshRemote);
-        const sp = cfg.customSystemPrompt || { enabled: false, mode: 'system-dual', text: '', everyInvocation: false };
+        const sp = cfg.customSystemPrompt || { enabled: false, mode: 'flow-proxy', text: '', everyInvocation: false };
+        const effectiveSpMode = sp.mode || 'flow-proxy';
         const aa = cfg.hookAutoAllow || { enabled: false, mode: 'files' };
-        const draftVal = promptDraft !== null ? promptDraft : sp.text || '';
-        const isDirty = draftVal !== (sp.text || '');
-        const promptTargetText =
-          sp.mode === 'global-gemini'
-            ? s.promptTargetGemini
-            : sp.mode === 'rule'
-            ? s.promptTargetRule
-            : sp.mode === 'session-start'
-            ? s.promptTargetSession
-            : sp.mode === 'pre-invocation'
-            ? s.promptTargetPreInv
-            : s.promptTargetDual;
+        const fl = Object.assign({}, DEFAULT_FLOW_UI, cfg.flow || {});
+        const at = Object.assign({}, DEFAULT_AUTO_TITLE_UI, cfg.autoTitle || {});
+        const sr = cfg.subagentRouting && typeof cfg.subagentRouting === 'object' ? cfg.subagentRouting : DEFAULT_SUBAGENT_ROUTING_UI;
+        const subModels = Array.isArray(sr.allowedModels) ? sr.allowedModels : [];
+        const tierLabelMap = { fast: s.tierFast, balanced: s.tierBalanced, strong: s.tierStrong };
+        const subModelsHtml = subModels.length
+          ? subModels
+              .map((m, idx) => {
+                const t = m.tier === 'fast' || m.tier === 'strong' ? m.tier : 'balanced';
+                return (
+                  '<div class="ag-s-submodel-item">' +
+                  '<span class="ag-s-submodel-id" title="' +
+                  escHtml(m.id) +
+                  '">' +
+                  escHtml(m.id) +
+                  '</span>' +
+                  '<span class="ag-s-submodel-right">' +
+                  '<button type="button" class="ag-s-tier-pill" data-cycle-submodel-tier="' +
+                  idx +
+                  '" data-tier="' +
+                  t +
+                  '" title="' +
+                  escHtml(s.tierToggleTip) +
+                  '">' +
+                  escHtml(tierLabelMap[t] || t) +
+                  '</button>' +
+                  '<button type="button" class="ag-s-chip-rm" data-rm-submodel="' +
+                  idx +
+                  '" aria-label="Remove ' +
+                  escHtml(m.id) +
+                  '">×</button>' +
+                  '</span>' +
+                  '</div>'
+                );
+              })
+              .join('')
+          : '<div class="ag-s-submodel-empty">' + escHtml(s.subagentEmpty) + '</div>';
+        const flowOn = Boolean(mods.flow);
+        const flProxy = uiState.flowStatus && uiState.flowStatus.proxy ? uiState.flowStatus.proxy : { running: false, port: fl.port || 18100 };
+        const flAsar = uiState.flowStatus && uiState.flowStatus.asar ? uiState.flowStatus.asar : { found: false, patched: false, status: 'missing' };
+        const flowStatusLine =
+          (flProxy.running ? s.flowProxyOnline + ' :' + flProxy.port : s.flowProxyOffline) +
+          ' · ' +
+          (flAsar.patched ? s.flowAsarPatched : flAsar.found ? s.flowAsarOriginal : s.flowAsarMissing) +
+          (flowAsarMsg ? ' · ' + flowAsarMsg : '');
+        const asarToggleLabel = flAsar.patched ? s.flowAsarDisable : s.flowAsarEnable;
+        const asarToggleAction = flAsar.patched ? 'rollback' : 'apply';
+        const asarToggleCls = flAsar.patched ? 'ag-s-btn-secondary' : 'ag-s-btn-primary';
+        const asarToggleDisabled = !flAsar.found;
+        const curSection = SECTION_TAB_KEYS.includes(activeSectionTab) ? activeSectionTab : 'appearance';
+        const curTab = PROMPT_TAB_KEYS.includes(activePromptTab) ? activePromptTab : 'global';
+        const isGlobalTab = curTab === 'global';
+        const tabLabelMap = {
+          global: s.promptTabGlobal,
+          default: s.promptTabDefault,
+          writing: s.promptTabWriting,
+          engineering: s.promptTabEng,
+          full: s.promptTabFull
+        };
+        const savedVal = getSavedPromptForTab(curTab);
+        const draftVal = getDraftForTab(curTab);
+        const isDirty = draftVal !== savedVal;
+        const isProxySpMode = effectiveSpMode === 'flow-proxy';
+        const promptModeDescText = isProxySpMode ? s.promptModeDescProxy : s.promptModeDescHook;
+        const promptTimingDescText = sp.everyInvocation ? s.promptTimingDescEvery : s.promptTimingDescSession;
+        const promptProxyWarnText = isProxySpMode
+          ? !flowOn
+            ? s.promptProxyWarnNeedFlow
+            : !flAsar.patched
+            ? s.promptProxyWarnNeedAsar
+            : ''
+          : '';
+        const promptPlaceholderText = isGlobalTab
+          ? s.promptPlaceholder
+          : s.promptPlaceholderMode.replace('{tab}', tabLabelMap[curTab] || curTab);
         const selInfo = findSelectedModelInfo(cfg.promptSuggestionModel);
+        const judgeSelInfo = findSelectedModelInfo(fl.judgeModel);
+        const remapSelInfo = findSelectedModelInfo(fl.remapTargetModel);
         const savedActive = Boolean(window.__ag_settings_saved_until && Date.now() < window.__ag_settings_saved_until);
         const activeLoc = getActiveLocale();
 
@@ -1601,8 +2050,20 @@
           renderedLocale === activeLoc &&
           pane.querySelector &&
           pane.querySelector('#ag-s-sw-theme') &&
+          pane.querySelector('#ag-s-nav-tabs') &&
           pane.querySelector('#ag-s-update-card')
         ) {
+          pane.querySelectorAll('.ag-s-nav-tab[data-section-tab]').forEach((btn) => {
+            const k = btn.getAttribute('data-section-tab') || '';
+            const nextStr = k === curSection ? 'true' : 'false';
+            if (btn.getAttribute('aria-selected') !== nextStr) btn.setAttribute('aria-selected', nextStr);
+          });
+          pane.querySelectorAll('.ag-s-tab-panel[data-settings-panel]').forEach((panel) => {
+            const k = panel.getAttribute('data-settings-panel') || '';
+            const hide = k !== curSection;
+            if (Boolean(panel.hidden) !== hide) panel.hidden = hide;
+          });
+
           const syncSwitch = (id, checked) => {
             const el = document.getElementById(id);
             if (el && Boolean(el.checked) !== Boolean(checked)) {
@@ -1612,12 +2073,19 @@
           syncSwitch('ag-s-sw-theme', mods.theme !== false);
           syncSwitch('ag-s-sw-i18n', mods.i18n !== false);
           syncSwitch('ag-s-sw-ai-lang', Boolean(cfg.syncAiOutputLang));
-          syncSwitch('ag-s-sw-metrics', mods.metrics !== false);
+          syncSwitch('ag-s-sw-metrics', metricsOn);
           syncSwitch('ag-s-sw-suggest', psOn);
           syncSwitch('ag-s-sw-ssh', sshOn);
           syncSwitch('ag-s-sw-custom-prompt', Boolean(sp.enabled));
-          syncSwitch('ag-s-sw-prompt-every-inv', Boolean(sp.everyInvocation));
           syncSwitch('ag-s-sw-auto-allow', Boolean(aa.enabled));
+          syncSwitch('ag-s-sw-subagent-routing', Boolean(sr.enabled));
+          syncSwitch('ag-s-sw-auto-title', Boolean(at.enabled));
+          syncSwitch('ag-s-sw-flow', flowOn);
+          syncSwitch('ag-s-sw-flow-rewrite', Boolean(fl.refusalRewrite));
+          syncSwitch('ag-s-sw-flow-hardening', Boolean(fl.outputChannelHardening));
+          syncSwitch('ag-s-sw-flow-judge', Boolean(fl.judgeEnabled));
+          syncSwitch('ag-s-sw-flow-soften', Boolean(fl.softenEnabled));
+          syncSwitch('ag-s-sw-flow-remap', Boolean(fl.remapEnabled));
 
           pane.querySelectorAll('.ag-s-seg-btn[data-seg]').forEach((btn) => {
             const field = btn.getAttribute('data-seg');
@@ -1639,8 +2107,13 @@
             const spec = btn.getAttribute('data-nested-seg') || '';
             const val = btn.getAttribute('data-val');
             const parts = spec.split('.');
-            const curObj = parts.length === 2 ? cfg[parts[0]] || {} : {};
-            const nextStr = curObj[parts[1]] === val ? 'true' : 'false';
+            let curVal = parts.length === 2 ? (cfg[parts[0]] || {})[parts[1]] : undefined;
+            if (spec === 'customSystemPrompt.mode') {
+              curVal = isProxySpMode ? 'flow-proxy' : 'pre-invocation';
+            } else if (spec === 'customSystemPrompt.everyInvocation') {
+              curVal = sp.everyInvocation ? 'true' : 'false';
+            }
+            const nextStr = String(curVal) === String(val) ? 'true' : 'false';
             if (btn.getAttribute('aria-pressed') !== nextStr) btn.setAttribute('aria-pressed', nextStr);
           });
 
@@ -1649,16 +2122,66 @@
             if (el && Boolean(el.hidden) !== Boolean(hide)) el.hidden = Boolean(hide);
           };
           setHidden('ag-s-sub-ai-lang', !(mods.i18n !== false && activeLoc !== 'en'));
+          setHidden('ag-s-sub-metrics-layout', !metricsOn);
+          setHidden('ag-s-sub-metrics-cache', !metricsOn);
           setHidden('ag-s-sub-suggest', !psOn);
           setHidden('ag-s-sub-ssh', !sshOn);
           setHidden('ag-s-sub-custom-prompt', !sp.enabled);
-          setHidden('ag-s-prompt-every-inv-row', sp.mode !== 'pre-invocation');
+          setHidden('ag-s-prompt-proxy-warn', !promptProxyWarnText);
           setHidden('ag-s-sub-auto-allow', !aa.enabled);
           setHidden('ag-s-warn-auto-allow-all', aa.mode !== 'all');
+          setHidden('ag-s-sub-subagent-routing', !sr.enabled);
+          setHidden('ag-s-sub-auto-title', !at.enabled);
+          setHidden('ag-s-sub-flow-head', !flowOn);
+          setHidden('ag-s-flow-strategy-wrap', !flowOn);
 
-          const targetPathEl = document.getElementById('ag-s-prompt-target-path');
-          if (targetPathEl && targetPathEl.textContent !== promptTargetText) {
-            targetPathEl.textContent = promptTargetText;
+          const subListEl = document.getElementById('ag-s-subagent-list');
+          if (subListEl && subListEl.__ag_html !== subModelsHtml) {
+            subListEl.innerHTML = subModelsHtml;
+            subListEl.__ag_html = subModelsHtml;
+          }
+          const atNowBtn = document.getElementById('ag-s-auto-title-now');
+          if (atNowBtn) {
+            atNowBtn.disabled = autoTitleBusy;
+            const nextAtLbl = autoTitleBusy ? s.autoTitleUpdating : s.autoTitleNowBtn;
+            if (atNowBtn.textContent !== nextAtLbl) atNowBtn.textContent = nextAtLbl;
+          }
+          const atStatusEl = document.getElementById('ag-s-auto-title-status');
+          if (atStatusEl) {
+            atStatusEl.textContent = autoTitleStatusMsg || '';
+            atStatusEl.hidden = !autoTitleStatusMsg;
+          }
+
+          const modeDescEl = document.getElementById('ag-s-prompt-mode-desc');
+          if (modeDescEl && modeDescEl.textContent !== promptModeDescText) {
+            modeDescEl.textContent = promptModeDescText;
+          }
+          const timingDescEl = document.getElementById('ag-s-prompt-timing-desc');
+          if (timingDescEl && timingDescEl.textContent !== promptTimingDescText) {
+            timingDescEl.textContent = promptTimingDescText;
+          }
+          const proxyWarnEl = document.getElementById('ag-s-prompt-proxy-warn');
+          if (proxyWarnEl && proxyWarnEl.textContent !== promptProxyWarnText) {
+            proxyWarnEl.textContent = promptProxyWarnText;
+          }
+
+          pane.querySelectorAll('.ag-s-seg-btn[data-prompt-tab]').forEach((btn) => {
+            const tk = btn.getAttribute('data-prompt-tab') || '';
+            const nextStr = tk === curTab ? 'true' : 'false';
+            if (btn.getAttribute('aria-pressed') !== nextStr) btn.setAttribute('aria-pressed', nextStr);
+            const dot = btn.querySelector('.ag-s-tab-dot');
+            if (dot) dot.hidden = !String(getSavedPromptForTab(tk) || '').trim();
+          });
+          const flowStEl = document.getElementById('ag-s-flow-status-line');
+          if (flowStEl && flowStEl.textContent !== flowStatusLine) flowStEl.textContent = flowStatusLine;
+          const asarToggleBtn = document.getElementById('ag-s-flow-asar-toggle');
+          if (asarToggleBtn) {
+            if (asarToggleBtn.textContent !== asarToggleLabel) asarToggleBtn.textContent = asarToggleLabel;
+            if (asarToggleBtn.className !== asarToggleCls) asarToggleBtn.className = asarToggleCls;
+            if (asarToggleBtn.getAttribute('data-asar-action') !== asarToggleAction) {
+              asarToggleBtn.setAttribute('data-asar-action', asarToggleAction);
+            }
+            asarToggleBtn.disabled = asarToggleDisabled;
           }
 
           const workerPill = document.getElementById('ag-s-worker-pill');
@@ -1670,20 +2193,31 @@
             workerLblEl.textContent = workerLabel;
           }
 
-          const modelNameEl = document.getElementById('ag-s-model-name');
-          if (modelNameEl && modelNameEl.textContent !== selInfo.family.name) {
-            modelNameEl.textContent = selInfo.family.name;
-          }
-          const modelEffEl = document.getElementById('ag-s-model-effort');
-          if (modelEffEl) {
-            const effText = selInfo.effortLabel || '';
-            if (modelEffEl.textContent !== effText) modelEffEl.textContent = effText;
-            modelEffEl.hidden = !effText;
-          }
+          const syncModelLabel = (nameId, effId, info) => {
+            const nEl = document.getElementById(nameId);
+            if (nEl && nEl.textContent !== info.family.name) {
+              nEl.textContent = info.family.name;
+            }
+            const eEl = document.getElementById(effId);
+            if (eEl) {
+              const effText = info.effortLabel || '';
+              if (eEl.textContent !== effText) eEl.textContent = effText;
+              eEl.hidden = !effText;
+            }
+          };
+          syncModelLabel('ag-s-model-name', 'ag-s-model-effort', selInfo);
+          syncModelLabel('ag-s-flow-judge-name', 'ag-s-flow-judge-effort', judgeSelInfo);
+          syncModelLabel('ag-s-flow-remap-name', 'ag-s-flow-remap-effort', remapSelInfo);
 
           const ta = document.getElementById('ag-s-prompt-textarea');
-          if (ta && document.activeElement !== ta && ta.value !== draftVal) {
-            ta.value = draftVal;
+          if (ta) {
+            if (ta.getAttribute('placeholder') !== promptPlaceholderText) {
+              ta.setAttribute('placeholder', promptPlaceholderText);
+            }
+            if ((ta.getAttribute('data-ag-tab') !== curTab || document.activeElement !== ta) && ta.value !== draftVal) {
+              ta.value = draftVal;
+            }
+            ta.setAttribute('data-ag-tab', curTab);
           }
           const metaEl = document.getElementById('ag-s-prompt-meta');
           const nextMeta = draftVal.length + ' / 20000 · ' + (isDirty ? s.promptUnsaved : s.promptSavedTip);
@@ -1713,6 +2247,30 @@
         }
 
         const prevScroll = pane.scrollTop || window.__ag_settings_scroll_top || 0;
+
+        const sectionNavTabsHtml =
+          '<div id="ag-s-nav-tabs" class="ag-s-nav-tabs" role="tablist">' +
+          '<button type="button" class="ag-s-nav-tab" role="tab" data-section-tab="appearance" aria-selected="' +
+          (curSection === 'appearance' ? 'true' : 'false') +
+          '">' +
+          '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11M8 8h5.5"/></svg>' +
+          '<span>' + escHtml(s.tabAppearance) + '</span></button>' +
+          '<button type="button" class="ag-s-nav-tab" role="tab" data-section-tab="prompts" aria-selected="' +
+          (curSection === 'prompts' ? 'true' : 'false') +
+          '">' +
+          '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 3.5h9a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/><path d="M5.5 6.5h5M5.5 9.5h3.5"/></svg>' +
+          '<span>' + escHtml(s.tabPrompts) + '</span></button>' +
+          '<button type="button" class="ag-s-nav-tab" role="tab" data-section-tab="flow" aria-selected="' +
+          (curSection === 'flow' ? 'true' : 'false') +
+          '">' +
+          '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2L13 4.2v3.6c0 3.1-2.1 5.1-5 6-2.9-.9-5-2.9-5-6V4.2L8 2.2z"/><path d="M5.8 8.2l1.5 1.5 3-3.1"/></svg>' +
+          '<span>' + escHtml(s.tabFlow) + '</span></button>' +
+          '<button type="button" class="ag-s-nav-tab" role="tab" data-section-tab="advanced" aria-selected="' +
+          (curSection === 'advanced' ? 'true' : 'false') +
+          '">' +
+          '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>' +
+          '<span>' + escHtml(s.tabAdvanced) + '</span></button>' +
+          '</div>';
 
         pane.innerHTML =
           '<div class="ag-s-header">' +
@@ -1749,14 +2307,13 @@
           '</a>' +
           '</div>' +
           '</div>' +
-          '<p class="ag-s-subtitle">' +
-          escHtml(s.subtitlePrefix) +
-          '<span class="ag-s-mono">user/config.json</span>' +
-          escHtml(s.subtitleSuffix) +
-          '</p>' +
           '</div>' +
+          sectionNavTabsHtml +
           '<div class="ag-s-sections">' +
-          // Group 1: Core Modules
+          // ==================== TAB 1: Appearance & Status ====================
+          '<div class="ag-s-tab-panel" data-settings-panel="appearance"' +
+          (curSection === 'appearance' ? '' : ' hidden') +
+          '>' +
           '<div>' +
           '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
           escHtml(s.secCore) +
@@ -1832,6 +2389,14 @@
           ' />' +
           '</div>' +
           '</div>' +
+          '</div>' +
+          '</div>' +
+          // Status bar & Telemetry (merged cleanly into Appearance tab)
+          '<div>' +
+          '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
+          escHtml(s.secTelemetry) +
+          '</span></div>' +
+          '<div class="ag-s-card">' +
           '<div class="ag-s-row"><div class="ag-s-row-main">' +
           '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-metrics">' +
           escHtml(s.modMetrics) +
@@ -1841,127 +2406,67 @@
           '<input id="ag-s-sw-metrics" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="metrics" aria-label="' +
           escHtml(s.modMetrics) +
           '" ' +
-          (mods.metrics !== false ? 'checked' : '') +
+          (metricsOn ? 'checked' : '') +
           ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-metrics-layout" class="ag-s-subrow"' +
+          (metricsOn ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.layoutLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.layoutDesc) +
           '</div></div>' +
-          '</div>' +
-          '</div>' +
-          // Group 2: Optional Enhancements
-          '<div>' +
-          '<div class="ag-s-section-head">' +
-          '<span class="ag-s-section-title">' +
-          escHtml(s.secOptional) +
-          '</span>' +
-          '<span class="ag-s-section-hint">' +
-          escHtml(s.secOptionalHint) +
-          '</span>' +
-          '</div>' +
-          '<div class="ag-s-card">' +
-          // Prompt Suggestions
-          '<div class="ag-s-row">' +
-          '<div class="ag-s-row-main">' +
-          '<div class="ag-s-row-info">' +
-          '<div class="ag-s-row-label-wrap">' +
-          '<label class="ag-s-row-label" for="ag-s-sw-suggest">' +
-          escHtml(s.modSuggest) +
-          '</label>' +
-          '<span id="ag-s-worker-pill" class="ag-s-worker-pill" data-status="' +
-          workerStatus +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.layoutLbl) +
           '">' +
-          '<span class="ag-s-worker-dot"></span>' +
-          '<span id="ag-s-worker-label">' +
-          escHtml(workerLabel) +
-          '</span>' +
-          '</span>' +
-          '</div>' +
-          '<div class="ag-s-row-desc">' +
-          escHtml(s.modSuggestDescPre) +
-          '<span class="ag-s-mono">Tab</span>' +
-          escHtml(s.modSuggestDescMid) +
-          '<span class="ag-s-mono">→</span>' +
-          escHtml(s.modSuggestDescPost) +
-          '<span class="ag-s-mono">agy</span>' +
-          escHtml(s.modSuggestDescEnd) +
-          '</div>' +
-          '</div>' +
-          '<input id="ag-s-sw-suggest" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="promptSuggestions" aria-label="' +
-          escHtml(s.modSuggest) +
-          '" ' +
-          (psOn ? 'checked' : '') +
-          ' />' +
-          '</div>' +
-          '<div id="ag-s-sub-suggest" class="ag-s-subrow"' +
-          (psOn ? '' : ' hidden') +
-          '>' +
-          '<div>' +
-          '<div class="ag-s-sub-label">' +
-          escHtml(s.suggestModelLbl) +
-          '</div>' +
-          '<div class="ag-s-sub-desc">' +
-          escHtml(s.suggestModelDescPre) +
-          '<span class="ag-s-mono">agy models</span>' +
-          escHtml(s.suggestModelDescPost) +
-          '</div>' +
-          '</div>' +
-          '<div class="ag-s-picker-controls">' +
-          '<button type="button" id="ag-s-model-trigger" class="ag-s-pill-trigger" aria-haspopup="menu" aria-expanded="false">' +
-          '<span class="ag-s-trigger-text">' +
-          '<span id="ag-s-model-name">' +
-          escHtml(selInfo.family.name) +
-          '</span>' +
-          '<span id="ag-s-model-effort" class="ag-s-trigger-effort"' +
-          (selInfo.effortLabel ? '' : ' hidden') +
-          '>' +
-          escHtml(selInfo.effortLabel || '') +
-          '</span>' +
-          '</span>' +
-          '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0"><path d="M4 6l4 4 4-4"/></svg>' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryLayout" data-val="compact" aria-pressed="' +
+          (cfg.telemetryLayout !== 'detailed' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.layoutCompact) +
           '</button>' +
-          '<button type="button" id="ag-s-refresh-models" class="ag-s-icon-btn" aria-label="' +
-          escHtml(s.refreshModelsTitle) +
+          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryLayout" data-val="detailed" aria-pressed="' +
+          (cfg.telemetryLayout === 'detailed' ? 'true' : 'false') +
           '">' +
-          '<svg id="ag-s-refresh-icon" class="' +
-          (refreshingModels ? 'ag-s-spin' : '') +
-          '" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
+          escHtml(s.layoutDetailed) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '<div id="ag-s-sub-metrics-cache" class="ag-s-subrow"' +
+          (metricsOn ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.cacheLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.cacheDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.cacheLbl) +
+          '">' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryCacheMode" data-val="session" aria-pressed="' +
+          (cfg.telemetryCacheMode !== 'step' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.cacheSession) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryCacheMode" data-val="step" aria-pressed="' +
+          (cfg.telemetryCacheMode === 'step' ? 'true' : 'false') +
+          '">' +
+          escHtml(s.cacheStep) +
           '</button>' +
           '</div>' +
           '</div>' +
           '</div>' +
-          // SSH Remote
-          '<div class="ag-s-row">' +
-          '<div class="ag-s-row-main">' +
-          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-ssh">' +
-          escHtml(s.modSsh) +
-          '</label><div class="ag-s-row-desc">' +
-          escHtml(s.modSshDesc) +
-          '</div></div>' +
-          '<input id="ag-s-sw-ssh" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="sshRemote" aria-label="' +
-          escHtml(s.modSsh) +
-          '" ' +
-          (sshOn ? 'checked' : '') +
-          ' />' +
           '</div>' +
-          '<div id="ag-s-sub-ssh" class="ag-s-subrow"' +
-          (sshOn ? '' : ' hidden') +
+          '</div>' +
+          '</div>' +
+          // ==================== TAB 2: Prompts & Hooks ====================
+          '<div class="ag-s-tab-panel" data-settings-panel="prompts"' +
+          (curSection === 'prompts' ? '' : ' hidden') +
           '>' +
-          '<span class="ag-s-sub-label">' +
-          escHtml(s.sshHostsLbl) +
-          '</span>' +
-          '<div id="ag-s-ssh-chips" class="ag-s-chips">' +
-          chipsHtml +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          // Group 2b: Custom System Prompt & Lifecycle Hooks
           '<div>' +
           '<div class="ag-s-section-head">' +
           '<span class="ag-s-section-title">' +
           escHtml(s.secPromptHooks) +
-          '</span>' +
-          '<span class="ag-s-section-hint">' +
-          escHtml(s.secPromptHooksHint) +
           '</span>' +
           '</div>' +
           '<div class="ag-s-card">' +
@@ -1982,60 +2487,81 @@
           '<div id="ag-s-sub-custom-prompt" class="ag-s-subrow-stack"' +
           (sp.enabled ? '' : ' hidden') +
           '>' +
+          // Always visible across all scope tabs: Injection Method (Proxy / Hook)
           '<div class="ag-s-sub-head">' +
           '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
           escHtml(s.promptModeLbl) +
-          '</div><div class="ag-s-sub-desc">' +
-          escHtml(s.promptModeDesc) +
+          '</div><div id="ag-s-prompt-mode-desc" class="ag-s-sub-desc">' +
+          escHtml(promptModeDescText) +
           '</div></div>' +
           '<div class="ag-s-seg" role="group" aria-label="' +
           escHtml(s.promptModeLbl) +
           '">' +
-          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="system-dual" aria-pressed="' +
-          (sp.mode === 'system-dual' || !sp.mode ? 'true' : 'false') +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="flow-proxy" aria-pressed="' +
+          (isProxySpMode ? 'true' : 'false') +
           '">' +
-          escHtml(s.promptModeDual) +
-          '</button>' +
-          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="global-gemini" aria-pressed="' +
-          (sp.mode === 'global-gemini' ? 'true' : 'false') +
-          '">' +
-          escHtml(s.promptModeGemini) +
-          '</button>' +
-          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="rule" aria-pressed="' +
-          (sp.mode === 'rule' ? 'true' : 'false') +
-          '">' +
-          escHtml(s.promptModeRule) +
+          escHtml(s.promptModeProxy) +
           '</button>' +
           '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.mode" data-val="pre-invocation" aria-pressed="' +
-          (sp.mode === 'pre-invocation' ? 'true' : 'false') +
+          (!isProxySpMode ? 'true' : 'false') +
           '">' +
           escHtml(s.promptModePreInv) +
           '</button>' +
           '</div>' +
           '</div>' +
-          '<div class="ag-s-target-bar">' +
-          '<span>' +
-          escHtml(s.promptTargetPrefix) +
-          '</span>' +
-          '<span id="ag-s-prompt-target-path" class="ag-s-target-path">' +
-          escHtml(promptTargetText) +
-          '</span>' +
-          '</div>' +
-          '<div id="ag-s-prompt-every-inv-row" class="ag-s-inline-toggle"' +
-          (sp.mode === 'pre-invocation' ? '' : ' hidden') +
-          '>' +
-          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-prompt-every-inv" style="cursor:pointer">' +
-          escHtml(s.promptEveryInvLbl) +
-          '</label><div class="ag-s-sub-desc">' +
-          escHtml(s.promptEveryInvDesc) +
+          // Always visible across all scope tabs: Injection Timing (Per Session / Every Turn)
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.promptTimingLbl) +
+          '</div><div id="ag-s-prompt-timing-desc" class="ag-s-sub-desc">' +
+          escHtml(promptTimingDescText) +
           '</div></div>' +
-          '<input id="ag-s-sw-prompt-every-inv" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="customSystemPrompt.everyInvocation" aria-label="' +
-          escHtml(s.promptEveryInvLbl) +
-          '" ' +
-          (sp.everyInvocation ? 'checked' : '') +
-          ' />' +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.promptTimingLbl) +
+          '">' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.everyInvocation" data-val="false" aria-pressed="' +
+          (!sp.everyInvocation ? 'true' : 'false') +
+          '">' +
+          escHtml(s.promptTimingSession) +
+          '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="customSystemPrompt.everyInvocation" data-val="true" aria-pressed="' +
+          (sp.everyInvocation ? 'true' : 'false') +
+          '">' +
+          escHtml(s.promptTimingEvery) +
+          '</button>' +
           '</div>' +
-          '<div class="ag-s-preset-bar">' +
+          '</div>' +
+          '<div id="ag-s-prompt-proxy-warn" class="ag-s-warn-note"' +
+          (promptProxyWarnText ? '' : ' hidden') +
+          '>' +
+          escHtml(promptProxyWarnText) +
+          '</div>' +
+          // Scope tabs
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.promptScopeLbl) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="tablist" aria-label="' +
+          escHtml(s.promptScopeLbl) +
+          '">' +
+          PROMPT_TAB_KEYS.map((tk) => {
+            const hasContent = Boolean(String(getSavedPromptForTab(tk) || '').trim());
+            return (
+              '<button type="button" class="ag-s-seg-btn" role="tab" data-prompt-tab="' +
+              tk +
+              '" aria-pressed="' +
+              (curTab === tk ? 'true' : 'false') +
+              '">' +
+              escHtml(tabLabelMap[tk] || tk) +
+              '<span class="ag-s-tab-dot"' +
+              (hasContent ? '' : ' hidden') +
+              '></span>' +
+              '</button>'
+            );
+          }).join('') +
+          '</div>' +
+          '</div>' +
+          '<div id="ag-s-prompt-preset-bar" class="ag-s-preset-bar">' +
           '<span class="ag-s-preset-lbl">' +
           escHtml(s.promptPresetLbl) +
           '</span>' +
@@ -2052,8 +2578,10 @@
           escHtml(s.presetContract) +
           '</button>' +
           '</div>' +
-          '<textarea id="ag-s-prompt-textarea" class="ag-s-textarea" placeholder="' +
-          escHtml(s.promptPlaceholder) +
+          '<textarea id="ag-s-prompt-textarea" class="ag-s-textarea" data-ag-tab="' +
+          curTab +
+          '" placeholder="' +
+          escHtml(promptPlaceholderText) +
           '" maxlength="20000">' +
           escHtml(draftVal) +
           '</textarea>' +
@@ -2126,57 +2654,355 @@
           '</div>' +
           '</div>' +
           '</div>' +
-          // Group 3: Telemetry Preferences
+          // Subagent Allowed-Model Whitelist & Routing Card
           '<div>' +
+          '<div class="ag-s-section-head">' +
+          '<span class="ag-s-section-title">' +
+          escHtml(s.secSubagentRouting) +
+          '</span>' +
+          '</div>' +
+          '<div class="ag-s-card">' +
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-subagent-routing">' +
+          escHtml(s.modSubagentRouting) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.modSubagentRoutingDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-subagent-routing" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="subagentRouting.enabled" aria-label="' +
+          escHtml(s.modSubagentRouting) +
+          '" ' +
+          (sr.enabled ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-subagent-routing" class="ag-s-subrow-stack"' +
+          (sr.enabled ? '' : ' hidden') +
+          '>' +
+          '<div id="ag-s-subagent-list" class="ag-s-submodel-list">' +
+          subModelsHtml +
+          '</div>' +
+          '<div class="ag-s-submodel-add-bar">' +
+          '<button type="button" id="ag-s-subagent-pick-btn" class="ag-s-btn-secondary" data-model-picker-target="subagentRouting.add" aria-haspopup="menu" aria-expanded="false">' +
+          escHtml(s.subagentPickBtn) +
+          '</button>' +
+          '<div class="ag-s-custom-model-form">' +
+          '<input type="text" id="ag-s-subagent-custom-input" class="ag-s-text-input" placeholder="' +
+          escHtml(s.subagentCustomPh) +
+          '" autocomplete="off" spellcheck="false" />' +
+          '<select id="ag-s-subagent-custom-tier" class="ag-s-select" aria-label="' +
+          escHtml(s.tierAuto) +
+          '">' +
+          '<option value="">' + escHtml(s.tierAuto) + '</option>' +
+          '<option value="fast">' + escHtml(s.tierFast) + '</option>' +
+          '<option value="balanced">' + escHtml(s.tierBalanced) + '</option>' +
+          '<option value="strong">' + escHtml(s.tierStrong) + '</option>' +
+          '</select>' +
+          '<button type="button" id="ag-s-subagent-custom-add" class="ag-s-btn-primary">' +
+          escHtml(s.subagentAddBtn) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // ==================== TAB 3: Relay & Recovery ====================
+          '<div class="ag-s-tab-panel" data-settings-panel="flow"' +
+          (curSection === 'flow' ? '' : ' hidden') +
+          '>' +
+          '<div>' +
+          '<div class="ag-s-section-head">' +
+          '<span class="ag-s-section-title">' +
+          escHtml(s.secFlowProxy) +
+          '</span>' +
+          '</div>' +
+          '<div class="ag-s-card">' +
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow">' +
+          escHtml(s.modFlow) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.modFlowDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-flow" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="flow" aria-label="' +
+          escHtml(s.modFlow) +
+          '" ' +
+          (flowOn ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-flow-head" class="ag-s-subrow-stack"' +
+          (flowOn ? '' : ' hidden') +
+          '>' +
+          // Merged single toggle button for Traffic Redirect
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.flowAsarLbl) +
+          '</div><div id="ag-s-flow-status-line" class="ag-s-sub-desc">' +
+          escHtml(flowStatusLine) +
+          '</div></div>' +
+          '<button type="button" id="ag-s-flow-asar-toggle" class="' +
+          asarToggleCls +
+          '" data-asar-action="' +
+          asarToggleAction +
+          '"' +
+          (asarToggleDisabled ? ' disabled' : '') +
+          '>' +
+          escHtml(asarToggleLabel) +
+          '</button>' +
+          '</div>' +
+          // Default Mode
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.flowDefaultModeLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.flowDefaultModeDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group">' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.defaultMode" data-val="default" aria-pressed="' + (fl.defaultMode === 'default' ? 'true' : 'false') + '">' + escHtml(s.flowModeDefault) + '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.defaultMode" data-val="writing" aria-pressed="' + (fl.defaultMode === 'writing' ? 'true' : 'false') + '">' + escHtml(s.flowModeWriting) + '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.defaultMode" data-val="engineering" aria-pressed="' + (fl.defaultMode === 'engineering' ? 'true' : 'false') + '">' + escHtml(s.flowModeEng) + '</button>' +
+          '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.defaultMode" data-val="full" aria-pressed="' + (fl.defaultMode === 'full' ? 'true' : 'false') + '">' + escHtml(s.flowModeFull) + '</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // Recovery strategies card (cleanly separated, modelPattern removed)
+          '<div id="ag-s-flow-strategy-wrap"' +
+          (flowOn ? '' : ' hidden') +
+          '>' +
           '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
-          escHtml(s.secTelemetry) +
+          escHtml(s.secFlowStrategy) +
           '</span></div>' +
           '<div class="ag-s-card">' +
           '<div class="ag-s-row"><div class="ag-s-row-main">' +
-          '<div class="ag-s-row-info"><div class="ag-s-row-label">' +
-          escHtml(s.layoutLbl) +
+          '<div class="ag-s-row-info"><div class="ag-s-row-label" style="cursor:default">' +
+          escHtml(s.flowMaxContLbl) +
           '</div><div class="ag-s-row-desc">' +
-          escHtml(s.layoutDesc) +
+          escHtml(s.flowMaxContDesc) +
           '</div></div>' +
-          '<div class="ag-s-seg" role="group" aria-label="' +
-          escHtml(s.layoutLbl) +
-          '">' +
-          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryLayout" data-val="compact" aria-pressed="' +
-          (cfg.telemetryLayout !== 'detailed' ? 'true' : 'false') +
-          '">' +
-          escHtml(s.layoutCompact) +
-          '</button>' +
-          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryLayout" data-val="detailed" aria-pressed="' +
-          (cfg.telemetryLayout === 'detailed' ? 'true' : 'false') +
-          '">' +
-          escHtml(s.layoutDetailed) +
-          '</button>' +
+          '<div class="ag-s-seg" role="group">' +
+          ['0', '2', '3', '5', '8']
+            .map(
+              (v) =>
+                '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.maxContinuations" data-val="' +
+                v +
+                '" aria-pressed="' +
+                (String(fl.maxContinuations) === v ? 'true' : 'false') +
+                '">' +
+                v +
+                '</button>'
+            )
+            .join('') +
           '</div>' +
           '</div></div>' +
-          '<div class="ag-s-row"><div class="ag-s-row-main">' +
-          '<div class="ag-s-row-info"><div class="ag-s-row-label">' +
-          escHtml(s.cacheLbl) +
-          '</div><div class="ag-s-row-desc">' +
-          escHtml(s.cacheDesc) +
-          '</div></div>' +
-          '<div class="ag-s-seg" role="group" aria-label="' +
-          escHtml(s.cacheLbl) +
-          '">' +
-          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryCacheMode" data-val="session" aria-pressed="' +
-          (cfg.telemetryCacheMode !== 'step' ? 'true' : 'false') +
-          '">' +
-          escHtml(s.cacheSession) +
+          '<div class="ag-s-row"><div class="ag-s-row-main"><div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow-rewrite">' + escHtml(s.flowRewriteLbl) + '</label><div class="ag-s-row-desc">' + escHtml(s.flowRewriteDesc) + '</div></div><input id="ag-s-sw-flow-rewrite" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.refusalRewrite" ' + (fl.refusalRewrite ? 'checked' : '') + ' /></div></div>' +
+          '<div class="ag-s-row"><div class="ag-s-row-main"><div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow-hardening">' + escHtml(s.flowHardeningLbl) + '</label><div class="ag-s-row-desc">' + escHtml(s.flowHardeningDesc) + '</div></div><input id="ag-s-sw-flow-hardening" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.outputChannelHardening" ' + (fl.outputChannelHardening ? 'checked' : '') + ' /></div></div>' +
+          '<div class="ag-s-row"><div class="ag-s-row-main"><div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow-soften">' + escHtml(s.flowSoftenLbl) + '</label><div class="ag-s-row-desc">' + escHtml(s.flowSoftenDesc) + '</div></div><input id="ag-s-sw-flow-soften" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.softenEnabled" ' + (fl.softenEnabled ? 'checked' : '') + ' /></div></div>' +
+          '<div class="ag-s-row"><div class="ag-s-row-main"><div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow-judge">' + escHtml(s.flowJudgeLbl) + '</label><div class="ag-s-row-desc">' + escHtml(s.flowJudgeDesc) + '</div></div><div class="ag-s-picker-controls">' +
+          '<button type="button" id="ag-s-flow-judge-trigger" class="ag-s-pill-trigger" data-model-picker-target="flow.judgeModel" aria-haspopup="menu" aria-expanded="false">' +
+          '<span class="ag-s-trigger-text"><span id="ag-s-flow-judge-name">' + escHtml(judgeSelInfo.family.name) + '</span><span id="ag-s-flow-judge-effort" class="ag-s-trigger-effort"' + (judgeSelInfo.effortLabel ? '' : ' hidden') + '>' + escHtml(judgeSelInfo.effortLabel || '') + '</span></span>' +
+          '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0"><path d="M4 6l4 4 4-4"/></svg>' +
           '</button>' +
-          '<button type="button" class="ag-s-seg-btn" data-seg="telemetryCacheMode" data-val="step" aria-pressed="' +
-          (cfg.telemetryCacheMode === 'step' ? 'true' : 'false') +
+          '<button type="button" class="ag-s-icon-btn" data-refresh-models="1" aria-label="' + escHtml(s.refreshModelsTitle) + '">' +
+          '<svg class="ag-s-refresh-models-icon ' + (refreshingModels ? 'ag-s-spin' : '') + '" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
+          '</button>' +
+          '<input id="ag-s-sw-flow-judge" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.judgeEnabled" ' + (fl.judgeEnabled ? 'checked' : '') + ' />' +
+          '</div></div></div>' +
+          '<div class="ag-s-row"><div class="ag-s-row-main"><div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow-remap">' + escHtml(s.flowRemapLbl) + '</label><div class="ag-s-row-desc">' + escHtml(s.flowRemapDesc) + '</div></div><div class="ag-s-picker-controls">' +
+          '<button type="button" id="ag-s-flow-remap-trigger" class="ag-s-pill-trigger" data-model-picker-target="flow.remapTargetModel" aria-haspopup="menu" aria-expanded="false">' +
+          '<span class="ag-s-trigger-text"><span id="ag-s-flow-remap-name">' + escHtml(remapSelInfo.family.name) + '</span><span id="ag-s-flow-remap-effort" class="ag-s-trigger-effort"' + (remapSelInfo.effortLabel ? '' : ' hidden') + '>' + escHtml(remapSelInfo.effortLabel || '') + '</span></span>' +
+          '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0"><path d="M4 6l4 4 4-4"/></svg>' +
+          '</button>' +
+          '<input id="ag-s-sw-flow-remap" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.remapEnabled" ' + (fl.remapEnabled ? 'checked' : '') + ' />' +
+          '</div></div></div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // ==================== TAB 4: Add-ons & Updates ====================
+          '<div class="ag-s-tab-panel" data-settings-panel="advanced"' +
+          (curSection === 'advanced' ? '' : ' hidden') +
+          '>' +
+          '<div>' +
+          '<div class="ag-s-section-head">' +
+          '<span class="ag-s-section-title">' +
+          escHtml(s.secOptional) +
+          '</span>' +
+          '</div>' +
+          '<div class="ag-s-card">' +
+          // Prompt Suggestions
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info">' +
+          '<div class="ag-s-row-label-wrap">' +
+          '<label class="ag-s-row-label" for="ag-s-sw-suggest">' +
+          escHtml(s.modSuggest) +
+          '</label>' +
+          '<span id="ag-s-worker-pill" class="ag-s-worker-pill" data-status="' +
+          workerStatus +
           '">' +
-          escHtml(s.cacheStep) +
+          '<span class="ag-s-worker-dot"></span>' +
+          '<span id="ag-s-worker-label">' +
+          escHtml(workerLabel) +
+          '</span>' +
+          '</span>' +
+          '</div>' +
+          '<div class="ag-s-row-desc">' +
+          escHtml(s.modSuggestDescPre) +
+          '<span class="ag-s-mono">Tab</span>' +
+          escHtml(s.modSuggestDescMid) +
+          '<span class="ag-s-mono">→</span>' +
+          escHtml(s.modSuggestDescPost) +
+          '<span class="ag-s-mono">agy</span>' +
+          escHtml(s.modSuggestDescEnd) +
+          '</div>' +
+          '</div>' +
+          '<input id="ag-s-sw-suggest" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="promptSuggestions" aria-label="' +
+          escHtml(s.modSuggest) +
+          '" ' +
+          (psOn ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-suggest" class="ag-s-subrow"' +
+          (psOn ? '' : ' hidden') +
+          '>' +
+          '<div>' +
+          '<div class="ag-s-sub-label">' +
+          escHtml(s.suggestModelLbl) +
+          '</div>' +
+          '<div class="ag-s-sub-desc">' +
+          escHtml(s.suggestModelDescPre) +
+          '<span class="ag-s-mono">agy models</span>' +
+          escHtml(s.suggestModelDescPost) +
+          '</div>' +
+          '</div>' +
+          '<div class="ag-s-picker-controls">' +
+          '<button type="button" id="ag-s-model-trigger" class="ag-s-pill-trigger" data-model-picker-target="promptSuggestionModel" aria-haspopup="menu" aria-expanded="false">' +
+          '<span class="ag-s-trigger-text">' +
+          '<span id="ag-s-model-name">' +
+          escHtml(selInfo.family.name) +
+          '</span>' +
+          '<span id="ag-s-model-effort" class="ag-s-trigger-effort"' +
+          (selInfo.effortLabel ? '' : ' hidden') +
+          '>' +
+          escHtml(selInfo.effortLabel || '') +
+          '</span>' +
+          '</span>' +
+          '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0"><path d="M4 6l4 4 4-4"/></svg>' +
+          '</button>' +
+          '<button type="button" id="ag-s-refresh-models" class="ag-s-icon-btn" data-refresh-models="1" aria-label="' +
+          escHtml(s.refreshModelsTitle) +
+          '">' +
+          '<svg id="ag-s-refresh-icon" class="ag-s-refresh-models-icon ' +
+          (refreshingModels ? 'ag-s-spin' : '') +
+          '" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
           '</button>' +
           '</div>' +
+          '</div>' +
+          '</div>' +
+          // Progress-Based Auto Conversation Title
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-auto-title">' +
+          escHtml(s.modAutoTitle) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.modAutoTitleDesc) +
           '</div></div>' +
+          '<input id="ag-s-sw-auto-title" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="autoTitle.enabled" aria-label="' +
+          escHtml(s.modAutoTitle) +
+          '" ' +
+          (at.enabled ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-auto-title" class="ag-s-subrow-stack"' +
+          (at.enabled ? '' : ' hidden') +
+          '>' +
+          '<div class="ag-s-sub-head">' +
+          '<span class="ag-s-sub-label">' +
+          escHtml(s.autoTitleTurnsLbl) +
+          '</span>' +
+          '<div class="ag-s-seg" role="group">' +
+          [2, 4, 6, 10]
+            .map(
+              (n) =>
+                '<button type="button" class="ag-s-seg-btn" data-nested-seg="autoTitle.turnInterval" data-val="' +
+                n +
+                '" aria-pressed="' +
+                (Number(at.turnInterval) === n ? 'true' : 'false') +
+                '">' +
+                n +
+                ' ' +
+                escHtml(s.autoTitleTurnsUnit) +
+                '</button>'
+            )
+            .join('') +
           '</div>' +
           '</div>' +
-          // Group 4: Plugin Version & Updates
+          '<div class="ag-s-sub-head">' +
+          '<span class="ag-s-sub-label">' +
+          escHtml(s.autoTitleCoolLbl) +
+          '</span>' +
+          '<div class="ag-s-seg" role="group">' +
+          [2, 5, 10, 15]
+            .map(
+              (m) =>
+                '<button type="button" class="ag-s-seg-btn" data-nested-seg="autoTitle.minIntervalMin" data-val="' +
+                m +
+                '" aria-pressed="' +
+                (Number(at.minIntervalMin) === m ? 'true' : 'false') +
+                '">' +
+                m +
+                ' ' +
+                escHtml(s.autoTitleCoolUnit) +
+                '</button>'
+            )
+            .join('') +
+          '</div>' +
+          '</div>' +
+          '<div class="ag-s-sub-head">' +
+          '<span id="ag-s-auto-title-status" class="ag-s-sub-desc"' +
+          (autoTitleStatusMsg ? '' : ' hidden') +
+          '>' +
+          escHtml(autoTitleStatusMsg) +
+          '</span>' +
+          '<button type="button" id="ag-s-auto-title-now" class="ag-s-btn-secondary"' +
+          (autoTitleBusy ? ' disabled' : '') +
+          '>' +
+          escHtml(autoTitleBusy ? s.autoTitleUpdating : s.autoTitleNowBtn) +
+          '</button>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // SSH Remote
+          '<div class="ag-s-row">' +
+          '<div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-ssh">' +
+          escHtml(s.modSsh) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.modSshDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-ssh" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="sshRemote" aria-label="' +
+          escHtml(s.modSsh) +
+          '" ' +
+          (sshOn ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-ssh" class="ag-s-subrow"' +
+          (sshOn ? '' : ' hidden') +
+          '>' +
+          '<span class="ag-s-sub-label">' +
+          escHtml(s.sshHostsLbl) +
+          '</span>' +
+          '<div id="ag-s-ssh-chips" class="ag-s-chips">' +
+          chipsHtml +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          // Version & Updates
           '<div>' +
           '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
           escHtml(s.secUpdate) +
@@ -2185,11 +3011,14 @@
           updateCardHtml +
           '</div>' +
           '</div>' +
+          '</div>' +
           '</div>';
 
         if (pane.setAttribute) pane.setAttribute('data-ag-rendered-locale', activeLoc);
         const chipsMounted = document.getElementById('ag-s-ssh-chips');
         if (chipsMounted) chipsMounted.__ag_html = chipsHtml;
+        const subListMounted = document.getElementById('ag-s-subagent-list');
+        if (subListMounted) subListMounted.__ag_html = subModelsHtml;
         const updMounted = document.getElementById('ag-s-update-card');
         if (updMounted) updMounted.__ag_html = updateCardHtml;
 
@@ -2256,7 +3085,7 @@
             const mod = sw.getAttribute('data-bind-mod');
             if (!mod) return;
             const checked = Boolean(sw.checked);
-            if (mod === 'promptSuggestions' && !checked) {
+            if ((mod === 'promptSuggestions' || mod === 'flow') && !checked) {
               hideModelMenus({ restoreFocus: false });
             }
             commitPatch({ modules: { [mod]: checked } });
@@ -2277,25 +3106,40 @@
             if (parts.length === 2) {
               commitPatch({ [parts[0]]: { [parts[1]]: Boolean(nestedSw.checked) } });
             }
+            return;
           }
         });
 
         listen(pane, 'input', (ev) => {
           const ta = ev.target && ev.target.id === 'ag-s-prompt-textarea' ? ev.target : null;
           if (!ta) return;
-          setPromptDraft(ta.value);
-          const sp = uiState.config.customSystemPrompt || { text: '' };
-          const dirty = promptDraft !== (sp.text || '');
+          const tab = activePromptTab;
+          setDraftForTab(tab, ta.value);
+          const saved = getSavedPromptForTab(tab);
+          const dirty = ta.value !== saved;
           const s = getStrings();
           const metaEl = document.getElementById('ag-s-prompt-meta');
           if (metaEl) {
-            metaEl.textContent = promptDraft.length + ' / 20000 · ' + (dirty ? s.promptUnsaved : s.promptSavedTip);
+            metaEl.textContent = ta.value.length + ' / 20000 · ' + (dirty ? s.promptUnsaved : s.promptSavedTip);
           }
           const saveBtn = document.getElementById('ag-s-prompt-save');
           if (saveBtn) saveBtn.disabled = !dirty;
         });
 
         listen(pane, 'click', (ev) => {
+          const secTabBtn = ev.target && ev.target.closest ? ev.target.closest('.ag-s-nav-tab[data-section-tab]') : null;
+          if (secTabBtn) {
+            const nextSec = secTabBtn.getAttribute('data-section-tab') || 'appearance';
+            if (nextSec !== activeSectionTab) {
+              hideModelMenus({ restoreFocus: false });
+              setActiveSectionTab(nextSec);
+              pane.scrollTop = 0;
+              window.__ag_settings_scroll_top = 0;
+              renderPane();
+            }
+            return;
+          }
+
           const manualRef = ev.target && ev.target.closest ? ev.target.closest('#ag-s-manual-refresh') : null;
           if (manualRef) {
             ev.preventDefault();
@@ -2333,7 +3177,7 @@
             return;
           }
 
-          const trigger = ev.target && ev.target.closest ? ev.target.closest('#ag-s-model-trigger') : null;
+          const trigger = ev.target && ev.target.closest ? ev.target.closest('[data-model-picker-target]') : null;
           if (trigger) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -2341,7 +3185,7 @@
             return;
           }
 
-          const refBtn = ev.target && ev.target.closest ? ev.target.closest('#ag-s-refresh-models') : null;
+          const refBtn = ev.target && ev.target.closest ? ev.target.closest('[data-refresh-models]') : null;
           if (refBtn) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -2363,13 +3207,63 @@
           const nestedSeg = ev.target && ev.target.closest ? ev.target.closest('.ag-s-seg-btn[data-nested-seg]') : null;
           if (nestedSeg) {
             const spec = nestedSeg.getAttribute('data-nested-seg') || '';
-            const val = nestedSeg.getAttribute('data-val');
+            const rawVal = nestedSeg.getAttribute('data-val');
             const parts = spec.split('.');
-            if (parts.length === 2 && val) {
+            if (parts.length === 2 && rawVal !== null && rawVal !== '') {
+              const val =
+                spec === 'flow.maxContinuations' ||
+                spec === 'autoTitle.turnInterval' ||
+                spec === 'autoTitle.minIntervalMin'
+                  ? Number(rawVal)
+                  : spec === 'customSystemPrompt.everyInvocation'
+                  ? rawVal === 'true'
+                  : rawVal;
               const curObj = uiState.config[parts[0]] || {};
               if (curObj[parts[1]] !== val) {
-                commitPatch({ [parts[0]]: { [parts[1]]: val } });
+                if (spec === 'customSystemPrompt.mode') {
+                  commitPatch({
+                    customSystemPrompt: { mode: val },
+                    flow: { systemPromptStrategy: val === 'flow-proxy' ? 'seat-only' : 'keep' }
+                  });
+                } else {
+                  commitPatch({ [parts[0]]: { [parts[1]]: val } });
+                }
               }
+            }
+            return;
+          }
+
+          const asarToggle = ev.target && ev.target.closest ? ev.target.closest('#ag-s-flow-asar-toggle') : null;
+          if (asarToggle && !asarToggle.disabled) {
+            const action = asarToggle.getAttribute('data-asar-action') === 'rollback' ? 'rollback' : 'apply';
+            if (typeof window.__agFlowAsarAction === 'function') {
+              const reqId = 'fl_asar_' + Date.now().toString(36);
+              const prevHandler = window.__ag_on_flow_response;
+              window.__ag_on_flow_response = (id, payload) => {
+                if (id === reqId) {
+                  window.__ag_on_flow_response = prevHandler;
+                  if (payload && payload.state) uiState.flowStatus = payload.state;
+                  flowAsarMsg = payload && payload.ok
+                    ? (payload.needsRestart ? '已落盘，重启 Antigravity 生效' : '已对齐')
+                    : (payload && payload.error ? payload.error : '操作失败');
+                  renderPane();
+                  return;
+                }
+                if (typeof prevHandler === 'function') prevHandler(id, payload);
+              };
+              try {
+                window.__agFlowAsarAction(JSON.stringify({ reqId, action }));
+              } catch {}
+            }
+            return;
+          }
+
+          const promptTabBtn = ev.target && ev.target.closest ? ev.target.closest('.ag-s-seg-btn[data-prompt-tab]') : null;
+          if (promptTabBtn) {
+            const nextTab = promptTabBtn.getAttribute('data-prompt-tab') || 'global';
+            if (nextTab !== activePromptTab) {
+              setActivePromptTab(nextTab);
+              renderPane();
             }
             return;
           }
@@ -2380,23 +3274,20 @@
             const s = getStrings();
             const tpl = s.presets && pKey ? s.presets[pKey] : '';
             if (tpl) {
-              setPromptDraft(tpl);
-              commitPatch({ customSystemPrompt: { text: tpl } });
+              commitPromptForTab(activePromptTab, tpl);
             }
             return;
           }
 
           if (ev.target && ev.target.closest && ev.target.closest('#ag-s-prompt-save')) {
             const ta = document.getElementById('ag-s-prompt-textarea');
-            const nextText = ta ? ta.value : promptDraft || '';
-            setPromptDraft(nextText);
-            commitPatch({ customSystemPrompt: { text: nextText } });
+            const nextText = ta ? ta.value : getDraftForTab(activePromptTab);
+            commitPromptForTab(activePromptTab, nextText);
             return;
           }
 
           if (ev.target && ev.target.closest && ev.target.closest('#ag-s-prompt-clear')) {
-            setPromptDraft('');
-            commitPatch({ customSystemPrompt: { text: '' } });
+            commitPromptForTab(activePromptTab, '');
             return;
           }
 
@@ -2408,6 +3299,69 @@
               nextHosts.splice(idx, 1);
               commitPatch({ sshHosts: nextHosts });
             }
+            return;
+          }
+
+          const cycleTierBtn = ev.target && ev.target.closest ? ev.target.closest('[data-cycle-submodel-tier]') : null;
+          if (cycleTierBtn) {
+            const idx = Number(cycleTierBtn.getAttribute('data-cycle-submodel-tier'));
+            const curList = ((uiState.config.subagentRouting && uiState.config.subagentRouting.allowedModels) || []).map((m) =>
+              Object.assign({}, m)
+            );
+            if (idx >= 0 && idx < curList.length) {
+              const order = ['fast', 'balanced', 'strong'];
+              const curIdx = order.indexOf(curList[idx].tier);
+              curList[idx].tier = order[(curIdx + 1) % order.length];
+              commitPatch({ subagentRouting: { allowedModels: curList } });
+            }
+            return;
+          }
+
+          const rmSubBtn = ev.target && ev.target.closest ? ev.target.closest('[data-rm-submodel]') : null;
+          if (rmSubBtn) {
+            const idx = Number(rmSubBtn.getAttribute('data-rm-submodel'));
+            const curList = ((uiState.config.subagentRouting && uiState.config.subagentRouting.allowedModels) || []).map((m) =>
+              Object.assign({}, m)
+            );
+            if (idx >= 0 && idx < curList.length) {
+              curList.splice(idx, 1);
+              commitPatch({ subagentRouting: { allowedModels: curList } });
+            }
+            return;
+          }
+
+          if (ev.target && ev.target.closest && ev.target.closest('#ag-s-subagent-custom-add')) {
+            const inp = document.getElementById('ag-s-subagent-custom-input');
+            const sel = document.getElementById('ag-s-subagent-custom-tier');
+            const rawVal = inp ? inp.value : '';
+            const tierVal = sel ? sel.value : '';
+            if (addSubagentAllowedModel(rawVal, tierVal)) {
+              if (inp) {
+                inp.value = '';
+                inp.removeAttribute('data-invalid');
+              }
+            } else if (inp) {
+              inp.setAttribute('data-invalid', '1');
+              inp.focus();
+            }
+            return;
+          }
+
+          if (ev.target && ev.target.closest && ev.target.closest('#ag-s-auto-title-now')) {
+            if (autoTitleBusy) return;
+            autoTitleBusy = true;
+            autoTitleStatusMsg = '';
+            renderPane();
+            void callDaemonBinding('__agRefreshConversationTitle', {}, 20000).then((res) => {
+              if (disposed) return;
+              autoTitleBusy = false;
+              if (res && res.ok && res.title) {
+                autoTitleStatusMsg = (res.unchanged ? '无需变更：' : '已更新：') + res.title;
+              } else {
+                autoTitleStatusMsg = (res && res.error) || '暂无足够对话进展，请先在会话中交流';
+              }
+              renderPane();
+            });
             return;
           }
 
@@ -2425,20 +3379,31 @@
         });
 
         listen(pane, 'keydown', (ev) => {
+          if (ev.target && ev.target.id === 'ag-s-subagent-custom-input' && ev.key === 'Enter') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const sel = document.getElementById('ag-s-subagent-custom-tier');
+            const tierVal = sel ? sel.value : '';
+            if (addSubagentAllowedModel(ev.target.value, tierVal)) {
+              ev.target.value = '';
+              ev.target.removeAttribute('data-invalid');
+            } else {
+              ev.target.setAttribute('data-invalid', '1');
+            }
+            return;
+          }
           if (ev.target && ev.target.id === 'ag-s-prompt-textarea' && (ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
             ev.preventDefault();
             ev.stopPropagation();
-            const nextText = ev.target.value;
-            setPromptDraft(nextText);
-            commitPatch({ customSystemPrompt: { text: nextText } });
+            commitPromptForTab(activePromptTab, ev.target.value);
             return;
           }
-          const trigger = ev.target && ev.target.closest ? ev.target.closest('#ag-s-model-trigger') : null;
+          const trigger = ev.target && ev.target.closest ? ev.target.closest('[data-model-picker-target]') : null;
           if (trigger && ev.key === 'ArrowDown') {
             ev.preventDefault();
             ev.stopPropagation();
             const root = ensureModelPopovers();
-            if (!isPopoverOpen(root)) {
+            if (!isPopoverOpen(root) || activeModelPickerTriggerId !== trigger.id) {
               toggleModelMenu(trigger, true);
             } else {
               const first = root.querySelector('.ag-s-menu-list > button');
@@ -2677,7 +3642,7 @@
             ev.target &&
             ev.target.closest &&
             !ev.target.closest('#ag-settings-model-menu') &&
-            !ev.target.closest('#ag-s-model-trigger')
+            !ev.target.closest('[data-model-picker-target]')
           ) {
             hideModelMenus({ restoreFocus: false });
           }

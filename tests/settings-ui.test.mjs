@@ -750,6 +750,67 @@ test('Custom system prompt & lifecycle hooks: runner evaluation, destructive com
     'Dual System Prompt'
   );
 
+  // Per-mode dynamic hook assembly (subagents automatically inherit parent mode prompt)
+  const modeHookCfg = {
+    enabled: true,
+    modules: { flow: true },
+    customSystemPrompt: { enabled: true, mode: 'pre-invocation', text: 'BASE_RULE', everyInvocation: true },
+    flow: {
+      defaultMode: 'default',
+      writingSeat: 'WRITING_HOOK_SEAT'
+    }
+  };
+  const fakeSessions = {
+    sessions: {
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa': { mode: 'writing', seatOverride: 'SESSION_NOTE' }
+    }
+  };
+  const hookWriteRes = evaluateSystemPromptHook(
+    { hookEventName: 'PreInvocation', invocationNum: 2, cascadeId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+    modeHookCfg,
+    fakeSessions
+  );
+  const hookWriteText = hookWriteRes.injectSteps?.[0]?.systemMessage?.systemMessage || '';
+  assert.match(hookWriteText, /BASE_RULE/);
+  assert.match(hookWriteText, /WRITING_HOOK_SEAT/);
+  assert.match(hookWriteText, /SESSION_NOTE/);
+
+  const hookSubRes = evaluateSystemPromptHook(
+    {
+      hookEventName: 'PreInvocation',
+      invocationNum: 1,
+      conversationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      parentConversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      isSubagent: true
+    },
+    modeHookCfg,
+    fakeSessions
+  );
+  const hookSubText = hookSubRes.injectSteps?.[0]?.systemMessage?.systemMessage || '';
+  assert.match(hookSubText, /BASE_RULE/);
+  assert.match(hookSubText, /WRITING_HOOK_SEAT/);
+
+  // Fingerprint deduplication across turns when everyInvocation=false: skips unchanged prompt, re-injects on mode switch
+  const dedupCfg = {
+    enabled: true,
+    modules: { flow: true },
+    customSystemPrompt: { enabled: true, mode: 'pre-invocation', text: 'BASE_DEDUP', everyInvocation: false },
+    flow: { defaultMode: 'default', writingSeat: 'WRITING_DEDUP_SEAT' }
+  };
+  const hookState = {};
+  const cidDedup = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const d1 = evaluateSystemPromptHook({ hookEventName: 'PreInvocation', invocationNum: 1, cascadeId: cidDedup }, dedupCfg, { sessions: {} }, hookState);
+  assert.equal(d1.injectSteps?.[0]?.systemMessage?.systemMessage, 'BASE_DEDUP');
+  const d2 = evaluateSystemPromptHook({ hookEventName: 'PreInvocation', invocationNum: 1, cascadeId: cidDedup }, dedupCfg, { sessions: {} }, hookState);
+  assert.deepEqual(d2, {}, 'same session & unchanged prompt should be skipped on subsequent turns');
+  const d3 = evaluateSystemPromptHook(
+    { hookEventName: 'PreInvocation', invocationNum: 1, cascadeId: cidDedup },
+    dedupCfg,
+    { sessions: { [cidDedup]: { mode: 'writing' } } },
+    hookState
+  );
+  assert.match(d3.injectSteps?.[0]?.systemMessage?.systemMessage || '', /WRITING_DEDUP_SEAT/, 'mode change must trigger re-injection');
+
   // 3. Auto-allow hook runner & destructive command safety guard
   assert.equal(isDestructiveCommandLine('git status && npm test'), false);
   assert.equal(isDestructiveCommandLine('rm -rf /'), true);
@@ -824,6 +885,21 @@ test('Custom system prompt & lifecycle hooks: runner evaluation, destructive com
     assert.ok(hRule['user-custom-lint']);
     assert.equal(hRule[HOOK_KEY_SYSTEM_PROMPT], undefined);
     assert.equal(hRule[HOOK_KEY_AUTO_ALLOW], undefined);
+
+    // Switching to flow-proxy clears rule/GEMINI.md/system-prompt hook so proxy injects directly into systemInstruction
+    syncSystemPromptAndHooks(
+      {
+        enabled: true,
+        customSystemPrompt: { enabled: true, mode: 'flow-proxy', text: 'Direct proxy seat.' },
+        hookAutoAllow: { enabled: false, mode: 'files' }
+      },
+      { customHome: fakeHome, nodeExec: 'node', runnerPath: '/tmp/hook-runner.mjs' }
+    );
+    assert.equal(fs.existsSync(rulePath), false);
+    assert.equal(fs.readFileSync(geminiMdPath, 'utf8').trim(), '# My Personal Notes\nKeep my manual lines.');
+    const hProxy = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+    assert.ok(hProxy['user-custom-lint']);
+    assert.equal(hProxy[HOOK_KEY_SYSTEM_PROMPT], undefined);
 
     // Disabling removes all managed entries while keeping user hook & user GEMINI.md intact
     syncSystemPromptAndHooks({ enabled: false }, { customHome: fakeHome });

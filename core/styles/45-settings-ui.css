@@ -217,7 +217,7 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
-  padding: 36px 24px 48px 24px;
+  padding: 28px 24px 40px 24px;
   background-color: transparent;
   color: var(--ag-s-fg);
   font-family: var(--ag-s-font) !important;
@@ -236,9 +236,82 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
 
 #ag-settings-pane .ag-s-header {
   width: 100%;
-  max-width: 624px;
-  margin: 0 auto 28px auto;
+  max-width: 640px;
+  margin: 0 auto 14px auto;
   padding-right: 0;
+}
+
+#ag-settings-pane .ag-s-nav-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto 16px auto;
+  padding: 3px;
+  border-radius: 10px;
+  background-color: var(--ag-s-seg-bg);
+  border: 1px solid var(--ag-s-hairline);
+}
+
+#ag-settings-pane .ag-s-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ag-s-fg-3) !important;
+  font-family: var(--ag-s-font) !important;
+  font-size: 12.5px !important;
+  line-height: 18px !important;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+#ag-settings-pane .ag-s-nav-tab:hover {
+  color: var(--ag-s-fg) !important;
+}
+
+#ag-settings-pane .ag-s-nav-tab[aria-selected="true"] {
+  background-color: var(--ag-s-seg-active) !important;
+  color: var(--ag-s-fg) !important;
+  box-shadow: var(--ag-s-seg-shadow);
+}
+
+#ag-settings-pane .ag-s-nav-tab:focus-visible {
+  outline: 2px solid var(--ag-s-focus);
+  outline-offset: 1px;
+}
+
+#ag-settings-pane .ag-s-nav-tab svg {
+  opacity: 0.78;
+  flex-shrink: 0;
+}
+
+#ag-settings-pane .ag-s-nav-tab[aria-selected="true"] svg {
+  opacity: 1;
+}
+
+#ag-settings-pane .ag-s-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+#ag-settings-pane .ag-s-tab-panel[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 600px) {
+  #ag-settings-pane .ag-s-nav-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {
@@ -362,9 +435,9 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
 #ag-settings-pane .ag-s-sections {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
   width: 100%;
-  max-width: 624px;
+  max-width: 640px;
   margin: 0 auto;
 }
 
@@ -769,6 +842,20 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   outline-offset: 1px;
 }
 
+#ag-settings-pane .ag-s-tab-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background-color: var(--ag-s-primary);
+  vertical-align: middle;
+}
+
+#ag-settings-pane .ag-s-tab-dot[hidden] {
+  display: none !important;
+}
+
 /* SSH Hosts Chips & Inline Add Input */
 #ag-settings-pane .ag-s-chips {
   display: flex;
@@ -1152,4 +1239,128 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
 
 #ag-settings-pane .ag-s-inline-toggle[hidden] {
   display: none !important;
+}
+
+/* Subagent Allowed-Model Whitelist */
+#ag-settings-pane .ag-s-submodel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#ag-settings-pane .ag-s-submodel-empty {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background-color: var(--ag-s-surface);
+  border: 1px dashed var(--ag-s-border);
+  font-size: 11.5px !important;
+  color: var(--ag-s-fg-3) !important;
+}
+
+#ag-settings-pane .ag-s-submodel-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background-color: var(--ag-s-surface);
+  border: 1px solid var(--ag-s-hairline);
+}
+
+#ag-settings-pane .ag-s-submodel-id {
+  font-family: var(--ag-s-mono) !important;
+  font-size: 12px !important;
+  color: var(--ag-s-fg) !important;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+
+#ag-settings-pane .ag-s-submodel-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+#ag-settings-pane .ag-s-tier-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--ag-s-border);
+  background-color: var(--ag-s-card) !important;
+  color: var(--ag-s-fg-2) !important;
+  font-size: 11px !important;
+  line-height: 16px !important;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+#ag-settings-pane .ag-s-tier-pill[data-tier="fast"] {
+  color: var(--ag-s-ok) !important;
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+#ag-settings-pane .ag-s-tier-pill[data-tier="strong"] {
+  color: var(--ag-s-focus) !important;
+  border-color: rgba(43, 127, 255, 0.35);
+}
+
+#ag-settings-pane .ag-s-tier-pill:hover {
+  background-color: var(--ag-s-selected) !important;
+}
+
+#ag-settings-pane .ag-s-submodel-add-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+#ag-settings-pane .ag-s-custom-model-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+#ag-settings-pane .ag-s-text-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ag-s-border);
+  background-color: var(--ag-s-surface) !important;
+  color: var(--ag-s-fg) !important;
+  font-family: var(--ag-s-mono) !important;
+  font-size: 12px !important;
+  line-height: 18px !important;
+  outline: none;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+#ag-settings-pane .ag-s-text-input:focus {
+  border-color: var(--ag-s-focus);
+  background-color: var(--ag-s-bg) !important;
+}
+
+#ag-settings-pane .ag-s-text-input[data-invalid="1"] {
+  border-color: var(--ag-s-err);
+}
+
+#ag-settings-pane .ag-s-select {
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--ag-s-border);
+  background-color: var(--ag-s-surface) !important;
+  color: var(--ag-s-fg) !important;
+  font-family: var(--ag-s-font) !important;
+  font-size: 12px !important;
+  line-height: 18px !important;
+  outline: none;
+  cursor: pointer;
 }

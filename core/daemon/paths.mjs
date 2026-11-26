@@ -11,11 +11,11 @@ import { DEFAULT_ALLOWED_ORIGINS, extractJsoncNumberProperty, stripUtf8Bom } fro
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-let DEFAULT_CUSTOM_SYSTEM_PROMPT = { enabled: false, mode: 'system-dual', text: '', everyInvocation: false };
+let DEFAULT_CUSTOM_SYSTEM_PROMPT = { enabled: false, mode: 'flow-proxy', text: '', everyInvocation: false };
 let DEFAULT_HOOK_AUTO_ALLOW = { enabled: false, mode: 'files' };
 let normalizeCustomSystemPrompt = (raw) =>
   Object.assign(
-    { enabled: false, mode: 'system-dual', text: '', everyInvocation: false },
+    { enabled: false, mode: 'flow-proxy', text: '', everyInvocation: false },
     raw && typeof raw === 'object' ? raw : {}
   );
 let normalizeHookAutoAllow = (raw) => Object.assign({ enabled: false, mode: 'files' }, raw && typeof raw === 'object' ? raw : {});
@@ -31,6 +31,65 @@ if (fs.existsSync(path.join(__dirname, 'hooks-sync.mjs'))) {
     if (typeof hs.normalizeHookAutoAllow === 'function') normalizeHookAutoAllow = hs.normalizeHookAutoAllow;
     if (typeof hs.sanitizePromptAndHooksPatch === 'function') sanitizePromptAndHooksPatch = hs.sanitizePromptAndHooksPatch;
     if (typeof hs.syncSystemPromptAndHooks === 'function') syncSystemPromptAndHooks = hs.syncSystemPromptAndHooks;
+  } catch {}
+}
+
+let DEFAULT_FLOW_CONFIG = {
+  port: 18100,
+  upstream: 'https://daily-cloudcode-pa.googleapis.com',
+  defaultMode: 'default',
+  modelPattern: 'gemini',
+  maxContinuations: 3,
+  refusalRewrite: true,
+  outputChannelHardening: false,
+  continuationText: '继续输出正文：从已生成内容的中断处精确续写，不要重复已有内容，不要总结，不要致歉。',
+  judgeEnabled: false,
+  judgeModel: 'gemini-3.8-flash-low',
+  judgeTimeoutMs: 20000,
+  softenEnabled: true,
+  remapEnabled: false,
+  remapTargetModel: 'gpt-oss-120b-medium',
+  systemPromptStrategy: 'keep',
+  defaultSeat: '',
+  writingSeat: '',
+  engineeringSeat: '',
+  fullSeat: ''
+};
+let normalizeFlowConfig = (raw) => Object.assign({}, DEFAULT_FLOW_CONFIG, raw && typeof raw === 'object' ? raw : {});
+let sanitizeFlowPatch = () => {};
+
+if (fs.existsSync(path.join(__dirname, '..', 'flow', 'contract.mjs'))) {
+  try {
+    const fc = await import('../flow/contract.mjs');
+    if (fc.DEFAULT_FLOW_CONFIG) DEFAULT_FLOW_CONFIG = fc.DEFAULT_FLOW_CONFIG;
+    if (typeof fc.normalizeFlowConfig === 'function') normalizeFlowConfig = fc.normalizeFlowConfig;
+    if (typeof fc.sanitizeFlowPatch === 'function') sanitizeFlowPatch = fc.sanitizeFlowPatch;
+  } catch {}
+}
+
+let DEFAULT_AUTO_TITLE_CONFIG = { enabled: false, turnInterval: 4, minIntervalMin: 5 };
+let normalizeAutoTitleConfig = (raw) =>
+  Object.assign({ enabled: false, turnInterval: 4, minIntervalMin: 5 }, raw && typeof raw === 'object' ? raw : {});
+
+if (fs.existsSync(path.join(__dirname, 'title-updater.mjs'))) {
+  try {
+    const tu = await import('./title-updater.mjs');
+    if (tu.DEFAULT_AUTO_TITLE_CONFIG) DEFAULT_AUTO_TITLE_CONFIG = tu.DEFAULT_AUTO_TITLE_CONFIG;
+    if (typeof tu.normalizeAutoTitleConfig === 'function') normalizeAutoTitleConfig = tu.normalizeAutoTitleConfig;
+  } catch {}
+}
+
+let DEFAULT_SUBAGENT_ROUTING = { enabled: false, allowedModels: [] };
+let normalizeSubagentRouting = (raw) =>
+  Object.assign({ enabled: false, allowedModels: [] }, raw && typeof raw === 'object' ? raw : {});
+let sanitizeSubagentRoutingPatch = () => {};
+
+if (fs.existsSync(path.join(__dirname, '..', 'flow', 'subagent-routing.mjs'))) {
+  try {
+    const sr = await import('../flow/subagent-routing.mjs');
+    if (sr.DEFAULT_SUBAGENT_ROUTING) DEFAULT_SUBAGENT_ROUTING = sr.DEFAULT_SUBAGENT_ROUTING;
+    if (typeof sr.normalizeSubagentRouting === 'function') normalizeSubagentRouting = sr.normalizeSubagentRouting;
+    if (typeof sr.sanitizeSubagentRoutingPatch === 'function') sanitizeSubagentRoutingPatch = sr.sanitizeSubagentRoutingPatch;
   } catch {}
 }
 export const ROOT_DIR = path.resolve(__dirname, '../..');
@@ -239,6 +298,7 @@ const EDITABLE_MODULE_KEYS = new Set([
   'i18n',
   'metrics',
   'promptSuggestions',
+  'flow',
   'sshRemote',
   'deadlockHealer',
   'zoomShortcuts',
@@ -285,6 +345,12 @@ export function sanitizeConfigPatch(currentCfg, patch) {
     base.syncAiOutputLang = patch.syncAiOutputLang;
   }
   sanitizePromptAndHooksPatch(base, patch);
+  sanitizeFlowPatch(base, patch);
+  if (patch.autoTitle && typeof patch.autoTitle === 'object') {
+    const curAt = normalizeAutoTitleConfig(base.autoTitle);
+    base.autoTitle = normalizeAutoTitleConfig({ ...curAt, ...patch.autoTitle });
+  }
+  sanitizeSubagentRoutingPatch(base, patch);
   if (patch.modules && typeof patch.modules.i18n === 'boolean' && patch.modules.i18n === true && base.i18nLocale === 'en') {
     base.i18nLocale = 'zh-CN';
   }
@@ -322,6 +388,9 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     syncAiOutputLang: false,
     customSystemPrompt: { ...DEFAULT_CUSTOM_SYSTEM_PROMPT },
     hookAutoAllow: { ...DEFAULT_HOOK_AUTO_ALLOW },
+    flow: { ...DEFAULT_FLOW_CONFIG },
+    autoTitle: { ...DEFAULT_AUTO_TITLE_CONFIG },
+    subagentRouting: { ...DEFAULT_SUBAGENT_ROUTING, allowedModels: [] },
     telemetryLayout: 'compact',
     telemetryCacheMode: 'session',
     contextLimit: 'auto',
@@ -334,6 +403,7 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       metrics: Boolean(hasSqlite),
       sshRemote: false,
       promptSuggestions: false,
+      flow: true,
       deadlockHealer: true,
       zoomShortcuts: true,
       cdpAutoRelaunch: true,
@@ -409,6 +479,7 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
         metrics: true,
         sshRemote: false,
         promptSuggestions: false,
+        flow: true,
         deadlockHealer: true,
         zoomShortcuts: true,
         cdpAutoRelaunch: true,
@@ -429,6 +500,9 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     const hasPromptSuggestFiles =
       fs.existsSync(path.join(RUNTIME_DIR, '70-prompt-suggestions.js')) &&
       fs.existsSync(path.join(CORE_DIR, 'daemon', 'prompt-suggest.mjs'));
+    const hasFlowFiles =
+      fs.existsSync(path.join(RUNTIME_DIR, '78-flow-mode-picker.js')) &&
+      fs.existsSync(path.join(CORE_DIR, 'flow', 'proxy.mjs'));
     const hasGuardsFile = fs.existsSync(path.join(RUNTIME_DIR, '10-guards.js'));
     if (!hasThemeFiles) modules.theme = false;
     if (!hasI18nFiles) modules.i18n = false;
@@ -440,11 +514,17 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       ? { ...DEFAULT_CUSTOM_SYSTEM_PROMPT }
       : normalizeCustomSystemPrompt(userCfg.customSystemPrompt);
     const hookAutoAllow = safeMode ? { ...DEFAULT_HOOK_AUTO_ALLOW } : normalizeHookAutoAllow(userCfg.hookAutoAllow);
+    const flow = safeMode ? { ...DEFAULT_FLOW_CONFIG } : normalizeFlowConfig(userCfg.flow);
+    const autoTitle = safeMode ? { ...DEFAULT_AUTO_TITLE_CONFIG } : normalizeAutoTitleConfig(userCfg.autoTitle);
+    const subagentRouting = safeMode
+      ? { ...DEFAULT_SUBAGENT_ROUTING, allowedModels: [] }
+      : normalizeSubagentRouting(userCfg.subagentRouting);
     if (!hasSqlite || !hasMetricsFiles) {
       modules.metrics = false;
       modules.sshRemote = false;
     }
     if (!hasPromptSuggestFiles) modules.promptSuggestions = false;
+    if (!hasFlowFiles) modules.flow = false;
     if (!hasGuardsFile) {
       modules.deadlockHealer = false;
       modules.zoomShortcuts = false;
@@ -486,6 +566,9 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       syncAiOutputLang,
       customSystemPrompt,
       hookAutoAllow,
+      flow,
+      autoTitle,
+      subagentRouting,
       telemetryLayout,
       telemetryCacheMode,
       contextLimit,
@@ -502,13 +585,20 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
 
     if (!safeMode && process.env.AG_DAEMON_LIBRARY !== '1') {
       syncAgentLanguageRule(i18nLocale, Boolean(enabled && modules.i18n && syncAiOutputLang));
-      syncSystemPromptAndHooks({ enabled, customSystemPrompt, hookAutoAllow });
+      syncSystemPromptAndHooks({
+        enabled,
+        customSystemPrompt,
+        hookAutoAllow,
+        flow: modules.flow ? flow : null,
+        subagentRouting
+      });
     }
 
     const activeStyleFiles = styleFiles.filter((filePath) => {
       const base = path.basename(filePath);
       if (base === '30-telemetry.css') return Boolean(modules.metrics);
       if (base === '40-prompt-suggestions.css') return Boolean(modules.promptSuggestions);
+      if (base === '48-flow-mode-picker.css') return Boolean(modules.flow);
       if (base === '45-settings-ui.css') return Boolean(enabled);
       return modules.theme !== false;
     });
@@ -537,6 +627,9 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
           syncAiOutputLang,
           customSystemPrompt,
           hookAutoAllow,
+          flow,
+          autoTitle,
+          subagentRouting,
           telemetryLayout,
           telemetryCacheMode,
           promptSuggestionModel,
@@ -561,6 +654,9 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       syncAiOutputLang,
       customSystemPrompt,
       hookAutoAllow,
+      flow,
+      autoTitle,
+      subagentRouting,
       telemetryLayout,
       telemetryCacheMode,
       cssText: baseCss,
@@ -577,6 +673,9 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
         syncAiOutputLang,
         customSystemPrompt,
         hookAutoAllow,
+        flow,
+        autoTitle,
+        subagentRouting,
         telemetryLayout,
         telemetryCacheMode,
         contextLimit,

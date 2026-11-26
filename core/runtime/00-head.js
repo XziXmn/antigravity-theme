@@ -24,6 +24,7 @@
       i18n: true,
       metrics: true,
       promptSuggestions: false,
+      flow: true,
       deadlockHealer: true,
       zoomShortcuts: true,
       cdpAutoRelaunch: true,
@@ -35,7 +36,7 @@
 
   const DEFAULT_PRESET = boot.preset || 'codex-pure-white';
   const DEFAULT_EXCLUDE_I18N =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], [data-testid="user-message-bubble"], .agy-user-bubble, .agy-user-bubble-frame, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-row-history"] a[href^="/c/"], [data-testid="conversation-row-history"] span.truncate, [data-testid="side-question-row"], [data-testid="breadcrumb-segment"], [data-testid="subagent-node"], [data-testid="conversation-navigator-turn"], [data-agi18n-ignore="true"], #ag-live-metrics-pill, .ag-live-metrics-pill, #ag-live-metrics-tooltip, #ag-turn-metrics-tooltip, .ag-turn-metrics, .ag-prompt-ghost-overlay, .ag-prompt-ghost-text, .ag-prompt-ghost-kbd, #ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], [data-testid="user-message-bubble"], .agy-user-bubble, .agy-user-bubble-frame, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-row-history"] a[href^="/c/"], [data-testid="conversation-row-history"] span.truncate, [data-testid="side-question-row"], [data-testid="breadcrumb-segment"], [data-testid="subagent-node"], [data-testid="conversation-navigator-turn"], [data-agi18n-ignore="true"], #ag-live-metrics-pill, .ag-live-metrics-pill, #ag-live-metrics-tooltip, #ag-turn-metrics-tooltip, .ag-turn-metrics, .ag-prompt-ghost-overlay, .ag-prompt-ghost-text, .ag-prompt-ghost-kbd, #ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu, .ag-flow-mode-trigger, #ag-flow-mode-menu';
 
   const SELECTORS = Object.assign(
     {
@@ -205,12 +206,15 @@
       'ag-settings-nav-wrap',
       'ag-settings-pane',
       'ag-settings-model-menu',
-      'ag-settings-effort-menu'
+      'ag-settings-effort-menu',
+      'ag-flow-mode-menu',
+      'ag-flow-mode-trigger-main',
+      'ag-flow-mode-trigger-side'
     ]) {
       const el = document.getElementById(id);
       if (el) el.remove();
     }
-    document.querySelectorAll('.ag-turn-metrics, .ag-live-metrics-pill, .ag-prompt-ghost-overlay').forEach((el) => el.remove());
+    document.querySelectorAll('.ag-turn-metrics, .ag-live-metrics-pill, .ag-prompt-ghost-overlay, .ag-flow-mode-trigger').forEach((el) => el.remove());
     document.querySelectorAll('[data-ag-has-suggestion]').forEach((el) => el.removeAttribute('data-ag-has-suggestion'));
     document.querySelectorAll('[data-ag-codex-settings-open]').forEach((el) => el.removeAttribute('data-ag-codex-settings-open'));
     document.querySelectorAll('[data-ag-settings-split-row]').forEach((el) => el.removeAttribute('data-ag-settings-split-row'));

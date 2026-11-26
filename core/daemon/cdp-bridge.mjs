@@ -27,6 +27,9 @@ export const ALLOWED_EXTERNAL_LINKS = Object.freeze({
 const BACKEND_ONLY_CONFIG_KEYS = new Set([
   'customSystemPrompt',
   'hookAutoAllow',
+  'flow',
+  'autoTitle',
+  'subagentRouting',
   'syncAiOutputLang',
   'sshHosts',
   'promptSuggestionModel'
@@ -344,6 +347,9 @@ export function createCdpManager({
   bundleCtrl,
   metricsReader,
   promptSuggester = null,
+  flowController = null,
+  lsClient = null,
+  autoTitleUpdater = null,
   hasSqlite,
   runOnce = false,
   safeMode = false,
@@ -353,13 +359,48 @@ export function createCdpManager({
   onFastWatch = null
 }) {
   const attachedTargets = new Map();
+  const targetCascadeIds = new Map();
   const fallbackBackoffUntil = new Map();
+  let lastFocusedCascadeId = '';
+
+  function syncFlowActiveMainSessions() {
+    if (!flowController || typeof flowController.setActiveMainSessions !== 'function') return;
+    const all = [];
+    if (lastFocusedCascadeId) all.push(lastFocusedCascadeId);
+    for (const ids of targetCascadeIds.values()) {
+      for (const id of ids) {
+        if (id && !all.includes(id)) all.push(id);
+      }
+    }
+    flowController.setActiveMainSessions(all);
+  }
   const skippedNonHostTargets = new Map();
   const targetMetaMap = new Map();
   const targetThemeModes = new Map();
   const cdpRelaunchCtrl = createCdpRelaunchController();
   const sshRemoteCtrl = createSshRemoteController();
   let isSyncing = false;
+
+  async function broadcastFlowEvent(payload) {
+    const payloadJson = JSON.stringify(payload || {})
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+    for (const entry of attachedTargets.values()) {
+      if (!entry.hostConfirmed || entry.isSwarmIframe || entry.ws?.readyState !== WebSocket.OPEN) continue;
+      try {
+        await entry.send('Runtime.evaluate', {
+          expression: `if (typeof window.__ag_on_flow_event === 'function') { window.__ag_on_flow_event(${payloadJson}); }`,
+          returnByValue: false
+        });
+      } catch {}
+    }
+  }
+
+  if (flowController && typeof flowController.setEventListener === 'function') {
+    flowController.setEventListener((ev) => {
+      void broadcastFlowEvent(ev);
+    });
+  }
   let superseded = false;
   let syncTickCount = 0;
   let lastTargetDiscoveryMs = 0;
@@ -608,6 +649,8 @@ export function createCdpManager({
             });
             const detected = parseCascadeIdList(evalRes?.result?.result?.value);
             activeCascadeIds = detected;
+            targetCascadeIds.set(target.id, activeCascadeIds);
+            syncFlowActiveMainSessions();
             for (const existingCid of [...pushedSessions.keys()]) {
               if (!activeCascadeIds.includes(existingCid)) {
                 pushedSessions.delete(existingCid);
@@ -756,6 +799,12 @@ export function createCdpManager({
             await send('Runtime.addBinding', { name: '__agOpenExternalUrl' });
             await send('Runtime.addBinding', { name: '__agCheckPluginUpdate' });
             await send('Runtime.addBinding', { name: '__agApplyPluginUpdate' });
+            await send('Runtime.addBinding', { name: '__agFlowGetState' });
+            await send('Runtime.addBinding', { name: '__agFlowSetSessionMode' });
+            await send('Runtime.addBinding', { name: '__agFlowAsarAction' });
+            await send('Runtime.addBinding', { name: '__agFlowScanHotWords' });
+            await send('Runtime.addBinding', { name: '__agGetQuotaStatus' });
+            await send('Runtime.addBinding', { name: '__agRefreshConversationTitle' });
           }
           await updateNewDocScript();
           const ok = await inject();
@@ -770,6 +819,19 @@ export function createCdpManager({
             }
           }
           await syncMetricsForSession(true);
+          if (!isSwarmIframe && lsClient && typeof lsClient.getQuotaStatus === 'function') {
+            void lsClient
+              .getQuotaStatus({ force: false })
+              .then((q) => {
+                if (!q || ws.readyState !== WebSocket.OPEN) return;
+                const payloadJson = JSON.stringify(q).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                return send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_quota_status === 'function') { window.__ag_on_quota_status('', ${payloadJson}); } else { window.__ag_quota_state = ${payloadJson}; }`,
+                  returnByValue: false
+                });
+              })
+              .catch(() => {});
+          }
           initialAttachDone = true;
           clearTimeout(attachTimeout);
           finishAttach(ok);
@@ -787,6 +849,9 @@ export function createCdpManager({
             if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agRequestMetrics') {
               const nextIds = parseCascadeIdList(msg.params.payload);
               activeCascadeIds = nextIds;
+              if (nextIds.length > 0 && nextIds[0]) lastFocusedCascadeId = nextIds[0];
+              targetCascadeIds.set(target.id, activeCascadeIds);
+              syncFlowActiveMainSessions();
               for (const existingCid of [...pushedSessions.keys()]) {
                 if (!activeCascadeIds.includes(existingCid)) {
                   pushedSessions.delete(existingCid);
@@ -927,6 +992,186 @@ export function createCdpManager({
               })();
               return;
             }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agFlowGetState') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              const cascadeId = String(req?.cascadeId || '').trim();
+              const paneKey = req?.paneKey === 'side' ? 'side' : 'main';
+              if (req?.claimDraft && cascadeId && flowController && typeof flowController.claimDraft === 'function') {
+                try {
+                  flowController.claimDraft({ cascadeId, paneKey });
+                } catch {}
+              }
+              const out =
+                flowController && typeof flowController.getState === 'function'
+                  ? { ok: true, ...flowController.getState({ cascadeId, paneKey }) }
+                  : { ok: false, available: false, error: 'flow module unavailable' };
+              if (ws.readyState === WebSocket.OPEN) {
+                const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                void send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_flow_response === 'function') { window.__ag_on_flow_response(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                  returnByValue: false
+                }).catch(() => {});
+              }
+              return;
+            }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agFlowSetSessionMode') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              let out;
+              try {
+                if (!flowController || typeof flowController.setSessionMode !== 'function') {
+                  out = { ok: false, error: 'flow module unavailable' };
+                } else {
+                  const res = flowController.setSessionMode({
+                    cascadeId: String(req?.cascadeId || ''),
+                    paneKey: req?.paneKey === 'side' ? 'side' : 'main',
+                    mode: String(req?.mode || 'default'),
+                    seatOverride: req?.seatOverride !== undefined ? String(req.seatOverride) : undefined
+                  });
+                  if (res?.cascadeId && !res.isDraft) {
+                    lastFocusedCascadeId = res.cascadeId;
+                    syncFlowActiveMainSessions();
+                  }
+                  const full = flowController.getState({
+                    cascadeId: res.cascadeId,
+                    paneKey: req?.paneKey === 'side' ? 'side' : 'main'
+                  });
+                  out = { ok: true, ...full };
+                }
+              } catch (err) {
+                out = { ok: false, error: err?.message || String(err || 'set mode failed') };
+              }
+              if (ws.readyState === WebSocket.OPEN) {
+                const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                void send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_flow_response === 'function') { window.__ag_on_flow_response(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                  returnByValue: false
+                }).catch(() => {});
+              }
+              return;
+            }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agFlowAsarAction') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              const action = String(req?.action || '').trim();
+              let out;
+              try {
+                if (!flowController) {
+                  out = { ok: false, error: 'flow module unavailable' };
+                } else if (action === 'apply') {
+                  out = flowController.applyAsarPatch({ allowDarwin: Boolean(req?.allowDarwin) });
+                } else if (action === 'rollback') {
+                  out = flowController.rollbackAsarPatch();
+                } else {
+                  out = { ok: true };
+                }
+                if (flowController && typeof flowController.getState === 'function') {
+                  out = { ...out, state: flowController.getState({}) };
+                }
+              } catch (err) {
+                out = { ok: false, error: err?.message || String(err || 'asar action failed') };
+              }
+              if (ws.readyState === WebSocket.OPEN) {
+                const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                void send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_flow_response === 'function') { window.__ag_on_flow_response(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                  returnByValue: false
+                }).catch(() => {});
+              }
+              return;
+            }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agFlowScanHotWords') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              const res =
+                flowController && typeof flowController.scanHotWords === 'function'
+                  ? flowController.scanHotWords(String(req?.text || ''))
+                  : { ok: true, hot: [] };
+              const out = { ok: true, safe: res.ok, hot: res.hot };
+              if (ws.readyState === WebSocket.OPEN) {
+                const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                void send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_flow_response === 'function') { window.__ag_on_flow_response(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                  returnByValue: false
+                }).catch(() => {});
+              }
+              return;
+            }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agGetQuotaStatus') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              const force = Boolean(req?.force);
+              void (async () => {
+                let out = { ok: false, error: 'quota unavailable', buckets: [] };
+                if (lsClient && typeof lsClient.getQuotaStatus === 'function') {
+                  try {
+                    out = await lsClient.getQuotaStatus({ force });
+                  } catch (err) {
+                    out = { ok: false, error: err?.message || String(err || 'quota failed'), buckets: [] };
+                  }
+                }
+                if (ws.readyState === WebSocket.OPEN) {
+                  const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                  try {
+                    await send('Runtime.evaluate', {
+                      expression: `if (typeof window.__ag_on_quota_status === 'function') { window.__ag_on_quota_status(${JSON.stringify(reqId)}, ${payloadJson}); } else { window.__ag_quota_state = ${payloadJson}; }`,
+                      returnByValue: false
+                    });
+                  } catch {}
+                }
+              })();
+              return;
+            }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agRefreshConversationTitle') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              const cid = String(req?.cascadeId || activeCascadeIds[0] || lastFocusedCascadeId || '').trim();
+              void (async () => {
+                let out = { ok: false, error: 'auto-title unavailable' };
+                if (autoTitleUpdater && typeof autoTitleUpdater.maybeRefreshTitle === 'function') {
+                  try {
+                    out = await autoTitleUpdater.maybeRefreshTitle(cid, { force: true });
+                  } catch (err) {
+                    out = { ok: false, error: err?.message || String(err || 'refresh failed') };
+                  }
+                }
+                if (ws.readyState === WebSocket.OPEN) {
+                  const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                  try {
+                    await send('Runtime.evaluate', {
+                      expression: `if (typeof window.__ag_on_settings_state === 'function') { window.__ag_on_settings_state(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                      returnByValue: false
+                    });
+                  } catch {}
+                }
+              })();
+              return;
+            }
             if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agGetSettingsState') {
               if (isSwarmIframe || !hostConfirmed) return;
               let req = {};
@@ -985,17 +1230,21 @@ export function createCdpManager({
                     syncAiOutputLang: Boolean(activeConfig.syncAiOutputLang),
                     customSystemPrompt: activeConfig.customSystemPrompt || {
                       enabled: false,
-                      mode: 'system-dual',
+                      mode: 'flow-proxy',
                       text: '',
                       everyInvocation: false
                     },
                     hookAutoAllow: activeConfig.hookAutoAllow || { enabled: false, mode: 'files' },
+                    flow: activeConfig.flow || {},
+                    autoTitle: activeConfig.autoTitle || { enabled: false, turnInterval: 4, minIntervalMin: 5 },
+                    subagentRouting: activeConfig.subagentRouting || { enabled: false, allowedModels: [] },
                     telemetryLayout: activeConfig.telemetryLayout,
                     telemetryCacheMode: activeConfig.telemetryCacheMode,
                     promptSuggestionModel: activeConfig.promptSuggestionModel,
                     sshHosts: Array.isArray(activeConfig.sshHosts) ? activeConfig.sshHosts : [],
                     modules: Object.assign({}, activeConfig.modules)
                   },
+                  flowStatus: flowController && typeof flowController.getState === 'function' ? flowController.getState({}) : null,
                   agyStatus,
                   modelsInfo
                 };
@@ -1037,6 +1286,9 @@ export function createCdpManager({
                       sshHosts: activeConfig.sshHosts
                     });
                   }
+                  if (flowController && typeof flowController.syncState === 'function') {
+                    await flowController.syncState();
+                  }
                   if (!activeConfig.enabled) {
                     targetThemeModes.clear();
                   }
@@ -1076,17 +1328,21 @@ export function createCdpManager({
                     syncAiOutputLang: Boolean(activeConfig.syncAiOutputLang),
                     customSystemPrompt: activeConfig.customSystemPrompt || {
                       enabled: false,
-                      mode: 'system-dual',
+                      mode: 'flow-proxy',
                       text: '',
                       everyInvocation: false
                     },
                     hookAutoAllow: activeConfig.hookAutoAllow || { enabled: false, mode: 'files' },
+                    flow: activeConfig.flow || {},
+                    autoTitle: activeConfig.autoTitle || { enabled: false, turnInterval: 4, minIntervalMin: 5 },
+                    subagentRouting: activeConfig.subagentRouting || { enabled: false, allowedModels: [] },
                     telemetryLayout: activeConfig.telemetryLayout,
                     telemetryCacheMode: activeConfig.telemetryCacheMode,
                     promptSuggestionModel: activeConfig.promptSuggestionModel,
                     sshHosts: Array.isArray(activeConfig.sshHosts) ? activeConfig.sshHosts : [],
                     modules: Object.assign({}, activeConfig.modules)
                   },
+                  flowStatus: flowController && typeof flowController.getState === 'function' ? flowController.getState({}) : null,
                   agyStatus
                 };
                 if (ws.readyState === WebSocket.OPEN) {
@@ -1129,6 +1385,8 @@ export function createCdpManager({
           for (const [, cb] of pendingCallbacks) cb(null);
           pendingCallbacks.clear();
           const wasAttached = attachedTargets.delete(target.id);
+          targetCascadeIds.delete(target.id);
+          syncFlowActiveMainSessions();
           targetThemeModes.delete(target.id);
           if (wasAttached && hadAttachedTarget && attachedTargets.size === 0 && !runOnce && !superseded) {
             triggerFastWatch(30000);
@@ -1179,10 +1437,32 @@ export function createCdpManager({
           sshHosts: activeConfig.sshHosts
         });
       }
+      if (flowController && typeof flowController.syncState === 'function') {
+        await flowController.syncState();
+      }
       if (!activeConfig.enabled) {
         targetThemeModes.clear();
       }
       const shouldHeartbeatCheck = bundleChanged || syncTickCount % 6 === 1;
+      const shouldBroadcastQuota = syncTickCount % 12 === 1;
+      if (shouldBroadcastQuota && lsClient && typeof lsClient.getQuotaStatus === 'function') {
+        void lsClient
+          .getQuotaStatus({ force: true })
+          .then((q) => {
+            if (!q || !q.ok) return;
+            const payloadJson = JSON.stringify(q).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+            for (const entry of attachedTargets.values()) {
+              if (!entry.hostConfirmed || entry.isSwarmIframe || entry.ws?.readyState !== WebSocket.OPEN) continue;
+              entry
+                .send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_quota_status === 'function') { window.__ag_on_quota_status('', ${payloadJson}); } else { window.__ag_quota_state = ${payloadJson}; }`,
+                  returnByValue: false
+                })
+                .catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
       const nowMs = Date.now();
       const shouldDiscoverTargets =
         runOnce ||
@@ -1337,6 +1617,9 @@ export function createCdpManager({
     }
     if (sshRemoteCtrl && typeof sshRemoteCtrl.stop === 'function') {
       sshRemoteCtrl.stop();
+    }
+    if (flowController && typeof flowController.stop === 'function') {
+      void flowController.stop();
     }
     for (const [, entry] of attachedTargets.entries()) {
       try {
