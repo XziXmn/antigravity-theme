@@ -283,7 +283,12 @@ const flowController =
         },
         setActiveMainSessions: (ids) => {
           if (Array.isArray(ids)) {
-            activeMainSessionIds = ids.filter((x) => typeof x === 'string' && x.trim()).slice(0, 8);
+            const fresh = ids.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
+            const merged = [...fresh];
+            for (const oldId of activeMainSessionIds) {
+              if (oldId && !merged.includes(oldId)) merged.push(oldId);
+            }
+            activeMainSessionIds = merged.slice(0, 12);
           }
         },
         syncState: async () => {

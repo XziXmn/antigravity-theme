@@ -23,6 +23,7 @@ import {
   createFlowCompactor
 } from '../core/flow/compactor.mjs';
 import { createMetricsReader } from '../core/daemon/sqlite-metrics.mjs';
+import { detectSubagentRequest } from '../core/flow/proxy.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
 function makeTurn(role, text, extraParts = []) {
@@ -347,4 +348,219 @@ test('createFlowCompactor supports incremental multi-round compaction and record
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 }); } catch {}
   }
+});
+
+test('proxy emits compact-start/compact-hijack and telemetry-ui mounts rim glow with bottom pill swap', () => {
+  const proxySrc = fs.readFileSync(path.join(process.cwd(), 'core/flow/proxy.mjs'), 'utf8');
+  const pickerSrc = fs.readFileSync(path.join(process.cwd(), 'core/runtime/78-flow-mode-picker.js'), 'utf8');
+  const telemetrySrc = fs.readFileSync(path.join(process.cwd(), 'core/runtime/50-telemetry-ui.js'), 'utf8');
+  const cssSrc = fs.readFileSync(path.join(process.cwd(), 'core/styles/30-telemetry.css'), 'utf8');
+
+  assert.match(proxySrc, /emit\('compact-start'/);
+  assert.match(proxySrc, /emit\('compact-hijack'/);
+  assert.match(pickerSrc, /window\.__ag_on_flow_compact_fx/);
+  assert.match(pickerSrc, /isSlashCompactCommand/);
+  assert.match(pickerSrc, /isEditorSlashCompactCommand/);
+  assert.match(pickerSrc, /isCompactSlashChipEl/);
+  assert.match(pickerSrc, /aria-activedescendant/);
+  assert.match(pickerSrc, /agy-send-button/);
+  assert.match(pickerSrc, /window\.addEventListener\('keydown',\s*onSlashKeyDown,\s*true\)/);
+  assert.match(pickerSrc, /window\.addEventListener\('pointerdown',\s*onSlashPointer,\s*true\)/);
+  assert.match(pickerSrc, /suppressPointerUntil/);
+  assert.match(pickerSrc, /__agFlowCompactAction/);
+  assert.match(telemetrySrc, /ag-composer-compact-rim/);
+  assert.match(telemetrySrc, /data-ag-compact-fx/);
+  assert.match(telemetrySrc, /ag-compact-swap-line/);
+  assert.match(telemetrySrc, /data-ag-compact-phase/);
+  assert.match(cssSrc, /\.ag-composer-compact-rim::before/);
+  assert.match(cssSrc, /ag-compact-text-flow/);
+  assert.doesNotMatch(cssSrc, /prefers-reduced-motion:\s*reduce[\s\S]*ag-composer-compact-rim/);
+});
+
+test('isNativeCompactionRequest detects flash-lite checkpoint summaries while ignoring titles and safety monitors', () => {
+  const flashLiteCheckpoint = {
+    model: 'gemini-3.5-flash-lite',
+    request: {
+      contents: [
+        { role: 'user', parts: [{ text: 'Earlier turn' }] },
+        { role: 'model', parts: [{ text: 'Reply' }] },
+        { role: 'user', parts: [{ text: 'Please summarize the conversation so far into a <CONTEXT_SUMMARY>.' }] }
+      ]
+    }
+  };
+  assert.equal(isNativeCompactionRequest(flashLiteCheckpoint), true);
+
+  const singleTurnLongCheckpoint = {
+    model: 'gemini-3.5-flash-lite',
+    request: {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text:
+                'Summarize the conversation below so we can continue cleanly:\n' +
+                'A'.repeat(4200)
+            }
+          ]
+        }
+      ]
+    }
+  };
+  assert.equal(isNativeCompactionRequest(singleTurnLongCheckpoint), true);
+
+  const titleReq = {
+    model: 'gemini-3.5-flash-lite',
+    request: {
+      contents: [
+        { role: 'user', parts: [{ text: 'Generate a short conversation title for this chat.' }] }
+      ]
+    }
+  };
+  assert.equal(isNativeCompactionRequest(titleReq), false);
+
+  const safetyMonitorReq = {
+    model: 'gemini-3.5-flash-lite',
+    request: {
+      systemInstruction: { parts: [{ text: 'You are a safety monitor for severe_internal_risks.' }] },
+      contents: [
+        { role: 'user', parts: [{ text: 'Check <CONTEXT_SUMMARY> safety.' }] },
+        { role: 'model', parts: [{ text: 'ok' }] }
+      ]
+    }
+  };
+  assert.equal(isNativeCompactionRequest(safetyMonitorReq), false);
+});
+
+test('splitHistoryForCodexCompact allowAdaptive splits mid-length manual sessions', () => {
+  const turns = [];
+  for (let i = 0; i < 2; i += 1) {
+    turns.push(makeTurn('user', `User turn ${i}: ${'A'.repeat(1600)}`));
+    turns.push(makeTurn('model', `Model turn ${i}: ${'B'.repeat(1600)}`));
+  }
+  const strictRes = splitHistoryForCodexCompact(turns, { keepTailTokens: 20000, allowAdaptive: false });
+  assert.equal(strictRes.canCompact, false);
+  assert.equal(strictRes.reason, 'too_few_turns');
+
+  const adaptiveRes = splitHistoryForCodexCompact(turns, { keepTailTokens: 20000, allowAdaptive: true });
+  assert.equal(adaptiveRes.canCompact, true);
+  assert.equal(adaptiveRes.splitIdx, 2);
+  assert.ok(adaptiveRes.head.length >= 2);
+  assert.ok(adaptiveRes.tail.length >= 2);
+});
+
+test('buildCompactionSummaryPayload merges consecutive user roles and uses clean systemInstruction', () => {
+  const basePayload = {
+    model: 'gemini-4-neon-high',
+    request: {
+      systemInstruction: { parts: [{ text: 'CUSTOM_PERSONA_SHOULD_NOT_LEAK_TO_COMPACTOR' }] },
+      contents: []
+    }
+  };
+  const head = [
+    makeTurn('user', 'First user request'),
+    makeTurn('user', 'Second adjacent user turn')
+  ];
+  const out = buildCompactionSummaryPayload(basePayload, head);
+  assert.ok(out.request.generationConfig.maxOutputTokens >= 8192);
+  const sysText = out.request.systemInstruction.parts.map((p) => p.text).join('\n');
+  assert.doesNotMatch(sysText, /CUSTOM_PERSONA_SHOULD_NOT_LEAK_TO_COMPACTOR/);
+  assert.equal(out.request.contents.length, 1);
+  assert.equal(out.request.contents[0].role, 'user');
+  assert.equal(out.request.contents[0].parts.length, 3);
+});
+
+test('runCompaction falls back to gemini-3.8-flash-low on primary error and records lastError on failure', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-compactor-fb-'));
+  try {
+    const cid = '22222222-3333-4444-8555-666666666666';
+    const compactor = createFlowCompactor({ compactionDir: tmpDir });
+    const turns = [];
+    for (let i = 0; i < 6; i += 1) {
+      turns.push(makeTurn('user', `U${i}: ${'X'.repeat(2400)}`));
+      turns.push(makeTurn('model', `M${i}: ${'Y'.repeat(2400)}`));
+    }
+    compactor.captureTurnPayload(cid, { model: 'gemini-4-neon-high', request: { contents: turns } }, { model: 'gemini-4-neon-high' });
+
+    const seenModels = [];
+    const rOk = await compactor.runCompaction(cid, {
+      upstream: 'https://example.invalid',
+      authHeaders: { authorization: 'Bearer test' },
+      keepTailTokens: 20000,
+      reason: 'manual',
+      sendUpstream: async ({ payloadObj }) => {
+        seenModels.push(payloadObj.model);
+        if (payloadObj.model === 'gemini-4-neon-high') {
+          return { status: 500, body: 'internal error' };
+        }
+        return {
+          status: 200,
+          body: 'data: {"candidates":[{"content":{"parts":[{"text":"## Summary\\nFallback model succeeded cleanly with complete handoff context preserved."}]}}]}\n\n'
+        };
+      }
+    });
+    assert.equal(rOk.ok, true);
+    assert.deepEqual(seenModels, ['gemini-4-neon-high', 'gemini-3.8-flash-low']);
+    assert.equal(compactor.getStatus(cid).lastError, '');
+
+    const cidFail = '33333333-4444-4555-8666-777777777777';
+    compactor.captureTurnPayload(cidFail, { model: 'gemini-4-neon-high', request: { contents: turns } }, { model: 'gemini-4-neon-high' });
+    const rFail = await compactor.runCompaction(cidFail, {
+      upstream: 'https://example.invalid',
+      authHeaders: { authorization: 'Bearer test' },
+      keepTailTokens: 20000,
+      reason: 'manual',
+      sendUpstream: async () => ({ status: 502, body: 'bad gateway' })
+    });
+    assert.equal(rFail.ok, false);
+    assert.equal(compactor.getStatus(cidFail).lastError, 'COMPACT_HTTP_502');
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 }); } catch {}
+  }
+});
+
+test('detectSubagentRequest marks background-tab heuristic with heuristicOnly: true vs explicit subagents', () => {
+  const activeMainIds = ['aaaa1111-2222-4333-8444-555555555555'];
+  const bgMainRes = detectSubagentRequest(
+    { model: 'gemini-4-neon-high', request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] } },
+    'bbbb1111-2222-4333-8444-555555555555',
+    activeMainIds,
+    false
+  );
+  assert.equal(bgMainRes.isSubagent, true);
+  assert.equal(bgMainRes.heuristicOnly, true);
+
+  const workerRes = detectSubagentRequest(
+    { model: 'gemini-flash-worker-agy', request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] } },
+    'cccc1111-2222-4333-8444-555555555555',
+    activeMainIds,
+    false
+  );
+  assert.equal(workerRes.isSubagent, true);
+  assert.equal(workerRes.heuristicOnly, false);
+
+  const explicitParentRes = detectSubagentRequest(
+    {
+      model: 'gemini-4-hydrogen-high',
+      request: {
+        labels: { parent_cascade_id: activeMainIds[0] },
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }]
+      }
+    },
+    'dddd1111-2222-4333-8444-555555555555',
+    activeMainIds,
+    false
+  );
+  assert.equal(explicitParentRes.isSubagent, true);
+  assert.equal(explicitParentRes.heuristicOnly, false);
+});
+
+test('telemetry-ui persists compact fx by cid with deferredReveal and picker syncs on session switch', () => {
+  const telemetrySrc = fs.readFileSync(path.join(process.cwd(), 'core/runtime/50-telemetry-ui.js'), 'utf8');
+  const pickerSrc = fs.readFileSync(path.join(process.cwd(), 'core/runtime/78-flow-mode-picker.js'), 'utf8');
+
+  assert.match(telemetrySrc, /compactFxByCid/);
+  assert.match(telemetrySrc, /deferredReveal/);
+  assert.match(telemetrySrc, /window\.__ag_sync_flow_compact_status/);
+  assert.match(pickerSrc, /window\.__ag_sync_flow_compact_status\(/);
 });

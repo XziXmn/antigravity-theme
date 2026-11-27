@@ -8,9 +8,11 @@
       const staleEl = document.getElementById(staleId);
       if (staleEl) staleEl.remove();
     }
-    document.querySelectorAll('.ag-live-metrics-pill, #ag-composer-quota-halo, svg[id*="quota-halo"]').forEach((el) => el.remove());
+    document.querySelectorAll('.ag-live-metrics-pill, .ag-composer-compact-rim, .ag-compact-swap-line, #ag-composer-quota-halo, svg[id*="quota-halo"]').forEach((el) => el.remove());
     document.querySelectorAll('[data-ag-row-mode]').forEach((el) => el.removeAttribute('data-ag-row-mode'));
     document.querySelectorAll('[data-ag-turn-row]').forEach((el) => el.removeAttribute('data-ag-turn-row'));
+    document.querySelectorAll('[data-ag-compact-fx]').forEach((el) => el.removeAttribute('data-ag-compact-fx'));
+    document.querySelectorAll('[data-ag-compact-phase]').forEach((el) => el.removeAttribute('data-ag-compact-phase'));
     if (window.__ag_pane_states && typeof window.__ag_pane_states === 'object') {
       for (const k of Object.keys(window.__ag_pane_states)) {
         const ps = window.__ag_pane_states[k];
@@ -828,13 +830,22 @@
     const rightUsed = Math.ceil(rightGroup.getBoundingClientRect().width || 0);
     const freeWidth = rowWidth - leftUsed - rightUsed - 16;
 
+    const swapEl = pill.hasAttribute('data-ag-compact-phase') ? pill.querySelector('.ag-compact-swap-line') : null;
     const textEl = pill.querySelector('.ag-live-metrics-text');
-    const measuredTextWidth = textEl ? Math.ceil(textEl.scrollWidth || 0) : 0;
+    const measuredTextWidth = swapEl
+      ? Math.ceil(swapEl.scrollWidth || 0)
+      : textEl
+      ? Math.ceil(textEl.scrollWidth || 0)
+      : 0;
     const isDetailed =
       boot.telemetryLayout === 'detailed' ||
       Boolean(boot.userConfig && boot.userConfig.telemetryLayout === 'detailed');
-    const neededWidth = measuredTextWidth > 24 ? measuredTextWidth + 20 : 204;
-    const threshold = prevMode === 'middle' ? Math.max(168, neededWidth) : Math.max(202, neededWidth + 24);
+    const neededWidth = measuredTextWidth > 24 ? measuredTextWidth + 24 : 204;
+    const threshold = swapEl
+      ? Math.max(120, neededWidth + 8)
+      : prevMode === 'middle'
+      ? Math.max(168, neededWidth)
+      : Math.max(202, neededWidth + 24);
     const mode = !isDetailed && rowWidth > 0 && freeWidth >= threshold ? 'middle' : 'bottom';
     const sig = mode + ':' + Math.round(rowWidth / 8) + ':' + Math.round(neededWidth / 16);
 
@@ -942,6 +953,312 @@
     return mainPill;
   }
 
+  const compactFxByCid = Object.create(null);
+
+  function resolveCompactFxKey(cid, pk) {
+    const clean = String(cid || '').trim();
+    if (clean) return clean;
+    return '__draft__:' + (pk === 'side' ? 'side' : 'main');
+  }
+
+  function clearCompactFxForKey(key) {
+    if (!key) return;
+    const cur = compactFxByCid[key];
+    if (cur && cur.timerId) {
+      clearTimeout(cur.timerId);
+    }
+    delete compactFxByCid[key];
+  }
+
+  function isCidCurrentlyVisible(cidKey) {
+    try {
+      const panes = discoverConversationPanes();
+      for (let i = 0; i < panes.length; i += 1) {
+        if (resolveCompactFxKey(panes[i].cid, panes[i].key) === cidKey) return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  function armCompactFxTimer(key, fx, ttlMs) {
+    if (!fx || !key) return;
+    if (fx.timerId) {
+      clearTimeout(fx.timerId);
+      fx.timerId = null;
+    }
+    fx.expiresAt = Date.now() + ttlMs;
+    const timerId = setTimeout(() => {
+      const cur = compactFxByCid[key];
+      if (cur && cur.timerId === timerId) {
+        delete compactFxByCid[key];
+        try { applyPendingWaitVisuals(); } catch {}
+      }
+    }, ttlMs);
+    fx.timerId = timerId;
+  }
+
+  function formatCompactTokensK(n) {
+    const v = Math.max(0, Math.round(Number(n) || 0));
+    if (v >= 1000) return Math.round(v / 1000) + 'k';
+    return String(v);
+  }
+
+  function formatCompactFxText(phase, ev) {
+    const loc = I18N_LOCALE || 'zh-CN';
+    const isEn = loc === 'en';
+    const isTw = loc === 'zh-TW';
+    if (phase === 'running') {
+      return isEn ? 'Compacting context…' : isTw ? '正在滑動壓縮上下文…' : '正在滑动压缩上下文…';
+    }
+    if (phase === 'hijack') {
+      return isEn
+        ? 'Native compaction hijacked · recent context kept'
+        : isTw
+        ? '已接管原生壓縮 · 保留近期上下文'
+        : '已接管原生压缩 · 保留近期上下文';
+    }
+    if (phase === 'rollback') {
+      const errCode = String((ev && ev.error) || '').trim();
+      if (
+        errCode === 'too_few_turns' ||
+        errCode === 'head_too_small' ||
+        errCode === 'no_safe_split_point' ||
+        errCode === 'cannot_compact'
+      ) {
+        return isEn
+          ? 'Context too short · skipped'
+          : isTw
+          ? '目前上下文較短 · 暫無需壓縮'
+          : '当前上下文较短 · 暂无需压缩';
+      }
+      if (errCode === 'no_session_snapshot' || errCode === 'no_auth_headers') {
+        return isEn
+          ? 'Send a turn first to compact'
+          : isTw
+          ? '請先傳送一輪對話後再壓縮'
+          : '请先发送一轮对话后再压缩';
+      }
+      if (/^COMPACT_HTTP_|COMPACT_INVALID_SUMMARY|COMPACT_UNEXPECTED_TOOL_CALL/i.test(errCode)) {
+        return isEn
+          ? 'Summary failed · original context kept'
+          : isTw
+          ? '摘要生成異常 · 已保留原上下文'
+          : '摘要生成异常 · 已保留原上下文';
+      }
+      if (/timeout|ETIMEDOUT/i.test(errCode)) {
+        return isEn
+          ? 'Compaction timed out · context kept'
+          : isTw
+          ? '壓縮逾時 · 已保留原上下文'
+          : '压缩超时 · 已保留原上下文';
+      }
+      return isEn
+        ? 'Compaction skipped · original context kept'
+        : isTw
+        ? '滑動壓縮已安全回滾'
+        : '滑动压缩已安全回滚';
+    }
+    const st = (ev && ev.status && typeof ev.status === 'object' ? ev.status : ev) || {};
+    const before = Number(st.beforeTokensEst || 0);
+    const after = Number(st.afterTokensEst || 0);
+    const saved = Number(st.savedTokensEst || 0);
+    if (before > 0 && saved > 0) {
+      const bStr = formatCompactTokensK(before);
+      const aStr = formatCompactTokensK(after);
+      const sStr = formatCompactTokensK(saved);
+      if (isEn) return `Compacted ${bStr}→${aStr} (-${sStr})`;
+      if (isTw) return `已壓縮 ${bStr}→${aStr}（省${sStr}）`;
+      return `已压缩 ${bStr}→${aStr}（省${sStr}）`;
+    }
+    return isEn ? 'Context compacted' : isTw ? '已完成滑動壓縮' : '已完成滑动压缩';
+  }
+
+  function resolveComposerCardEl(inputBox) {
+    if (!inputBox || !inputBox.querySelector) return null;
+    return (
+      inputBox.querySelector('.surface-composer-card') ||
+      inputBox.querySelector(':scope > div.bg-card') ||
+      inputBox
+    );
+  }
+
+  function syncCompactFxVisualForPane(pane, pill, now) {
+    if (!pane) return;
+    const pk = pane.key === 'side' ? 'side' : 'main';
+    const cidKey = resolveCompactFxKey(pane.cid, pk);
+    let fx = compactFxByCid[cidKey] || null;
+    if (fx && fx.expiresAt && fx.expiresAt <= now) {
+      clearCompactFxForKey(cidKey);
+      fx = null;
+    }
+    if (fx && fx.deferredReveal) {
+      fx.deferredReveal = false;
+      armCompactFxTimer(cidKey, fx, fx.revealTtlMs || 4500);
+    }
+
+    const card = resolveComposerCardEl(pane.inputBox);
+    if (card) {
+      if (fx) {
+        let rim = card.querySelector(':scope > .ag-composer-compact-rim');
+        if (!rim) {
+          rim = document.createElement('div');
+          rim.className = 'ag-composer-compact-rim';
+          rim.setAttribute('aria-hidden', 'true');
+          card.insertBefore(rim, card.firstChild);
+        }
+        if (card.getAttribute('data-ag-compact-fx') !== fx.phase) {
+          card.setAttribute('data-ag-compact-fx', fx.phase);
+        }
+      } else {
+        if (card.hasAttribute('data-ag-compact-fx')) {
+          card.removeAttribute('data-ag-compact-fx');
+        }
+      }
+    }
+
+    if (pill) {
+      let layoutDirty = false;
+      if (fx) {
+        if (pill.getAttribute('data-ag-compact-phase') !== fx.phase) {
+          pill.setAttribute('data-ag-compact-phase', fx.phase);
+          layoutDirty = true;
+        }
+        let swapLine = pill.querySelector(':scope > .ag-compact-swap-line');
+        if (!swapLine) {
+          swapLine = document.createElement('span');
+          swapLine.className = 'ag-compact-swap-line';
+          swapLine.innerHTML = '<span class="ag-ctx-pending-dot"></span><span class="ag-compact-swap-text"></span>';
+          pill.appendChild(swapLine);
+          layoutDirty = true;
+        }
+        const swapDot = swapLine.querySelector('.ag-ctx-pending-dot');
+        const swapTxt = swapLine.querySelector('.ag-compact-swap-text');
+        if (swapDot) {
+          const dotCls =
+            'ag-ctx-pending-dot ' +
+            (fx.phase === 'running'
+              ? 'ag-dot-compact-running'
+              : fx.phase === 'rollback'
+              ? 'ag-dot-compact-warn'
+              : 'ag-dot-compact-success');
+          if (swapDot.className !== dotCls) swapDot.className = dotCls;
+        }
+        if (swapTxt) {
+          const txtCls =
+            'ag-compact-swap-text ' +
+            (fx.phase === 'running'
+              ? 'ag-compact-shimmer'
+              : fx.phase === 'hijack'
+              ? 'ag-compact-tone-hijack'
+              : fx.phase === 'rollback'
+              ? 'ag-compact-tone-rollback'
+              : 'ag-compact-tone-success');
+          if (swapTxt.className !== txtCls) swapTxt.className = txtCls;
+          if (swapTxt.textContent !== fx.text) {
+            swapTxt.textContent = fx.text;
+            layoutDirty = true;
+          }
+        }
+      } else if (pill.hasAttribute('data-ag-compact-phase')) {
+        pill.removeAttribute('data-ag-compact-phase');
+        layoutDirty = true;
+      }
+      if (layoutDirty) {
+        ensureMetricsPillForPane(pane, false, false);
+      }
+    }
+  }
+
+  window.__ag_on_flow_compact_fx = function (ev, pkHint) {
+    if (!ev || typeof ev !== 'object') return;
+    const pk = pkHint === 'side' ? 'side' : 'main';
+    const type = String(ev.type || '');
+    let phase = '';
+    let ttlMs = 0;
+
+    if (type === 'compact-start') {
+      phase = 'running';
+      ttlMs = 90000;
+    } else if (type === 'compact-hijack') {
+      phase = 'hijack';
+      ttlMs = 3600;
+    } else if (type === 'compact' || type === 'compaction') {
+      if (ev.ok === false) {
+        if (ev.error === 'compaction_in_flight') return;
+        phase = 'rollback';
+        ttlMs = 3600;
+      } else {
+        phase = 'success';
+        ttlMs = 4500;
+      }
+    }
+    if (!phase) return;
+
+    const key = resolveCompactFxKey(ev.cascadeId, pk);
+    const text = formatCompactFxText(phase, ev);
+    const now = Date.now();
+    const prev = compactFxByCid[key];
+    if (
+      prev &&
+      prev.phase === phase &&
+      phase !== 'running' &&
+      prev.text === text &&
+      now - Number(prev.updatedAt || 0) < 1500
+    ) {
+      return;
+    }
+
+    clearCompactFxForKey(key);
+    const fx = {
+      cid: String(ev.cascadeId || '').trim(),
+      phase,
+      text,
+      startedAt: phase === 'running' ? now : Number((prev && prev.startedAt) || now),
+      updatedAt: now,
+      deferredReveal: false,
+      revealTtlMs: ttlMs,
+      expiresAt: 0,
+      timerId: null
+    };
+    compactFxByCid[key] = fx;
+
+    if (phase === 'running' || isCidCurrentlyVisible(key)) {
+      armCompactFxTimer(key, fx, ttlMs);
+    } else {
+      fx.deferredReveal = true;
+      fx.revealTtlMs = ttlMs;
+      armCompactFxTimer(key, fx, 180000);
+    }
+    try { applyPendingWaitVisuals(); } catch {}
+  };
+
+  window.__ag_sync_flow_compact_status = function (cid, compStatus, pkHint) {
+    if (!cid || !compStatus || typeof compStatus !== 'object') return;
+    const pk = pkHint === 'side' ? 'side' : 'main';
+    const key = resolveCompactFxKey(cid, pk);
+    const cur = compactFxByCid[key] || null;
+    if (compStatus.inFlight === true) {
+      if (!cur || cur.phase !== 'running') {
+        window.__ag_on_flow_compact_fx({ type: 'compact-start', cascadeId: cid, reason: 'sync' }, pk);
+      }
+      return;
+    }
+    if (compStatus.inFlight === false && cur && cur.phase === 'running') {
+      const startedAt = Number(cur.startedAt || 0);
+      if (Number(compStatus.compactedAt || 0) >= startedAt - 2000) {
+        window.__ag_on_flow_compact_fx({ type: 'compact', cascadeId: cid, ok: true, status: compStatus }, pk);
+      } else if (compStatus.lastError && Number(compStatus.lastErrorAt || 0) >= startedAt - 2000) {
+        window.__ag_on_flow_compact_fx(
+          { type: 'compact', cascadeId: cid, ok: false, error: compStatus.lastError, status: compStatus },
+          pk
+        );
+      } else if (Date.now() - startedAt > 2500) {
+        clearCompactFxForKey(key);
+        try { applyPendingWaitVisuals(); } catch {}
+      }
+    }
+  };
+
   function applyPendingWaitVisualsForPane(pane, now) {
     const { key: paneKey, pillId, inputBox, container, cid: curCid } = pane;
     const ps = getOrCreatePaneState(paneKey);
@@ -1024,8 +1341,9 @@
     });
     ps.lastSnap = snap;
 
+    const hasCompactFx = Boolean(compactFxByCid[resolveCompactFxKey(curCid, paneKey)]);
     const routeVisible =
-      isMetricsRouteActive(pane) || snap.visualState === 'error' || snap.visualState === 'slow' || snap.isExecuting;
+      isMetricsRouteActive(pane) || snap.visualState === 'error' || snap.visualState === 'slow' || snap.isExecuting || hasCompactFx;
 
     let pill = document.getElementById(pillId);
     if (routeVisible && !pill) {
@@ -1098,6 +1416,8 @@
         pill.setAttribute('aria-label', snap.dotTitle);
       }
     }
+
+    syncCompactFxVisualForPane(pane, pill, now);
 
     const tt = document.getElementById('ag-live-metrics-tooltip');
     if (tt && (window.__ag_tt_owner_pane || 'main') === paneKey) {
@@ -1813,6 +2133,11 @@
     window.__ag_tt_pinned = false;
     window.__ag_tt_hover_opened_at = 0;
     try {
+      clearCompactFxForPane('main');
+      clearCompactFxForPane('side');
+      document.querySelectorAll('.ag-composer-compact-rim, .ag-compact-swap-line').forEach((el) => el.remove());
+      document.querySelectorAll('[data-ag-compact-fx]').forEach((el) => el.removeAttribute('data-ag-compact-fx'));
+      document.querySelectorAll('[data-ag-compact-phase]').forEach((el) => el.removeAttribute('data-ag-compact-phase'));
       document.querySelectorAll('[data-ag-row-mode]').forEach((el) => el.removeAttribute('data-ag-row-mode'));
     } catch (e) {}
     for (const k of Object.keys(paneStates)) {

@@ -34,7 +34,7 @@ const COMPACT_INSTRUCTION = [
 ].join('\n');
 
 const NATIVE_COMPACT_RE =
-  /\b(?:conversation checkpoint|compact the conversation|create a checkpoint|context summary)\b|<CONTEXT_SUMMARY>.*?(?:generate|write|create)/i;
+  /\b(?:conversation checkpoint|compact the conversation|create a checkpoint|context summary|summarize the conversation|previous session summary|conversation summary|handoff summary)\b|<CONTEXT_SUMMARY>/i;
 
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/g;
 
@@ -133,95 +133,106 @@ export function contentFingerprint(content) {
   return crypto.createHash('sha256').update(`${role}:${snippet}`).digest('hex').slice(0, 16);
 }
 
-export function splitHistoryForCodexCompact(contents, { keepTailTokens = 20000 } = {}) {
+export function splitHistoryForCodexCompact(contents, { keepTailTokens = 20000, allowAdaptive = false } = {}) {
   const list = Array.isArray(contents) ? contents : [];
-  if (list.length < 6) {
+  if (list.length < (allowAdaptive ? 4 : 6)) {
     return { canCompact: false, reason: 'too_few_turns' };
   }
 
   const tokenList = list.map((c) => estimateContentTokens(c));
-  let tailTokens = 0;
-  let rawStart = list.length - 1;
+  const totalTokens = tokenList.reduce((a, b) => a + b, 0);
 
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const t = tokenList[i];
-    if (i < list.length - 1 && tailTokens + t > keepTailTokens) {
-      rawStart = i + 1;
-      break;
+  const trySplit = (targetKeepTail, minSplitIdx, minHeadTokens) => {
+    let tailTokens = 0;
+    let rawStart = list.length - 1;
+
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const t = tokenList[i];
+      if (i < list.length - 1 && tailTokens + t > targetKeepTail) {
+        rawStart = i + 1;
+        break;
+      }
+      tailTokens += t;
+      rawStart = i;
     }
-    tailTokens += t;
-    rawStart = i;
-  }
 
-  // Snap forward/backward to a pure user turn (not a functionResponse, and not right after an unclosed functionCall)
-  const isSafeUserAnchor = (idx) => {
-    if (idx < 4 || idx >= list.length) return false;
-    const cur = list[idx];
-    if (!cur || cur.role !== 'user' || isToolResponseTurn(cur)) return false;
-    if (idx > 0 && isToolCallTurn(list[idx - 1])) return false;
-    return true;
-  };
+    // Snap forward/backward to a pure user turn (not a functionResponse, and not right after an unclosed functionCall)
+    const isSafeUserAnchor = (idx) => {
+      if (idx < minSplitIdx || idx >= list.length) return false;
+      const cur = list[idx];
+      if (!cur || cur.role !== 'user' || isToolResponseTurn(cur)) return false;
+      if (idx > 0 && isToolCallTurn(list[idx - 1])) return false;
+      return true;
+    };
 
-  // Fallback anchor for long agentic tool-call chains: model turn right after a user turn, keeping every functionCall/functionResponse pair intact
-  const isSafeModelAnchor = (idx) => {
-    if (idx < 4 || idx >= list.length) return false;
-    const cur = list[idx];
-    const prev = list[idx - 1];
-    if (!cur || cur.role !== 'model') return false;
-    if (!prev || prev.role !== 'user') return false;
-    return true;
-  };
+    // Fallback anchor for long agentic tool-call chains: model turn right after a user turn, keeping every functionCall/functionResponse pair intact
+    const isSafeModelAnchor = (idx) => {
+      if (idx < minSplitIdx || idx >= list.length) return false;
+      const cur = list[idx];
+      const prev = list[idx - 1];
+      if (!cur || cur.role !== 'model') return false;
+      if (!prev || prev.role !== 'user') return false;
+      return true;
+    };
 
-  const findAnchor = (predicate) => {
-    for (let idx = rawStart; idx < list.length; idx += 1) {
-      if (predicate(idx)) return idx;
-    }
-    for (let idx = rawStart - 1; idx >= 4; idx -= 1) {
-      if (predicate(idx)) return idx;
-    }
-    return -1;
-  };
+    const findAnchor = (predicate) => {
+      for (let idx = rawStart; idx < list.length; idx += 1) {
+        if (predicate(idx)) return idx;
+      }
+      for (let idx = rawStart - 1; idx >= minSplitIdx; idx -= 1) {
+        if (predicate(idx)) return idx;
+      }
+      return -1;
+    };
 
-  let splitIdx = findAnchor(isSafeUserAnchor);
-  let anchorMode = 'user';
+    let splitIdx = findAnchor(isSafeUserAnchor);
+    let anchorMode = 'user';
 
-  const userTailTokens = splitIdx >= 4 ? tokenList.slice(splitIdx).reduce((a, b) => a + b, 0) : Infinity;
-  const excessiveTailLimit = Math.max(keepTailTokens * 2.5, 48000);
-  if (splitIdx < 4 || userTailTokens > excessiveTailLimit) {
-    const modelIdx = findAnchor(isSafeModelAnchor);
-    if (modelIdx >= 4) {
-      const modelHeadTokens = tokenList.slice(0, modelIdx).reduce((a, b) => a + b, 0);
-      const modelTailTokens = tokenList.slice(modelIdx).reduce((a, b) => a + b, 0);
-      if (modelHeadTokens >= 800 && (splitIdx < 4 || modelTailTokens <= userTailTokens * 0.8)) {
-        splitIdx = modelIdx;
-        anchorMode = 'model';
+    const userTailTokens = splitIdx >= minSplitIdx ? tokenList.slice(splitIdx).reduce((a, b) => a + b, 0) : Infinity;
+    const excessiveTailLimit = Math.max(targetKeepTail * 2.5, 48000);
+    if (splitIdx < minSplitIdx || userTailTokens > excessiveTailLimit) {
+      const modelIdx = findAnchor(isSafeModelAnchor);
+      if (modelIdx >= minSplitIdx) {
+        const modelHeadTokens = tokenList.slice(0, modelIdx).reduce((a, b) => a + b, 0);
+        const modelTailTokens = tokenList.slice(modelIdx).reduce((a, b) => a + b, 0);
+        if (modelHeadTokens >= minHeadTokens && (splitIdx < minSplitIdx || modelTailTokens <= userTailTokens * 0.8)) {
+          splitIdx = modelIdx;
+          anchorMode = 'model';
+        }
       }
     }
-  }
 
-  if (splitIdx < 4) {
-    return { canCompact: false, reason: 'no_safe_split_point' };
-  }
+    if (splitIdx < minSplitIdx) {
+      return { canCompact: false, reason: 'no_safe_split_point' };
+    }
 
-  const head = list.slice(0, splitIdx);
-  const tail = list.slice(splitIdx);
-  const headTokens = tokenList.slice(0, splitIdx).reduce((a, b) => a + b, 0);
-  const finalTailTokens = tokenList.slice(splitIdx).reduce((a, b) => a + b, 0);
+    const head = list.slice(0, splitIdx);
+    const tail = list.slice(splitIdx);
+    const headTokens = tokenList.slice(0, splitIdx).reduce((a, b) => a + b, 0);
+    const finalTailTokens = tokenList.slice(splitIdx).reduce((a, b) => a + b, 0);
 
-  if (headTokens < 800) {
-    return { canCompact: false, reason: 'head_too_small' };
-  }
+    if (headTokens < minHeadTokens) {
+      return { canCompact: false, reason: 'head_too_small' };
+    }
 
-  return {
-    canCompact: true,
-    splitIdx,
-    anchorMode,
-    head,
-    tail,
-    headTokens,
-    tailTokens: finalTailTokens,
-    anchorFingerprint: contentFingerprint(list[splitIdx])
+    return {
+      canCompact: true,
+      splitIdx,
+      anchorMode,
+      head,
+      tail,
+      headTokens,
+      tailTokens: finalTailTokens,
+      anchorFingerprint: contentFingerprint(list[splitIdx])
+    };
   };
+
+  let res = list.length >= 6 ? trySplit(keepTailTokens, 4, 800) : { canCompact: false, reason: 'too_few_turns' };
+  if (!res.canCompact && allowAdaptive && list.length >= 4 && totalTokens >= 1200) {
+    const adaptiveTail = Math.min(keepTailTokens, Math.max(1200, Math.floor(totalTokens * 0.35)));
+    res = trySplit(adaptiveTail, 2, 400);
+  }
+  return res;
 }
 
 export function isNativeCompactionRequest(payload) {
@@ -234,12 +245,31 @@ export function isNativeCompactionRequest(payload) {
   const sysParts = Array.isArray((reqObj.systemInstruction || reqObj.system_instruction)?.parts)
     ? (reqObj.systemInstruction || reqObj.system_instruction).parts
     : [];
-  const sysText = sysParts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('\n').slice(0, 1600);
+  const sysText = sysParts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('\n').slice(0, 4000);
   const tail = contents[contents.length - 1];
-  const tailText = Array.isArray(tail?.parts)
-    ? tail.parts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('\n').slice(0, 1600)
+  const fullTailText = Array.isArray(tail?.parts)
+    ? tail.parts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('\n')
     : '';
-  return NATIVE_COMPACT_RE.test(sysText) || NATIVE_COMPACT_RE.test(tailText);
+  const tailText =
+    fullTailText.length > 6000
+      ? `${fullTailText.slice(0, 4000)}\n${fullTailText.slice(-2000)}`
+      : fullTailText;
+  const combined = `${sysText}\n${tailText}`;
+
+  // Exclude safety monitors & short conversation title generators
+  if (
+    /\b(?:severe_internal_risks|sir_flash_lite|safety monitor|evaluate whether the trajectory)\b/i.test(combined) ||
+    /\b(?:generate (?:a )?(?:short |concise |brief )?title|conversation title|title for this (?:conversation|chat|thread)|name this (?:conversation|chat))\b/i.test(
+      combined
+    )
+  ) {
+    return false;
+  }
+
+  if (!NATIVE_COMPACT_RE.test(sysText) && !NATIVE_COMPACT_RE.test(tailText)) {
+    return false;
+  }
+  return contents.length >= 2 || /<CONTEXT_SUMMARY>/i.test(combined) || fullTailText.length >= 4000;
 }
 
 function slimPartsForSummary(parts) {
@@ -305,6 +335,21 @@ export function rewriteNativeCompactionRequest(payload) {
   return next;
 }
 
+function mergeConsecutiveRoles(turns) {
+  const out = [];
+  for (const c of Array.isArray(turns) ? turns : []) {
+    const role = c?.role === 'model' ? 'model' : 'user';
+    const parts = Array.isArray(c?.parts) && c.parts.length > 0 ? c.parts : [{ text: '[空轮次]' }];
+    const prev = out[out.length - 1];
+    if (prev && prev.role === role) {
+      prev.parts.push(...parts);
+    } else {
+      out.push({ role, parts: [...parts] });
+    }
+  }
+  return out;
+}
+
 export function buildCompactionSummaryPayload(basePayload, headContents, { compactModel = '' } = {}) {
   const srcReq = basePayload?.request || basePayload || {};
   const model = compactModel || String(basePayload?.model || srcReq.model || 'gemini-3.8-flash-low');
@@ -317,22 +362,26 @@ export function buildCompactionSummaryPayload(basePayload, headContents, { compa
     parts: [{ text: COMPACT_INSTRUCTION }]
   });
 
-  const out = {
+  return {
     project: basePayload?.project || 'aicode-consumers',
     requestId: `ag-codex-compact-${Date.now()}`,
     model,
     request: {
-      contents: slimmedHistory,
+      systemInstruction: {
+        role: 'user',
+        parts: [
+          {
+            text: '你是一个高密度工程上下文交接摘要生成器。请严格依据给定历史对话整理结构化交接摘要，不要调用任何工具，也不要输出多余寒暄。'
+          }
+        ]
+      },
+      contents: mergeConsecutiveRoles(slimmedHistory),
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 4096
+        maxOutputTokens: 8192
       }
     }
   };
-  if (srcReq.systemInstruction) {
-    out.request.systemInstruction = structuredClone(srcReq.systemInstruction);
-  }
-  return out;
 }
 
 export function buildCompactedContents(origContents, state) {
@@ -395,6 +444,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
   const latestTurnByCid = new Map();
   const compactionsByCid = new Map();
   const lastCheckByCid = new Map();
+  const lastErrorByCid = new Map();
   const inFlightByCid = new Set();
 
   function getSnapshotPath(cid) {
@@ -563,10 +613,23 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
   ) {
     const safe = sanitizeCid(cid);
     if (!safe) return { ok: false, error: 'missing_cascade_id' };
+    const recordFailure = (errorCode) => {
+      lastErrorByCid.set(safe, { error: String(errorCode || 'compaction_failed'), at: Date.now(), reason });
+      if (lastErrorByCid.size > 24) {
+        const oldest = lastErrorByCid.keys().next().value;
+        if (oldest) lastErrorByCid.delete(oldest);
+      }
+    };
     if (inFlightByCid.has(safe)) return { ok: false, error: 'compaction_in_flight' };
     const snap = latestTurnByCid.get(safe);
-    if (!snap) return { ok: false, error: 'no_session_snapshot' };
-    if (!authHeaders || typeof sendUpstream !== 'function') return { ok: false, error: 'missing_auth_or_transport' };
+    if (!snap) {
+      recordFailure('no_session_snapshot');
+      return { ok: false, error: 'no_session_snapshot', status: getStatus(safe) };
+    }
+    if (!authHeaders || typeof sendUpstream !== 'function') {
+      recordFailure('missing_auth_or_transport');
+      return { ok: false, error: 'missing_auth_or_transport', status: getStatus(safe) };
+    }
 
     const reqObj = snap.payload?.request || snap.payload || {};
     const origContents = Array.isArray(reqObj.contents) ? reqObj.contents : [];
@@ -576,15 +639,19 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
       prevState?.summaryText && prevState?.anchorFingerprint
         ? buildCompactedContents(origContents, prevState).contents || origContents
         : origContents;
-    const split = splitHistoryForCodexCompact(effectiveInput, { keepTailTokens });
+    const split = splitHistoryForCodexCompact(effectiveInput, {
+      keepTailTokens,
+      allowAdaptive: reason === 'manual'
+    });
     if (!split.canCompact) {
-      return { ok: false, error: split.reason || 'cannot_compact' };
+      const errCode = split.reason || 'cannot_compact';
+      recordFailure(errCode);
+      return { ok: false, error: errCode, status: getStatus(safe) };
     }
 
-    inFlightByCid.add(safe);
-    try {
+    const requestSummary = async (targetModel) => {
       const summaryPayload = buildCompactionSummaryPayload(snap.payload, split.head, {
-        compactModel: compactModel || snap.model
+        compactModel: targetModel
       });
       const r = await sendUpstream({
         upstream,
@@ -602,8 +669,29 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
       if (sse.toolCalls > 0) {
         throw new Error('COMPACT_UNEXPECTED_TOOL_CALL');
       }
-      if (summaryText.length < 60 || isPolicyBlockText(summaryText) || analyzeRefusal(summaryText, { scene: 'engineering' }).isRefusal) {
+      if (
+        summaryText.length < 60 ||
+        isPolicyBlockText(summaryText) ||
+        analyzeRefusal(summaryText, { scene: 'engineering' }).isRefusal
+      ) {
         throw new Error('COMPACT_INVALID_SUMMARY');
+      }
+      return summaryText;
+    };
+
+    inFlightByCid.add(safe);
+    try {
+      const primaryModel = compactModel || snap.model || 'gemini-3.8-flash-low';
+      let summaryText = '';
+      try {
+        summaryText = await requestSummary(primaryModel);
+      } catch (primaryErr) {
+        if (!compactModel && !/gemini-3\.8-flash-low/i.test(primaryModel)) {
+          log(`[FlowCompactor] Primary summary failed (${primaryErr.message}), falling back to gemini-3.8-flash-low`);
+          summaryText = await requestSummary('gemini-3.8-flash-low');
+        } else {
+          throw primaryErr;
+        }
       }
 
       const summaryTokens = estimateTextTokens(summaryText) + 40;
@@ -628,6 +716,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
         summaryText
       };
       persistState(safe, nextState);
+      lastErrorByCid.delete(safe);
       log(
         `[FlowCompactor] Compacted ${safe.slice(0, 8)} (${reason}): ${beforeTokensEst} -> ${afterTokensEst} est tokens (saved ${savedTokensEst})`
       );
@@ -636,6 +725,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
       // Atomic rollback: keep prevState intact
       if (prevState) compactionsByCid.set(safe, prevState);
       const msg = err?.message || String(err || 'compaction_failed');
+      recordFailure(msg);
       log(`[FlowCompactor] Rollback for ${safe.slice(0, 8)}: ${msg}`);
       return { ok: false, error: msg, status: getStatus(safe) };
     } finally {
@@ -647,6 +737,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
     const safe = sanitizeCid(cid);
     if (!safe) return { ok: false, error: 'missing_cascade_id' };
     compactionsByCid.delete(safe);
+    lastErrorByCid.delete(safe);
     const filePath = getSnapshotPath(safe);
     if (filePath && fs.existsSync(filePath)) {
       try { fs.unlinkSync(filePath); } catch {}
@@ -661,6 +752,8 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
     }
     const st = loadState(safe);
     const totalCount = Number(st?.count || 0) + Number(st?.hijackCount || 0);
+    const errInfo = lastErrorByCid.get(safe) || null;
+    const snap = latestTurnByCid.get(safe) || null;
     return {
       active: Boolean((st?.summaryText && st?.anchorFingerprint) || Number(st?.hijackCount || 0) > 0),
       count: totalCount,
@@ -671,9 +764,18 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
       afterTokensEst: st?.afterTokensEst || 0,
       reason: st?.reason || '',
       inFlight: inFlightByCid.has(safe),
-      hasSnapshot: latestTurnByCid.has(safe),
+      hasSnapshot: Boolean(snap),
+      turnsCount: snap?.turnsCount || 0,
+      lastError: errInfo?.error || '',
+      lastErrorAt: errInfo?.at || 0,
       lastCheck: lastCheckByCid.get(safe) || null
     };
+  }
+
+  function listTrackedCids() {
+    return Array.from(
+      new Set([...latestTurnByCid.keys(), ...compactionsByCid.keys(), ...lastErrorByCid.keys(), ...inFlightByCid])
+    );
   }
 
   return {
@@ -683,6 +785,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
     shouldAutoCompact,
     runCompaction,
     clearCompaction,
-    getStatus
+    getStatus,
+    listTrackedCids
   };
 }

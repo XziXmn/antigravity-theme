@@ -30,7 +30,7 @@
   flex: 1 1 0% !important;
   max-width: max-content !important;
   min-width: 0 !important;
-  height: 22px;
+  height: 28px;
   margin-left: auto;
   margin-right: auto;
   padding: 0 6px;
@@ -43,7 +43,7 @@
   letter-spacing: -0.025em !important;
   color: #404040 !important;
   opacity: 0.92 !important;
-  line-height: 1 !important;
+  line-height: 16px !important;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -81,16 +81,18 @@
 }
 
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill) :is(#ag-live-metrics-text, .ag-live-metrics-text) {
-  display: block;
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
   max-width: 100%;
-  padding: 2px 6px;
+  padding: 0 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono, "SF Mono", Menlo, Monaco, ui-monospace, SFMono-Regular, "PingFang SC", Consolas, monospace) !important;
   font-size: 10.5px !important;
   font-weight: 500 !important;
+  line-height: 16px !important;
   letter-spacing: -0.025em !important;
   color: inherit !important;
 }
@@ -123,11 +125,12 @@
 #antigravity\.agentSidePanelInputBox :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot,
 :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot {
   display: inline-block;
-  width: 5.5px;
-  height: 5.5px;
-  margin: 0 5px 0 2px;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px 0 2px;
   border-radius: 50%;
-  vertical-align: 1px;
+  vertical-align: middle;
   background-color: #2B7FFF !important;
   box-shadow: 0 0 0 1.5px rgba(43, 127, 255, 0.16);
   transition: background-color 0.35s ease, box-shadow 0.35s ease, opacity 0.25s ease;
@@ -1756,4 +1759,223 @@
 
 #ag-live-metrics-tooltip .ag-tt-flow-chip.is-on .ag-tt-flow-chip-dot {
   background: #10B981;
+}
+
+/* ============================================================================
+ * Flow Sliding Compaction: Composer Rim Glow + Bottom Pill In-Place Swap
+ * ============================================================================ */
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card .ag-composer-compact-rim,
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card .ag-composer-compact-rim {
+  position: absolute !important;
+  inset: -1.5px !important;
+  border-radius: inherit !important;
+  padding: 1.5px !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+  overflow: hidden !important;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card .ag-composer-compact-rim::before,
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card .ag-composer-compact-rim::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1400px;
+  height: 1400px;
+  margin-left: -700px;
+  margin-top: -700px;
+  will-change: transform;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg 205deg,
+    #4F46E5 255deg,
+    #2B7FFF 305deg,
+    #38BDF8 338deg,
+    transparent 360deg
+  );
+  animation: ag-compact-rim-spin 2.4s linear infinite !important;
+}
+
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="running"] .ag-composer-compact-rim,
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="running"] .ag-composer-compact-rim {
+  opacity: 1 !important;
+}
+
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="running"],
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="running"] {
+  box-shadow: var(--ag-composer-card-shadow, 0 2px 10px rgba(0, 0, 0, 0.035)), 0 0 22px rgba(79, 70, 229, 0.16) !important;
+}
+
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="success"],
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="success"] {
+  border-color: rgba(5, 150, 105, 0.52) !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 2px 10px rgba(0, 0, 0, 0.035)), 0 0 18px rgba(5, 150, 105, 0.16) !important;
+}
+
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="hijack"],
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="hijack"] {
+  border-color: rgba(43, 127, 255, 0.52) !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 2px 10px rgba(0, 0, 0, 0.035)), 0 0 16px rgba(43, 127, 255, 0.16) !important;
+}
+
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="rollback"],
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="rollback"] {
+  border-color: rgba(217, 119, 6, 0.55) !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 2px 10px rgba(0, 0, 0, 0.035)), 0 0 16px rgba(217, 119, 6, 0.16) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] .surface-composer-card .ag-composer-compact-rim::before,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] > div.bg-card .ag-composer-compact-rim::before {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg 205deg,
+    #818CF8 255deg,
+    #60A5FA 305deg,
+    #38BDF8 338deg,
+    transparent 360deg
+  );
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="running"],
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="running"] {
+  box-shadow: var(--ag-composer-card-shadow, 0 3px 12px rgba(0, 0, 0, 0.24)), 0 0 24px rgba(129, 140, 248, 0.22) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="success"],
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="success"] {
+  border-color: rgba(52, 211, 153, 0.52) !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 3px 12px rgba(0, 0, 0, 0.24)), 0 0 20px rgba(52, 211, 153, 0.20) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="hijack"],
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="hijack"] {
+  border-color: rgba(96, 165, 250, 0.52) !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 3px 12px rgba(0, 0, 0, 0.24)), 0 0 18px rgba(96, 165, 250, 0.20) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] .surface-composer-card[data-ag-compact-fx="rollback"],
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [id="antigravity.agentSidePanelInputBox"] > div.bg-card[data-ag-compact-fx="rollback"] {
+  border-color: rgba(251, 191, 36, 0.55) !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 3px 12px rgba(0, 0, 0, 0.24)), 0 0 18px rgba(251, 191, 36, 0.18) !important;
+}
+
+/* Bottom Pill In-Place Swap */
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-swap-line {
+  display: none;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 10.5px !important;
+  font-weight: 500 !important;
+  line-height: 16px !important;
+  letter-spacing: 0 !important;
+  animation: ag-compact-swap-in 0.22s ease;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill)[data-ag-row-mode="bottom"][data-ag-compact-phase] .ag-compact-swap-line {
+  pointer-events: auto !important;
+  cursor: pointer !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill)[data-ag-compact-phase] :is(#ag-live-metrics-text, .ag-live-metrics-text) {
+  display: none !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill)[data-ag-compact-phase] .ag-compact-swap-line {
+  display: inline-flex !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-swap-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 16px !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-shimmer {
+  background: linear-gradient(90deg, #4B5563 0%, #4B5563 30%, #0D0D0D 48%, #2B7FFF 54%, #4B5563 72%, #4B5563 100%);
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent !important;
+  animation: ag-compact-text-flow 1.85s linear infinite !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-shimmer {
+  background: linear-gradient(90deg, #A3A3A3 0%, #A3A3A3 30%, #FFFFFF 48%, #60A5FA 54%, #A3A3A3 72%, #A3A3A3 100%);
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-tone-success {
+  color: #059669 !important;
+  font-weight: 600 !important;
+}
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-tone-success {
+  color: #34D399 !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-tone-hijack {
+  color: #2B7FFF !important;
+  font-weight: 600 !important;
+}
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-tone-hijack {
+  color: #60A5FA !important;
+}
+
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-tone-rollback {
+  color: #D97706 !important;
+  font-weight: 600 !important;
+}
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-compact-tone-rollback {
+  color: #FBBF24 !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot.ag-dot-compact-running,
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot.ag-dot-compact-running {
+  background-color: #4F46E5 !important;
+  box-shadow: 0 0 0 2.5px rgba(79, 70, 229, 0.22);
+  animation: ag-pulse-dot 1.05s ease-in-out infinite;
+}
+
+#antigravity\.agentSidePanelInputBox :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot.ag-dot-compact-success,
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot.ag-dot-compact-success {
+  background-color: #059669 !important;
+  box-shadow: 0 0 0 2.5px rgba(5, 150, 105, 0.24);
+  animation: none !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot.ag-dot-compact-warn,
+:is(#ag-live-metrics-pill, .ag-live-metrics-pill) .ag-ctx-pending-dot.ag-dot-compact-warn {
+  background-color: #D97706 !important;
+  box-shadow: 0 0 0 2.5px rgba(217, 119, 6, 0.24);
+  animation: none !important;
+}
+
+@keyframes ag-compact-rim-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ag-compact-text-flow {
+  0% { background-position: 100% 50%; }
+  100% { background-position: -100% 50%; }
+}
+
+@keyframes ag-compact-swap-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
 }

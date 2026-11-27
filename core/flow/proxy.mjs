@@ -161,7 +161,7 @@ export function detectSubagentRequest(payload, origTraj = '', activeMainIds = []
         mains[0] ||
         ''
     ).trim();
-    return { isSubagent: true, isOrchestratorWorker: true, parentId };
+    return { isSubagent: true, isOrchestratorWorker: true, heuristicOnly: false, parentId };
   }
 
   // 1. Explicit parent/subagent metadata or labels
@@ -172,7 +172,7 @@ export function detectSubagentRequest(payload, origTraj = '', activeMainIds = []
       meta.parent_cascade_id ||
       ''
   ).trim();
-  if (parentId) return { isSubagent: true, isOrchestratorWorker: false, parentId };
+  if (parentId) return { isSubagent: true, isOrchestratorWorker: false, heuristicOnly: false, parentId };
   if (
     labels.subagent === 'true' ||
     labels.is_subagent === 'true' ||
@@ -180,12 +180,12 @@ export function detectSubagentRequest(payload, origTraj = '', activeMainIds = []
     Boolean(labels.agent_role && /subagent|worker|research|browser/i.test(String(labels.agent_role))) ||
     meta.isSubagent === true
   ) {
-    return { isSubagent: true, isOrchestratorWorker: false, parentId: '' };
+    return { isSubagent: true, isOrchestratorWorker: false, heuristicOnly: false, parentId: '' };
   }
 
   // Confirmed active main session from CDP must never fall through to system-prompt heuristics
   if (origTraj && mains.includes(origTraj)) {
-    return { isSubagent: false, isOrchestratorWorker: false, parentId: '' };
+    return { isSubagent: false, isOrchestratorWorker: false, heuristicOnly: false, parentId: '' };
   }
 
   // 2. System instruction subagent signature (strip built-in <subagents>/<skills> docs first)
@@ -195,15 +195,15 @@ export function detectSubagentRequest(payload, origTraj = '', activeMainIds = []
     .replace(/<subagents>[\s\S]*?<\/subagents>/gi, '')
     .replace(/<skills>[\s\S]*?<\/skills>/gi, '');
   if (strippedSys && SUBAGENT_SYSTEM_RE.test(strippedSys)) {
-    return { isSubagent: true, isOrchestratorWorker: false, parentId: '' };
+    return { isSubagent: true, isOrchestratorWorker: false, heuristicOnly: false, parentId: '' };
   }
 
   // 3. Heuristic: active main sessions known from CDP, and this trajectory is a brand-new unknown background trajectory
   if (origTraj && mains.length > 0 && !mains.includes(origTraj) && !hasExplicitSession) {
-    return { isSubagent: true, isOrchestratorWorker: false, parentId: mains[0] };
+    return { isSubagent: true, isOrchestratorWorker: false, heuristicOnly: true, parentId: mains[0] };
   }
 
-  return { isSubagent: false, isOrchestratorWorker: false, parentId: '' };
+  return { isSubagent: false, isOrchestratorWorker: false, heuristicOnly: false, parentId: '' };
 }
 
 function extractLatestUserTurnText(payload) {
@@ -857,7 +857,7 @@ export function createFlowProxyServer({
       return;
     }
 
-    if (isInternalUtilityRequest(origPayload)) {
+    if (isInternalUtilityRequest(origPayload) && !(flowCfg.compactEnabled && isNativeCompactionRequest(origPayload))) {
       pushDiag({
         bytes: bodyBuf.length,
         encoding: bodyEncoding,
@@ -938,14 +938,17 @@ export function createFlowProxyServer({
     const everyTurn = Boolean(customPrompt.active && customPrompt.everyInvocation);
 
     // Capture latest main session payload for Codex virtual compaction & hijack/apply when enabled
+    // Allow sessions only hit by the background-tab heuristic (not real explicit/M669 subagents)
+    const canTrackCompaction = Boolean(origTraj && (!isSubagent || subInfo.heuristicOnly));
     let payloadMutatedByCompactor = false;
     let compactorDiag = '';
-    if (!isSubagent && origTraj) {
+    if (canTrackCompaction) {
       compactor.captureTurnPayload(origTraj, origPayload, { model: modelName, reqPath });
       if (flowCfg.compactEnabled) {
         if (isNativeCompactionRequest(workingPayload)) {
           workingPayload = rewriteNativeCompactionRequest(workingPayload);
           compactor.recordNativeHijack(origTraj);
+          emit('compact-hijack', { cascadeId: origTraj, reason: 'native-hijack' });
           payloadMutatedByCompactor = true;
           compactorDiag = 'native-hijack';
         } else {
@@ -961,11 +964,11 @@ export function createFlowProxyServer({
     }
 
     const onUsagePromptTokens =
-      flowCfg.compactEnabled && !isSubagent && origTraj
+      flowCfg.compactEnabled && canTrackCompaction
         ? (promptTokens) => maybeScheduleAutoCompact(origTraj, promptTokens, modelName, flowCfg)
         : null;
     const fallbackPromptTokens =
-      flowCfg.compactEnabled && !isSubagent && origTraj ? estimatePayloadTokens(workingPayload) : 0;
+      flowCfg.compactEnabled && canTrackCompaction ? estimatePayloadTokens(workingPayload) : 0;
 
     const reqShape = workingPayload?.request || workingPayload || {};
     const sysPartsCount = Array.isArray((reqShape.systemInstruction || reqShape.system_instruction)?.parts)
@@ -1483,6 +1486,7 @@ export function createFlowProxyServer({
     log(
       `[FlowCompactor] Scheduling auto compaction for ${String(cascadeId).slice(0, 8)} (promptTokens=${promptTokenCount}, window=${contextWindow || 'est'})`
     );
+    emit('compact-start', { cascadeId, reason: 'auto', promptTokens: promptTokenCount });
     void compactor
       .runCompaction(cascadeId, {
         sendUpstream,
@@ -1499,22 +1503,37 @@ export function createFlowProxyServer({
         emit('compact', { cascadeId, reason: 'auto', ...res });
       })
       .catch((err) => {
-        log(`[FlowCompactor] Auto compaction error for ${String(cascadeId).slice(0, 8)}: ${err?.message || err}`);
+        const msg = err?.message || String(err || 'compaction_error');
+        log(`[FlowCompactor] Auto compaction error for ${String(cascadeId).slice(0, 8)}: ${msg}`);
+        emit('compact', { cascadeId, reason: 'auto', ok: false, error: msg });
       });
   }
 
   async function compactNow(cascadeId) {
     const flowCfg = normalizeFlowConfig(getConfig());
-    if (!lastAuthHeaders) return { ok: false, error: 'no_auth_headers' };
-    const res = await compactor.runCompaction(cascadeId, {
-      sendUpstream,
-      upstream: flowCfg.upstream,
-      authHeaders: lastAuthHeaders,
-      compactModel: flowCfg.compactModel,
-      keepTailTokens: flowCfg.compactKeepTailTokens,
-      reason: 'manual'
-    });
-    if (res.ok) emit('compact', { cascadeId, reason: 'manual', ...res });
+    if (!lastAuthHeaders) {
+      emit('compact', { cascadeId, reason: 'manual', ok: false, error: 'no_auth_headers' });
+      return { ok: false, error: 'no_auth_headers' };
+    }
+    emit('compact-start', { cascadeId, reason: 'manual' });
+    let res;
+    try {
+      res = await compactor.runCompaction(cascadeId, {
+        sendUpstream,
+        upstream: flowCfg.upstream,
+        authHeaders: lastAuthHeaders,
+        compactModel: flowCfg.compactModel,
+        keepTailTokens: flowCfg.compactKeepTailTokens,
+        reason: 'manual'
+      });
+    } catch (err) {
+      const msg = err?.message || String(err || 'compaction_error');
+      emit('compact', { cascadeId, reason: 'manual', ok: false, error: msg });
+      return { ok: false, error: msg };
+    }
+    if (res?.ok || res?.error !== 'compaction_in_flight') {
+      emit('compact', { cascadeId, reason: 'manual', ...res });
+    }
     return res;
   }
 
@@ -1587,8 +1606,10 @@ export function createFlowProxyServer({
       }
       if (req.method === 'GET' && reqPath === '/ag-flow/diag') {
         const mains = (typeof getActiveMainSessions === 'function' ? getActiveMainSessions() || [] : []).filter(Boolean);
+        const tracked = typeof compactor.listTrackedCids === 'function' ? compactor.listTrackedCids() : [];
+        const diagCids = Array.from(new Set([...mains, ...tracked])).slice(0, 16);
         const compactions = {};
-        for (const cid of mains) {
+        for (const cid of diagCids) {
           compactions[String(cid).slice(0, 12)] = compactor.getStatus(cid);
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

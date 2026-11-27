@@ -144,7 +144,7 @@
         };
       }
 
-      function callFlowBinding(bindingName, payload) {
+      function callFlowBinding(bindingName, payload, timeoutMs = 5000) {
         return new Promise((resolve) => {
           const fn = window[bindingName];
           if (typeof fn !== 'function') {
@@ -155,7 +155,7 @@
           const timer = setTimeout(() => {
             pendingReqs.delete(reqId);
             resolve({ ok: false, error: 'timeout' });
-          }, 5000);
+          }, timeoutMs);
           pendingReqs.set(reqId, (res) => {
             clearTimeout(timer);
             resolve(res || { ok: false });
@@ -170,7 +170,7 @@
         });
       }
 
-      window.__ag_on_flow_response = function (reqId, payload) {
+      const handleBindingResponse = function (reqId, payload) {
         const cb = pendingReqs.get(reqId);
         if (cb) {
           pendingReqs.delete(reqId);
@@ -179,6 +179,12 @@
           } catch {}
         }
       };
+      window.__ag_on_flow_response = handleBindingResponse;
+      window.__ag_on_flow_compact_response = handleBindingResponse;
+
+      function callFlowCompactAction(action, cascadeId) {
+        return callFlowBinding('__agFlowCompactAction', { action, cascadeId }, 65000);
+      }
 
       let lastPaneRefreshAt = { main: 0, side: 0 };
       window.__ag_refresh_flow_state_for_pane = function (pkRaw) {
@@ -196,6 +202,12 @@
       window.__ag_on_flow_event = function (ev) {
         if (disposed || !ev || typeof ev !== 'object') return;
         let shouldRefreshCompact = false;
+        let compactFxDispatched = false;
+        const isCompactEv =
+          ev.type === 'compact-start' ||
+          ev.type === 'compact' ||
+          ev.type === 'compaction' ||
+          ev.type === 'compact-hijack';
         for (const pk of ['main', 'side']) {
           const st = paneData[pk];
           const matchCid =
@@ -213,11 +225,25 @@
               ms: ev.ms || 0
             });
           }
-          if (ev.type === 'compact' || ev.type === 'compaction') {
+          if (ev.type === 'compact-start') {
+            st.compaction = Object.assign({}, st.compaction || {}, { inFlight: true });
+          } else if (ev.type === 'compact' || ev.type === 'compaction') {
+            if (ev.status && typeof ev.status === 'object') {
+              st.compaction = ev.status;
+            } else {
+              st.compaction = Object.assign({}, st.compaction || {}, { inFlight: false });
+            }
             shouldRefreshCompact = pk;
+          }
+          if (isCompactEv && typeof window.__ag_on_flow_compact_fx === 'function') {
+            window.__ag_on_flow_compact_fx(ev, pk);
+            compactFxDispatched = true;
           }
           updateTriggerVisual(pk);
           if (openPaneKey === pk) renderMenuContent(pk);
+        }
+        if (isCompactEv && !compactFxDispatched && typeof window.__ag_on_flow_compact_fx === 'function') {
+          window.__ag_on_flow_compact_fx(ev, 'main');
         }
         publishFlowStatusCache();
         if (shouldRefreshCompact && typeof window.__ag_refresh_flow_state_for_pane === 'function') {
@@ -601,6 +627,9 @@
         }
         if (res.compaction && typeof res.compaction === 'object') {
           st.compaction = res.compaction;
+          if (st.cid && typeof window.__ag_sync_flow_compact_status === 'function') {
+            window.__ag_sync_flow_compact_status(st.cid, res.compaction, pk);
+          }
         }
         updateTriggerVisual(pk);
         publishFlowStatusCache();
@@ -692,8 +721,377 @@
         if (e.key === 'Escape' && openPaneKey) closeMenu();
       };
 
+      function isSlidingCompactHijackActive() {
+        return Boolean(compactConfig.enabled && proxyInfo.running && asarInfo.patched);
+      }
+
+      function readEditorSlashText(editorEl) {
+        if (!editorEl) return '';
+        const raw =
+          typeof editorEl.value === 'string'
+            ? editorEl.value
+            : editorEl.innerText || editorEl.textContent || '';
+        return String(raw).replace(/[\u200B-\u200D\uFEFF\r]/g, '').trim();
+      }
+
+      function isSlashCompactCommand(text) {
+        return /^\/compact(?:\s|$)/i.test(String(text || '').trim());
+      }
+
+      function stripIconText(el) {
+        if (!el) return '';
+        try {
+          const parts = [];
+          const stack = [el];
+          while (stack.length > 0) {
+            const node = stack.pop();
+            if (!node) continue;
+            if (node.nodeType === 3) {
+              if (node.nodeValue) parts.push(node.nodeValue);
+              continue;
+            }
+            if (node.nodeType !== 1) continue;
+            const tag = node.tagName ? node.tagName.toUpperCase() : '';
+            if (tag === 'SVG' || tag === 'STYLE' || tag === 'SCRIPT') continue;
+            if (node.getAttribute && (node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('data-symbol-name'))) {
+              continue;
+            }
+            const children = node.childNodes;
+            if (children && children.length) {
+              for (let i = children.length - 1; i >= 0; i -= 1) {
+                stack.push(children[i]);
+              }
+            }
+          }
+          return parts.join('').replace(/[\u200B-\u200D\uFEFF\r]/g, '').trim();
+        } catch {
+          return '';
+        }
+      }
+
+      function readSlashScopeNameFromProps(obj) {
+        if (!obj || typeof obj !== 'object') return '';
+        const candidate =
+          (obj.item && obj.item.scopeItem) ||
+          (obj.option && obj.option.item && obj.option.item.scopeItem) ||
+          (obj.scopeItem) ||
+          null;
+        if (candidate && candidate.case === 'slashCommand') {
+          return String(candidate.value?.info?.name || '').trim();
+        }
+        return '';
+      }
+
+      function extractSlashCommandNameFromReact(el) {
+        if (!el) return '';
+        try {
+          const candidates = [el];
+          if (el.firstElementChild) candidates.push(el.firstElementChild);
+          const bdiParent = el.closest ? el.closest('bdi') : null;
+          if (bdiParent && bdiParent !== el && candidates.length < 3) candidates.push(bdiParent);
+
+          for (let i = 0; i < candidates.length && i < 3; i += 1) {
+            const node = candidates[i];
+            if (!node) continue;
+            const keys = Object.keys(node);
+            for (let k = 0; k < keys.length; k += 1) {
+              const key = keys[k];
+              if (key.startsWith('__reactProps$')) {
+                const name = readSlashScopeNameFromProps(node[key]);
+                if (name) return name;
+              } else if (key.startsWith('__reactFiber$')) {
+                let fiber = node[key];
+                for (let depth = 0; fiber && depth < 8; depth += 1) {
+                  const name = readSlashScopeNameFromProps(fiber.memoizedProps);
+                  if (name) return name;
+                  fiber = fiber.return;
+                }
+              }
+            }
+          }
+        } catch {}
+        return '';
+      }
+
+      function isCompactSlashChipEl(el) {
+        if (!el) return false;
+        try {
+          const ownTip = el.getAttribute ? String(el.getAttribute('data-tooltip-id') || '') : '';
+          if (/^slashCommand:\/?compact$/i.test(ownTip)) return true;
+          const descTip = el.querySelector ? el.querySelector('[data-tooltip-id]') : null;
+          if (descTip && /^slashCommand:\/?compact$/i.test(String(descTip.getAttribute('data-tooltip-id') || ''))) {
+            return true;
+          }
+          const reactName = extractSlashCommandNameFromReact(el);
+          if (/^\/?compact$/i.test(reactName)) return true;
+          const isChipNode =
+            (el.tagName && el.tagName.toUpperCase() === 'BDI') ||
+            (el.getAttribute && el.getAttribute('data-lexical-decorator') === 'true');
+          if (isChipNode && /^\/?compact$/i.test(stripIconText(el))) return true;
+        } catch {}
+        return false;
+      }
+
+      function isEditorSlashCompactCommand(editorEl) {
+        if (!editorEl) return false;
+        if (isSlashCompactCommand(readEditorSlashText(editorEl))) return true;
+        try {
+          const chips = editorEl.querySelectorAll('bdi, [data-lexical-decorator="true"], [data-tooltip-id^="slashCommand:"]');
+          for (let i = 0; i < chips.length; i += 1) {
+            const chip = chips[i];
+            if (!isCompactSlashChipEl(chip)) continue;
+            let hasLeadingText = false;
+            try {
+              const range = document.createRange();
+              range.setStart(editorEl, 0);
+              range.setEndBefore(chip);
+              const before = range.toString().replace(/[\u200B-\u200D\uFEFF\s]/g, '');
+              if (before.length > 0) hasLeadingText = true;
+            } catch {
+              if (!/^\/?compact(?:\s|$)/i.test(stripIconText(editorEl))) hasLeadingText = true;
+            }
+            if (!hasLeadingText) return true;
+          }
+        } catch {}
+        return false;
+      }
+
+      function isCompactSlashMenuItem(el) {
+        if (!el) return false;
+        try {
+          const reactName = extractSlashCommandNameFromReact(el);
+          if (/^\/?compact$/i.test(reactName)) return true;
+          const firstLine =
+            stripIconText(el)
+              .split(/\n+/)
+              .map((s) => s.trim())
+              .find(Boolean) || '';
+          if (/^\/?compact(?:\s|$)/i.test(firstLine)) return true;
+        } catch {}
+        return false;
+      }
+
+      function isSlashCompactMenuSelected(editorEl) {
+        try {
+          const activeId = editorEl && editorEl.getAttribute ? String(editorEl.getAttribute('aria-activedescendant') || '').trim() : '';
+          if (activeId) {
+            const activeEl = document.getElementById(activeId);
+            if (activeEl && isCompactSlashMenuItem(activeEl)) return true;
+          }
+          const sel = document.querySelectorAll(
+            '#typeahead-menu [aria-selected="true"], #typeahead-menu .selected, [role="listbox"] [aria-selected="true"], [role="listbox"] .selected, [role="menu"] [aria-selected="true"], [role="option"][data-selected="true"], [role="option"][data-highlighted], [cmdk-item][aria-selected="true"]'
+          );
+          for (let i = 0; i < sel.length; i += 1) {
+            if (isCompactSlashMenuItem(sel[i])) return true;
+          }
+        } catch {}
+        return false;
+      }
+
+      function clearLexicalEditorOnce(editorEl) {
+        if (!editorEl) return;
+        try {
+          editorEl.focus();
+          if (typeof editorEl.value === 'string') {
+            editorEl.value = '';
+            editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+            return;
+          }
+          document.execCommand('selectAll', false);
+          document.execCommand('delete', false);
+          if (readEditorSlashText(editorEl) || isEditorSlashCompactCommand(editorEl)) {
+            const sel = window.getSelection && window.getSelection();
+            if (sel) {
+              const range = document.createRange();
+              range.selectNodeContents(editorEl);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+            editorEl.dispatchEvent(
+              new InputEvent('beforeinput', {
+                inputType: 'deleteContentBackward',
+                bubbles: true,
+                cancelable: true
+              })
+            );
+          }
+        } catch {}
+      }
+
+      function clearLexicalEditor(editorEl) {
+        if (!editorEl) return;
+        clearLexicalEditorOnce(editorEl);
+        setTimeout(() => {
+          if (disposed || !editorEl.isConnected) return;
+          if (isEditorSlashCompactCommand(editorEl) || editorEl.querySelector?.('bdi, [data-tooltip-id^="slashCommand:"]')) {
+            clearLexicalEditorOnce(editorEl);
+          }
+        }, 40);
+      }
+
+      function findPaneContaining(node) {
+        if (!node) return null;
+        const panes = discoverPanes();
+        for (let i = 0; i < panes.length; i += 1) {
+          if (panes[i].inputBox && panes[i].inputBox.contains(node)) return panes[i];
+        }
+        return null;
+      }
+
+      let lastSlashCompactAt = 0;
+      function triggerSlidingCompactFromSlash(pane, editorEl) {
+        const now = Date.now();
+        if (now - lastSlashCompactAt < 600) return;
+        lastSlashCompactAt = now;
+        clearLexicalEditor(editorEl);
+        const pk = pane && pane.key === 'side' ? 'side' : 'main';
+        const cid = (pane && pane.cid) || (paneData[pk] && paneData[pk].cid) || '';
+        if (!cid) {
+          if (typeof window.__ag_on_flow_compact_fx === 'function') {
+            window.__ag_on_flow_compact_fx(
+              { type: 'compact', cascadeId: '__draft__:' + pk, reason: 'manual', ok: false, error: 'no_session_snapshot' },
+              pk
+            );
+          }
+          return;
+        }
+        if (typeof window.__ag_on_flow_compact_fx === 'function') {
+          window.__ag_on_flow_compact_fx({ type: 'compact-start', cascadeId: cid, reason: 'manual' }, pk);
+        }
+        void callFlowCompactAction('compact', cid).then((res) => {
+          const err = String((res && res.error) || '');
+          if (err === 'compaction_in_flight') return;
+          if (typeof window.__ag_on_flow_compact_fx === 'function') {
+            if (!res || res.ok === false) {
+              window.__ag_on_flow_compact_fx(
+                {
+                  type: 'compact',
+                  cascadeId: cid,
+                  reason: 'manual',
+                  ok: false,
+                  error: err || 'compact_failed',
+                  status: res && res.status ? res.status : undefined
+                },
+                pk
+              );
+            } else {
+              window.__ag_on_flow_compact_fx(
+                { type: 'compact', cascadeId: cid, reason: 'manual', ok: true, status: res.status || res },
+                pk
+              );
+            }
+          }
+          if (typeof window.__ag_refresh_flow_state_for_pane === 'function') {
+            window.__ag_refresh_flow_state_for_pane(pk);
+          }
+        });
+      }
+
+      let suppressPointerUntil = 0;
+      let suppressPointerTargetKind = '';
+
+      const onSlashKeyDown = (e) => {
+        if (disposed || !isSlidingCompactHijackActive()) return;
+        if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+        let pane = findPaneContaining(e.target);
+        if (!pane || !pane.inputBox) {
+          pane = findPaneContaining(document.activeElement);
+        }
+        if (!pane || !pane.inputBox) return;
+        let editor = e.target && e.target.closest ? e.target.closest('[contenteditable="true"], [data-lexical-editor="true"], textarea') : null;
+        if (!editor || !pane.inputBox.contains(editor)) {
+          editor = pane.inputBox.querySelector('[contenteditable="true"], [data-lexical-editor="true"], textarea');
+        }
+        if (!editor || !pane.inputBox.contains(editor)) return;
+        const txt = readEditorSlashText(editor);
+        if (isEditorSlashCompactCommand(editor) || (txt.startsWith('/') && isSlashCompactMenuSelected(editor))) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          triggerSlidingCompactFromSlash(pane, editor);
+        }
+      };
+
+      const onSlashPointer = (e) => {
+        if (disposed || !isSlidingCompactHijackActive()) return;
+        const pane = findPaneContaining(e.target);
+        if (pane && pane.inputBox) {
+          const btn = e.target && e.target.closest ? e.target.closest('button') : null;
+          if (!btn || !pane.inputBox.contains(btn)) return;
+          if (btn.classList.contains('ag-flow-mode-trigger')) return;
+          const tid = String(btn.getAttribute('data-testid') || '');
+          if (
+            tid === 'input-cancel-button' ||
+            tid === 'voice-start-button' ||
+            tid === 'model-selector-trigger' ||
+            tid === 'permissions-selector-trigger'
+          ) {
+            return;
+          }
+          const aria = String(btn.getAttribute('aria-label') || '');
+          const isSendBtn =
+            tid === 'send-button' ||
+            btn.classList.contains('agy-send-button') ||
+            btn.getAttribute('type') === 'submit' ||
+            /send|submit|发送|傳送/i.test(tid + ' ' + aria);
+          if (!isSendBtn) return;
+          if (Date.now() < suppressPointerUntil && suppressPointerTargetKind === 'send') {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            return;
+          }
+          const editor = pane.inputBox.querySelector('[contenteditable="true"], [data-lexical-editor="true"], textarea');
+          if (isEditorSlashCompactCommand(editor)) {
+            suppressPointerUntil = Date.now() + 450;
+            suppressPointerTargetKind = 'send';
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            triggerSlidingCompactFromSlash(pane, editor);
+          }
+          return;
+        }
+        const item =
+          e.target && e.target.closest
+            ? e.target.closest('#typeahead-menu li, #typeahead-menu [role="option"], [role="option"], [role="menuitem"], [cmdk-item], li, button')
+            : null;
+        if (!item) return;
+        if (Date.now() < suppressPointerUntil && suppressPointerTargetKind === 'menu') {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
+        if (!isCompactSlashMenuItem(item)) return;
+        const panes = discoverPanes();
+        let activePane = null;
+        let activeEditor = null;
+        for (let i = 0; i < panes.length; i += 1) {
+          const ed = panes[i].inputBox && panes[i].inputBox.querySelector('[contenteditable="true"], [data-lexical-editor="true"], textarea');
+          const edTxt = readEditorSlashText(ed);
+          if (edTxt.startsWith('/') || isEditorSlashCompactCommand(ed)) {
+            activePane = panes[i];
+            activeEditor = ed;
+            break;
+          }
+        }
+        if (activePane && activeEditor) {
+          suppressPointerUntil = Date.now() + 450;
+          suppressPointerTargetKind = 'menu';
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          triggerSlidingCompactFromSlash(activePane, activeEditor);
+        }
+      };
+
       document.addEventListener('click', onDocClick, true);
       document.addEventListener('keydown', onKeyDown, true);
+      window.addEventListener('keydown', onSlashKeyDown, true);
+      window.addEventListener('pointerdown', onSlashPointer, true);
+      window.addEventListener('mousedown', onSlashPointer, true);
+      window.addEventListener('click', onSlashPointer, true);
 
       scanAllPanes();
       scanTimer = setInterval(scanAllPanes, 1500);
@@ -735,7 +1133,12 @@
           }
           document.removeEventListener('click', onDocClick, true);
           document.removeEventListener('keydown', onKeyDown, true);
+          window.removeEventListener('keydown', onSlashKeyDown, true);
+          window.removeEventListener('pointerdown', onSlashPointer, true);
+          window.removeEventListener('mousedown', onSlashPointer, true);
+          window.removeEventListener('click', onSlashPointer, true);
           try { delete window.__ag_refresh_flow_state_for_pane; } catch {}
+          try { delete window.__ag_on_flow_compact_response; } catch {}
           cleanupFlowModePickerDom();
         });
       }
