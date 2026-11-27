@@ -150,8 +150,7 @@ test('Waiting >= 60s transitions to amber slow pulse and notes model switch cold
   assert.equal(snap.visualState, 'slow');
   assert.equal(snap.chipClass, 'is-slow');
   assert.equal(snap.chipText, '压缩中 · 1m15s');
-  assert.ok(snap.noteHtml.includes('无法复用原 KV 缓存'));
-  assert.ok(snap.noteHtml.includes('Gemini 4 Hydrogen (Extra High)'));
+  assert.ok(snap.noteHtml.includes('正在重算上下文'));
   assert.ok(snap.noteHtml.includes('Gemini 4 Carbon (Medium)'));
 
   // Same model with Extra High vs legacy (XHigh) label and Antigravity 2.35.1 running-state aria suffix must NOT trigger false model-switch warning
@@ -166,7 +165,7 @@ test('Waiting >= 60s transitions to amber slow pulse and notes model switch cold
   assert.equal(sameModelSnap.visualState, 'slow');
   assert.ok(!sameModelSnap.noteHtml.includes('模型已切换'), 'Extra High + running-state suffix must match as the same model');
   assert.ok(!sameModelSnap.noteHtml.includes('Model cannot be changed'), 'running-state suffix must never leak into tooltip');
-  assert.ok(sameModelSnap.noteHtml.includes('长上下文预填充或后端排队耗时较长'));
+  assert.ok(sameModelSnap.noteHtml.includes('后端排队或长上下文预填充中'));
 });
 
 test('Model retry transitions to amber slow pulse with live countdown', () => {
@@ -252,4 +251,24 @@ test('Offline, real terminal error, and daemon timeout turn red while user cance
   assert.equal(daemonDead.chipText, '后台断连');
   assert.equal(fmtWaitDuration(65), '1m05s');
   assert.equal(isUserCancelError('Cancelled by user'), true);
+
+  const normalReq = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'llm', pendingRetrying: false },
+    live: {
+      matched: true,
+      hasProvider: true,
+      aspStatus: 1,
+      effRunStatus: 2,
+      hasTrajectory: true,
+      execCase: 'modelRequest',
+      execAttempt: 1,
+      execRetryAtMs: 0,
+      loadingText: ''
+    },
+    waitSec: 3,
+    lastHb: NOW
+  });
+  assert.equal(normalReq.isRetrying, false, 'normal first attempt modelRequest must not false-trigger retry banner');
+  assert.equal(normalReq.visualState, 'running');
 });

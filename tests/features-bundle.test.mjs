@@ -278,3 +278,23 @@ test('core/daemon.mjs loads cleanly in a minimal sparse copy without metrics fil
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('sanitizeConfigPatch validates Codex UI preference fields and excludes Powertools stylesheet', async () => {
+  const { sanitizeConfigPatch } = await import('../core/daemon/paths.mjs');
+  const patch = sanitizeConfigPatch({}, {
+    compactTypography: true,
+    topbarUsageMetric: 'todayTokens',
+    overviewQuota: true,
+    overviewProgress: true
+  });
+  assert.equal(patch.compactTypography, true);
+  assert.equal(patch.topbarUsageMetric, 'todayTokens');
+  assert.equal(patch.overviewQuota, true);
+  assert.equal(patch.overviewProgress, true);
+
+  const fallback = sanitizeConfigPatch({ topbarUsageMetric: 'quota' }, {
+    topbarUsageMetric: 'not-a-metric'
+  });
+  assert.equal(fallback.topbarUsageMetric, 'quota');
+  assert.ok(!fs.existsSync(path.join(ROOT_DIR, 'core', 'styles', '15-powertools-theme.css')));
+});

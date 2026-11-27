@@ -6,10 +6,12 @@
 
 | 角色 | 仓库 | 许可协议 | 融合内容与用途 |
 | :--- | :--- | :--- | :--- |
-| **主题与核心框架上游** | [nkjDSLcvanv/antigravity-codex-theme](https://github.com/nkjDSLcvanv/antigravity-codex-theme) | MIT | Codex 昼夜主题、CDP 守护进程架构、四态状态机与用量面板、SSH Remote 只读统计、输入预测及嵌入式设置面板 |
+| **主题与核心框架上游** | [nkjDSLcvanv/antigravity-codex-theme](https://github.com/nkjDSLcvanv/antigravity-codex-theme) | MIT | Codex 昼夜主题、CDP 守护进程架构、四态状态机与紧凑胶囊样式、SSH Remote 只读统计、输入预测及嵌入式设置面板 |
+| **第二主参考项目** | [WhiteBr1ck/agy-powertools](https://github.com/WhiteBr1ck/agy-powertools) | MIT | 上下文窗口细粒度拆解与双栏会话统计弹窗（保留本仓库输入框底栏紧凑胶囊）、OS 凭据库防串写 `pendingSwitch` 与 Windows 无黑窗自动重启（含 `app_storage.json` 条款同步）、本地用量看板/请求明细与短间隔缓存骤降检测、右侧概览额度胶囊及 `agy` CLI 用量合并参考 |
 | **中文系主词库上游** | [CHANPAJN/antigravity-langpack](https://github.com/CHANPAJN/antigravity-langpack) | **GPL-3.0** | 现代简体中文（`zh-CN`）、保留英文技术术语简中（`zh-SG`）、繁體中文（`zh-TW`）高覆盖率词典、翻译规范与 AI 思考/回复语言联动规则思路 |
 | **补充词库与隔离规则上游** | [guuguo/antigravity-zh-launcher](https://github.com/guuguo/antigravity-zh-launcher) | MIT | 通用 IDE 菜单补充词条（`zh-CN` / `zh-TW`）、首页欢迎语动态模板、文件动作动词模板、`data-tooltip-content` 翻译、精细聊天正文 DOM 防误伤规则与 AI 中文全链路提示词思路 |
 | **灵感与早期调研上游** | [Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) | MIT | CDP 运行时注入原理、原生西文字体桥接、多进程 SingletonLock 互斥、Antigravity 2.35.2 动态模型状态提示词拆分启发 |
+| **多账号与用量看板参考** | [elviscjn-cjn/antigravity-context-viewer](https://github.com/elviscjn-cjn/antigravity-context-viewer) | MIT | Google OAuth2 回环登录与日/周/月/年多视图热力图设计参考 |
 
 ## 2. 开源协议说明
 

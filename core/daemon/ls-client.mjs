@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { isPidAlive, stripUtf8Bom } from '../shared.mjs';
 
-const QUOTA_CACHE_TTL_MS = 15_000;
+const QUOTA_CACHE_TTL_MS = 8_000;
 
 function readJsonSafe(filePath) {
   try {
@@ -22,9 +22,9 @@ function readJsonSafe(filePath) {
 }
 
 /**
- * Scan ~/.gemini/antigravity/daemon/hub_*.json (and insiders) to find the active language_server port + CSRF token.
+ * Scan ~/.gemini/antigravity/daemon/hub_*.json (and insiders) to find all live language_server candidates sorted by mtime desc.
  */
-export function discoverLiveHub({ customHome = '', isAliveFn = isPidAlive, channel = 'auto' } = {}) {
+export function discoverLiveHubCandidates({ customHome = '', isAliveFn = isPidAlive, channel = 'auto' } = {}) {
   const home = customHome || os.homedir();
   const dirs = [];
   if (channel === 'insiders') {
@@ -73,9 +73,15 @@ export function discoverLiveHub({ customHome = '', isAliveFn = isPidAlive, chann
     }
   }
 
-  if (candidates.length === 0) return null;
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return candidates[0];
+  return candidates;
+}
+
+/**
+ * Return the newest live language_server hub via ~/.gemini/antigravity/daemon/hub_*.json.
+ */
+export function discoverLiveHub(opts = {}) {
+  return discoverLiveHubCandidates(opts)[0] || null;
 }
 
 function classifyBucketName(labels = []) {
@@ -130,13 +136,24 @@ export function parseUserStatusQuota(rawJson, nowMs = Date.now()) {
     if (seenKeys.has(key)) key = `${key}-${buckets.length + 1}`;
     seenKeys.add(key);
     const resetMs = g.resetTime ? Date.parse(g.resetTime) : NaN;
-    const resetInSec = Number.isFinite(resetMs) ? Math.max(0, Math.round((resetMs - nowMs) / 1000)) : null;
+    const isExpired = Number.isFinite(resetMs) && resetMs <= nowMs;
+    const resetInSec = isExpired
+      ? 0
+      : Number.isFinite(resetMs)
+      ? Math.max(0, Math.round((resetMs - nowMs) / 1000))
+      : null;
+    const remainingFraction = isExpired ? 1 : g.remainingFraction;
+    const remainingPct = isExpired
+      ? 100
+      : g.remainingFraction === null
+      ? null
+      : Math.round(g.remainingFraction * 100);
     buckets.push({
       key,
       label: meta.label,
-      remainingFraction: g.remainingFraction,
-      remainingPct: g.remainingFraction === null ? null : Math.round(g.remainingFraction * 100),
-      resetTime: g.resetTime,
+      remainingFraction,
+      remainingPct,
+      resetTime: isExpired ? '' : g.resetTime,
       resetInSec,
       modelCount: g.labels.length
     });
@@ -175,8 +192,18 @@ function normalizeQuotaWindow(bucket, nowMs) {
   const frac = hasFrac ? Math.max(0, Math.min(1, bucket.remainingFraction)) : null;
   const resetTime = typeof bucket.resetTime === 'string' ? bucket.resetTime.trim() : '';
   const resetMs = resetTime ? Date.parse(resetTime) : NaN;
-  const resetInSec = Number.isFinite(resetMs) ? Math.max(0, Math.round((resetMs - nowMs) / 1000)) : null;
   if (frac === null && !resetTime) return null;
+  if (Number.isFinite(resetMs) && resetMs <= nowMs) {
+    // Antigravity LS reports stale pre-reset fraction until the next request; treat elapsed resetTime as restored
+    return {
+      remainingFraction: 1,
+      remainingPct: 100,
+      resetTime: '',
+      resetInSec: 0,
+      expiredReset: true
+    };
+  }
+  const resetInSec = Number.isFinite(resetMs) ? Math.max(0, Math.round((resetMs - nowMs) / 1000)) : null;
   return {
     remainingFraction: frac,
     remainingPct: frac === null ? null : Math.round(frac * 100),
@@ -252,14 +279,45 @@ export function createLanguageServerClient({
   customHome = '',
   fetchImpl = globalThis.fetch,
   discoverFn = discoverLiveHub,
+  discoverCandidatesFn = null,
   nowFn = () => Date.now(),
   cacheTtlMs = QUOTA_CACHE_TTL_MS
 } = {}) {
   let cachedQuota = null;
+  let cachedIdentity = null;
   let inFlightQuota = null;
+  let lastHubKey = '';
+  let cachedEmail = '';
+
+  function hubKeyOf(hub) {
+    if (!hub) return '';
+    return `${hub.pid || 0}:${hub.port || 0}`;
+  }
+
+  function extractIdentityFromStatus(rawJson) {
+    const us = rawJson?.userStatus && typeof rawJson.userStatus === 'object' ? rawJson.userStatus : null;
+    if (!us) return null;
+    const email = String(us.email || us.userEmail || '').trim().toLowerCase();
+    const name = String(us.name || us.displayName || '').trim();
+    const planName = String(us.planStatus?.planInfo?.planName || us.userTier?.name || '').trim();
+    if (!email && !name) return null;
+    return { email, name, planName, fetchedAt: nowFn() };
+  }
+
+  function resolveHubCandidates() {
+    if (typeof discoverCandidatesFn === 'function') {
+      const list = discoverCandidatesFn({ customHome });
+      return Array.isArray(list) ? list.filter(Boolean) : [];
+    }
+    if (discoverFn === discoverLiveHub) {
+      return discoverLiveHubCandidates({ customHome });
+    }
+    const single = typeof discoverFn === 'function' ? discoverFn({ customHome }) : null;
+    return single ? [single] : [];
+  }
 
   function resolveHub() {
-    return discoverFn({ customHome });
+    return resolveHubCandidates()[0] || null;
   }
 
   async function postLs(hub, endpointPath, bodyObj, { connectProtocol = false, timeoutMs = 6000 } = {}) {
@@ -297,46 +355,82 @@ export function createLanguageServerClient({
 
   async function getQuotaStatus({ force = false } = {}) {
     const now = nowFn();
-    if (!force && cachedQuota && now - cachedQuota.fetchedAt < cacheTtlMs) {
+    const candidates = resolveHubCandidates().slice(0, 3);
+    const primaryHubKey = hubKeyOf(candidates[0]);
+    if (primaryHubKey && lastHubKey && primaryHubKey !== lastHubKey) {
+      cachedQuota = null;
+      cachedIdentity = null;
+    }
+    if (
+      !force &&
+      cachedQuota &&
+      now - cachedQuota.fetchedAt < cacheTtlMs &&
+      (!primaryHubKey || cachedQuota.hubKey === primaryHubKey)
+    ) {
       return cachedQuota;
     }
     if (inFlightQuota) return await inFlightQuota;
     inFlightQuota = (async () => {
       try {
-        const hub = resolveHub();
-        if (!hub) {
-          return cachedQuota || { ok: false, error: 'hub not found', buckets: [], fetchedAt: now };
+        if (candidates.length === 0) {
+          return { ok: false, error: 'hub not found', groups: [], buckets: [], fetchedAt: now };
         }
-        const [summaryRes, statusRes] = await Promise.all([
-          postLs(hub, '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {}),
-          postLs(hub, '/exa.language_server_pb.LanguageServerService/GetUserStatus', {})
-        ]);
-        const nowDone = nowFn();
-        const statusParsed = statusRes.ok && statusRes.data ? parseUserStatusQuota(statusRes.data, nowDone) : null;
-        const summaryParsed =
-          summaryRes.ok && summaryRes.data
-            ? parseQuotaSummary(summaryRes.data, nowDone, { planName: statusParsed?.planName || '' })
-            : null;
-        const parsed = summaryParsed
-          ? {
-              ...summaryParsed,
-              availablePromptCredits: statusParsed?.availablePromptCredits ?? null,
-              availableFlowCredits: statusParsed?.availableFlowCredits ?? null
-            }
-          : statusParsed;
-        if (!parsed) {
-          return (
-            cachedQuota || {
-              ok: false,
-              error: summaryRes.error || statusRes.error || 'Quota RPC failed',
-              groups: [],
-              buckets: [],
-              fetchedAt: now
-            }
-          );
+        let lastErr = '';
+        for (const hub of candidates) {
+          const hKey = hubKeyOf(hub);
+          const [summaryRes, statusRes] = await Promise.all([
+            postLs(hub, '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', {}),
+            postLs(hub, '/exa.language_server_pb.LanguageServerService/GetUserStatus', {})
+          ]);
+          const nowDone = nowFn();
+          const extractedId = statusRes.ok && statusRes.data ? extractIdentityFromStatus(statusRes.data) : null;
+          if (extractedId?.email && cachedEmail && extractedId.email !== cachedEmail) {
+            cachedQuota = null;
+          }
+          if (extractedId) {
+            cachedIdentity = { ...extractedId, hubKey: hKey };
+            if (extractedId.email) cachedEmail = extractedId.email;
+          }
+          const statusParsed = statusRes.ok && statusRes.data ? parseUserStatusQuota(statusRes.data, nowDone) : null;
+          const summaryParsed =
+            summaryRes.ok && summaryRes.data
+              ? parseQuotaSummary(summaryRes.data, nowDone, { planName: statusParsed?.planName || '' })
+              : null;
+          const parsed = summaryParsed
+            ? {
+                ...summaryParsed,
+                availablePromptCredits: statusParsed?.availablePromptCredits ?? null,
+                availableFlowCredits: statusParsed?.availableFlowCredits ?? null
+              }
+            : statusParsed;
+          if (parsed) {
+            const enriched = {
+              ...parsed,
+              accountEmail: extractedId?.email || '',
+              hubPid: hub.pid || 0,
+              hubKey: hKey
+            };
+            lastHubKey = hKey;
+            cachedQuota = enriched;
+            return enriched;
+          }
+          lastErr = summaryRes.error || statusRes.error || 'Quota RPC failed';
         }
-        cachedQuota = parsed;
-        return parsed;
+        if (
+          cachedQuota &&
+          primaryHubKey &&
+          cachedQuota.hubKey === primaryHubKey &&
+          now - cachedQuota.fetchedAt < 120_000
+        ) {
+          return cachedQuota;
+        }
+        return {
+          ok: false,
+          error: lastErr || 'Quota RPC failed',
+          groups: [],
+          buckets: [],
+          fetchedAt: now
+        };
       } finally {
         inFlightQuota = null;
       }
@@ -375,9 +469,40 @@ export function createLanguageServerClient({
     );
   }
 
+  async function getUserIdentity({ force = false } = {}) {
+    const now = nowFn();
+    const candidates = resolveHubCandidates().slice(0, 3);
+    const primaryHubKey = hubKeyOf(candidates[0]);
+    if (primaryHubKey && lastHubKey && primaryHubKey !== lastHubKey) {
+      cachedQuota = null;
+      cachedIdentity = null;
+    }
+    if (
+      !force &&
+      cachedIdentity &&
+      now - cachedIdentity.fetchedAt < 60000 &&
+      (!primaryHubKey || cachedIdentity.hubKey === primaryHubKey)
+    ) {
+      return cachedIdentity;
+    }
+    for (const hub of candidates) {
+      const hKey = hubKeyOf(hub);
+      const statusRes = await postLs(hub, '/exa.language_server_pb.LanguageServerService/GetUserStatus', {});
+      const extracted = statusRes.ok && statusRes.data ? extractIdentityFromStatus(statusRes.data) : null;
+      if (extracted) {
+        lastHubKey = hKey;
+        if (extracted.email) cachedEmail = extracted.email;
+        cachedIdentity = { ...extracted, hubKey: hKey };
+        return cachedIdentity;
+      }
+    }
+    return cachedIdentity && (!primaryHubKey || cachedIdentity.hubKey === primaryHubKey) ? cachedIdentity : null;
+  }
+
   return {
     resolveHub,
     getQuotaStatus,
+    getUserIdentity,
     getCachedQuota: () => cachedQuota,
     getConversation,
     updateConversationTitle

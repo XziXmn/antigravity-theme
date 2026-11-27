@@ -15,6 +15,7 @@ import http from 'node:http';
 import https from 'node:https';
 import http2 from 'node:http2';
 import zlib from 'node:zlib';
+import { PassThrough } from 'node:stream';
 import {
   Outcome,
   OUTPUT_CHANNEL_FRAME,
@@ -51,6 +52,12 @@ import {
 } from './purify.mjs';
 import { buildDynamicSeat } from './sessions.mjs';
 import { buildSubagentRoutingPrompt, resolveSubagentTargetModel } from './subagent-routing.mjs';
+import {
+  createFlowCompactor,
+  estimatePayloadTokens,
+  isNativeCompactionRequest,
+  rewriteNativeCompactionRequest
+} from './compactor.mjs';
 
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024; // 16 MiB guard (supports 500k+ token sessions)
 const MAX_RESP_BYTES = 32 * 1024 * 1024;
@@ -80,6 +87,9 @@ function isInternalUtilityRequest(payload) {
   if (/MODEL_TIER_FLASH_LITE|sir_flash_lite|flash[-_]?lite/i.test(modelName)) return true;
 
   const reqObj = payload?.request || payload || {};
+  const contents = Array.isArray(reqObj.contents) ? reqObj.contents : [];
+  if (/-sonar\b/i.test(modelName) && contents.length <= 1) return true;
+
   const sys = reqObj.systemInstruction || reqObj.system_instruction;
   const sysParts = Array.isArray(sys?.parts) ? sys.parts : [];
   const sysHead = sysParts
@@ -91,7 +101,6 @@ function isInternalUtilityRequest(payload) {
   }
 
   const hasTools = Array.isArray(reqObj.tools) && reqObj.tools.length > 0;
-  const contents = Array.isArray(reqObj.contents) ? reqObj.contents : [];
   if (!hasTools && contents.length <= 2) {
     const firstUserText = contents
       .flatMap((c) => (Array.isArray(c?.parts) ? c.parts : []))
@@ -131,7 +140,7 @@ function isBlockedStatus(status, rawBody) {
 }
 
 const SUBAGENT_SYSTEM_RE =
-  /\b(?:you are a subagent|subagent role|sub-agent|swarm worker|browser subagent|research subagent|invoked as a subagent|parent conversation|spawned by the coordinator)\b|<subagent\b/i;
+  /\b(?:you are a subagent|subagent role|invoked as a subagent|spawned by the coordinator)\b|<subagent\b/i;
 
 const ORCHESTRATOR_WORKER_MODEL_RE = /(?:^|\/)(?:gemini-flash-worker-agy|MODEL_PLACEHOLDER_M669)$/i;
 
@@ -174,10 +183,18 @@ export function detectSubagentRequest(payload, origTraj = '', activeMainIds = []
     return { isSubagent: true, isOrchestratorWorker: false, parentId: '' };
   }
 
-  // 2. System instruction subagent signature
+  // Confirmed active main session from CDP must never fall through to system-prompt heuristics
+  if (origTraj && mains.includes(origTraj)) {
+    return { isSubagent: false, isOrchestratorWorker: false, parentId: '' };
+  }
+
+  // 2. System instruction subagent signature (strip built-in <subagents>/<skills> docs first)
   const sysParts = Array.isArray(reqObj.systemInstruction?.parts) ? reqObj.systemInstruction.parts : [];
   const sysText = sysParts.map((p) => (typeof p?.text === 'string' ? p.text : '')).join('\n');
-  if (sysText && SUBAGENT_SYSTEM_RE.test(sysText)) {
+  const strippedSys = sysText
+    .replace(/<subagents>[\s\S]*?<\/subagents>/gi, '')
+    .replace(/<skills>[\s\S]*?<\/skills>/gi, '');
+  if (strippedSys && SUBAGENT_SYSTEM_RE.test(strippedSys)) {
     return { isSubagent: true, isOrchestratorWorker: false, parentId: '' };
   }
 
@@ -216,7 +233,10 @@ export function createFlowProxyServer({
   getSystemPrompt = () => null,
   getSubagentRouting = () => null,
   getActiveMainSessions = () => [],
+  resolveCascadeId = (id) => id,
+  getContextWindow = () => 0,
   sessionStore,
+  compactionDir = '',
   onEvent = null,
   onMainTurn = null,
   log = () => {}
@@ -225,6 +245,9 @@ export function createFlowProxyServer({
     throw new TypeError('createFlowProxyServer requires a sessionStore');
   }
 
+  const compactor = createFlowCompactor({ compactionDir, log });
+  const httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 15_000, maxSockets: 32, maxFreeSockets: 8 });
+  const httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15_000, maxSockets: 32, maxFreeSockets: 8 });
   let lastAuthHeaders = null;
   let h2ConsecutiveFails = 0;
   let quotaCooldownUntil = 0;
@@ -396,58 +419,208 @@ export function createFlowProxyServer({
     return await relayHttp1({ upstreamUrl: u, method: 'POST', reqPath, headers, bodyBuf, timeoutMs });
   }
 
-  function pipePassThrough(req, res, bodyBuf, upstream, reqPath, { stripContentEncoding = false } = {}) {
+  function pipePassThrough(
+    req,
+    res,
+    bodyBuf,
+    upstream,
+    reqPath,
+    { stripContentEncoding = false, onUsagePromptTokens = null, fallbackPromptTokens = 0 } = {}
+  ) {
     const u = new URL(upstream);
     const mod = u.protocol === 'http:' ? http : https;
-    const fwdHeaders = cleanForwardHeaders(req.headers, u.host, bodyBuf.length, { stripContentEncoding });
-    const preq = mod.request(
-      {
-        protocol: u.protocol,
-        hostname: u.hostname,
-        port: u.port || (u.protocol === 'http:' ? 80 : 443),
-        method: req.method,
-        path: reqPath,
-        timeout: 180000,
-        headers: fwdHeaders
-      },
-      (pres) => {
-        const code = pres.statusCode || 502;
-        if (code === 401 || code === 403) {
-          log(`[Flow] Upstream auth ${code} on ${reqPath.slice(0, 64)} (session login expired)`);
-          emit('auth-error', { status: code, path: reqPath });
+    const defaultAgent = u.protocol === 'http:' ? httpAgent : httpsAgent;
+    const IDLE_TIMEOUT_MS = 600_000;
+    const isTransientConnError = (err) => {
+      const code = String(err?.code || '').toUpperCase();
+      const msg = String(err?.message || '').toLowerCase();
+      return (
+        code === 'ECONNRESET' ||
+        code === 'EPIPE' ||
+        code === 'ETIMEDOUT' ||
+        code === 'EAI_AGAIN' ||
+        code === 'ERR_SOCKET_CLOSED' ||
+        msg.includes('socket hang up')
+      );
+    };
+
+    const attemptForward = (attemptNo) => {
+      if (res.destroyed || res.writableEnded) return;
+      const fwdHeaders = cleanForwardHeaders(req.headers, u.host, bodyBuf.length, { stripContentEncoding });
+      let clientClosed = false;
+      let idleTimer = null;
+      const clearIdle = () => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
         }
-        pres.on('error', (err) => {
-          log(`[Flow] Upstream stream error: ${err.message}`);
-          if (!res.writableEnded && !res.destroyed) {
-            try {
-              res.end();
-            } catch {}
+      };
+
+      const preq = mod.request(
+        {
+          protocol: u.protocol,
+          hostname: u.hostname,
+          port: u.port || (u.protocol === 'http:' ? 80 : 443),
+          method: req.method,
+          path: reqPath,
+          agent: attemptNo === 0 ? defaultAgent : false,
+          headers: fwdHeaders
+        },
+        (pres) => {
+          const code = pres.statusCode || 502;
+          if (code === 401 || code === 403) {
+            log(`[Flow] Upstream auth ${code} on ${reqPath.slice(0, 64)} (session login expired)`);
+            emit('auth-error', { status: code, path: reqPath });
           }
-        });
-        if (!res.headersSent) res.writeHead(code, pres.headers);
-        pres.pipe(res);
-      }
-    );
-    res.on('close', () => {
-      if (!res.writableEnded) {
+          const refreshIdle = () => {
+            clearIdle();
+            idleTimer = setTimeout(() => {
+              try {
+                preq.destroy(Object.assign(new Error('passthrough idle timeout'), { code: 'ETIMEDOUT' }));
+              } catch {}
+            }, IDLE_TIMEOUT_MS);
+            if (typeof idleTimer.unref === 'function') idleTimer.unref();
+          };
+          refreshIdle();
+          pres.on('data', refreshIdle);
+          pres.on('end', clearIdle);
+
+          if (typeof onUsagePromptTokens === 'function' && code === 200) {
+            let latestPromptTokens = 0;
+            let scanTail = '';
+            let usageNotified = false;
+            const scanChunkText = (s) => {
+              if (!s) return;
+              const bufStr = scanTail + s;
+              const re = /"(?:promptTokenCount|prompt_token_count)"\s*:\s*(\d+)/g;
+              let m;
+              while ((m = re.exec(bufStr)) !== null) {
+                const num = Number(m[1]);
+                if (Number.isFinite(num) && num > 0) latestPromptTokens = num;
+              }
+              scanTail = bufStr.slice(-256);
+            };
+            const finishUsage = () => {
+              if (usageNotified) return;
+              usageNotified = true;
+              const picked = latestPromptTokens > 0 ? latestPromptTokens : fallbackPromptTokens > 0 ? fallbackPromptTokens : 0;
+              if (picked > 0) {
+                try {
+                  onUsagePromptTokens(picked);
+                } catch {}
+              }
+            };
+
+            const respEnc = String(pres.headers['content-encoding'] || '').trim().toLowerCase();
+            let inspectStream = pres;
+            if (respEnc.includes('gzip')) {
+              const tap = new PassThrough();
+              const gunzip = zlib.createGunzip();
+              tap.on('error', () => {});
+              gunzip.on('error', () => {});
+              pres.on('data', (chunk) => {
+                try { tap.write(chunk); } catch {}
+              });
+              pres.on('end', () => {
+                try { tap.end(); } catch {}
+              });
+              tap.pipe(gunzip);
+              inspectStream = gunzip;
+            } else if (respEnc.includes('deflate')) {
+              const tap = new PassThrough();
+              const inflate = zlib.createInflate();
+              tap.on('error', () => {});
+              inflate.on('error', () => {});
+              pres.on('data', (chunk) => {
+                try { tap.write(chunk); } catch {}
+              });
+              pres.on('end', () => {
+                try { tap.end(); } catch {}
+              });
+              tap.pipe(inflate);
+              inspectStream = inflate;
+            } else if (respEnc.includes('br') && typeof zlib.createBrotliDecompress === 'function') {
+              const tap = new PassThrough();
+              const brotli = zlib.createBrotliDecompress();
+              tap.on('error', () => {});
+              brotli.on('error', () => {});
+              pres.on('data', (chunk) => {
+                try { tap.write(chunk); } catch {}
+              });
+              pres.on('end', () => {
+                try { tap.end(); } catch {}
+              });
+              tap.pipe(brotli);
+              inspectStream = brotli;
+            }
+
+            inspectStream.on('data', (chunk) => {
+              try {
+                const s = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+                scanChunkText(s);
+              } catch {}
+            });
+            inspectStream.on('end', finishUsage);
+            if (inspectStream !== pres) {
+              inspectStream.on('error', finishUsage);
+            }
+          }
+          pres.on('error', (err) => {
+            clearIdle();
+            log(`[Flow] Upstream stream error: ${err.message}`);
+            if (!res.writableEnded && !res.destroyed) {
+              try {
+                res.end();
+              } catch {}
+            }
+          });
+          if (!res.headersSent) res.writeHead(code, pres.headers);
+          pres.pipe(res);
+        }
+      );
+
+      preq.on('socket', (sock) => {
         try {
-          preq.destroy();
+          sock?.setKeepAlive?.(true, 15_000);
         } catch {}
-      }
-    });
-    preq.on('timeout', () => {
-      try {
-        preq.destroy(Object.assign(new Error('passthrough timeout'), { code: 'ETIMEDOUT' }));
-      } catch {}
-    });
-    preq.on('error', (err) => {
-      log(`[Flow] Passthrough error: ${err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
-      }
-      if (!res.writableEnded) res.end(JSON.stringify({ error: { code: 502, message: err.message } }));
-    });
-    preq.end(bodyBuf);
+      });
+
+      const onResClose = () => {
+        clearIdle();
+        if (!res.writableEnded) {
+          clientClosed = true;
+          try {
+            preq.destroy();
+          } catch {}
+        }
+      };
+      res.once('close', onResClose);
+
+      idleTimer = setTimeout(() => {
+        try {
+          preq.destroy(Object.assign(new Error('passthrough timeout'), { code: 'ETIMEDOUT' }));
+        } catch {}
+      }, IDLE_TIMEOUT_MS);
+      if (typeof idleTimer.unref === 'function') idleTimer.unref();
+
+      preq.on('error', (err) => {
+        clearIdle();
+        res.off('close', onResClose);
+        if (!clientClosed && !res.headersSent && !res.destroyed && attemptNo === 0 && isTransientConnError(err)) {
+          log(`[Flow] Passthrough transient error (${err.code || err.message}), retrying once on fresh socket`);
+          attemptForward(1);
+          return;
+        }
+        log(`[Flow] Passthrough error: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+        }
+        if (!res.writableEnded) res.end(JSON.stringify({ error: { code: 502, message: err.message } }));
+      });
+      preq.end(bodyBuf);
+    };
+
+    attemptForward(0);
   }
 
   function resolveProxyCustomPrompt(flowCfg) {
@@ -696,7 +869,10 @@ export function createFlowProxyServer({
     }
 
     const activeMainIds = typeof getActiveMainSessions === 'function' ? getActiveMainSessions() || [] : [];
-    const origTraj = extractTrajectoryId(origPayload, req.headers);
+    const rawTraj = extractTrajectoryId(origPayload, req.headers);
+    const resolvedTraj =
+      rawTraj && typeof resolveCascadeId === 'function' ? String(resolveCascadeId(rawTraj) || '').trim() : '';
+    const origTraj = resolvedTraj || rawTraj;
     const existingCfg = sessionStore.getSessionConfig(origTraj, { autoClaim: false });
     const subInfo = detectSubagentRequest(origPayload, origTraj, activeMainIds, existingCfg.explicit);
     const isSubagent = subInfo.isSubagent;
@@ -760,6 +936,37 @@ export function createFlowProxyServer({
     const customPrompt = resolveProxyCustomPrompt(flowCfg);
     const dedupeAgainstPayload = !customPrompt.active;
     const everyTurn = Boolean(customPrompt.active && customPrompt.everyInvocation);
+
+    // Capture latest main session payload for Codex virtual compaction & hijack/apply when enabled
+    let payloadMutatedByCompactor = false;
+    let compactorDiag = '';
+    if (!isSubagent && origTraj) {
+      compactor.captureTurnPayload(origTraj, origPayload, { model: modelName, reqPath });
+      if (flowCfg.compactEnabled) {
+        if (isNativeCompactionRequest(workingPayload)) {
+          workingPayload = rewriteNativeCompactionRequest(workingPayload);
+          compactor.recordNativeHijack(origTraj);
+          payloadMutatedByCompactor = true;
+          compactorDiag = 'native-hijack';
+        } else {
+          const clonedForCompact = workingPayload === origPayload ? structuredClone(workingPayload) : workingPayload;
+          const applied = compactor.applyToPayload(origTraj, clonedForCompact);
+          if (applied.applied) {
+            workingPayload = clonedForCompact;
+            payloadMutatedByCompactor = true;
+            compactorDiag = `virtual:${applied.savedTokensEst}`;
+          }
+        }
+      }
+    }
+
+    const onUsagePromptTokens =
+      flowCfg.compactEnabled && !isSubagent && origTraj
+        ? (promptTokens) => maybeScheduleAutoCompact(origTraj, promptTokens, modelName, flowCfg)
+        : null;
+    const fallbackPromptTokens =
+      flowCfg.compactEnabled && !isSubagent && origTraj ? estimatePayloadTokens(workingPayload) : 0;
+
     const reqShape = workingPayload?.request || workingPayload || {};
     const sysPartsCount = Array.isArray((reqShape.systemInstruction || reqShape.system_instruction)?.parts)
       ? (reqShape.systemInstruction || reqShape.system_instruction).parts.length
@@ -798,10 +1005,11 @@ export function createFlowProxyServer({
           model: modelName,
           routedModel: subRoute.matched ? subRoute.targetModel : '',
           routeReason: subRoute.reason || '',
+          rawTraj: rawTraj.slice(0, 12),
           traj: origTraj.slice(0, 12),
           mode,
           isSubagent,
-          route: 'light-seat-passthrough',
+          route: payloadMutatedByCompactor ? `light-seat+${compactorDiag}` : 'light-seat-passthrough',
           injectedChars: lightSeat.length,
           injectPos,
           everyTurn,
@@ -809,7 +1017,11 @@ export function createFlowProxyServer({
           contentsLen
         });
         const nextBuf = Buffer.from(JSON.stringify(seatOnlyPayload), 'utf8');
-        pipePassThrough(req, res, nextBuf, flowCfg.upstream, reqPath, { stripContentEncoding: true });
+        pipePassThrough(req, res, nextBuf, flowCfg.upstream, reqPath, {
+          stripContentEncoding: true,
+          onUsagePromptTokens,
+          fallbackPromptTokens
+        });
         return;
       }
       pushDiag({
@@ -818,21 +1030,33 @@ export function createFlowProxyServer({
         model: modelName,
         routedModel: subRoute.matched ? subRoute.targetModel : '',
         routeReason: subRoute.reason || '',
+        rawTraj: rawTraj.slice(0, 12),
         traj: origTraj.slice(0, 12),
         mode,
         isSubagent,
-        route: subRoute.matched ? 'subagent-model-routed' : 'passthrough',
+        route: payloadMutatedByCompactor
+          ? `compact:${compactorDiag}`
+          : subRoute.matched
+          ? 'subagent-model-routed'
+          : 'passthrough',
         injectedChars: 0,
         injectPos,
         everyTurn,
         sysParts: sysPartsCount,
         contentsLen
       });
-      if (subRoute.matched) {
+      if (subRoute.matched || payloadMutatedByCompactor) {
         const nextBuf = Buffer.from(JSON.stringify(workingPayload), 'utf8');
-        pipePassThrough(req, res, nextBuf, flowCfg.upstream, reqPath, { stripContentEncoding: true });
+        pipePassThrough(req, res, nextBuf, flowCfg.upstream, reqPath, {
+          stripContentEncoding: true,
+          onUsagePromptTokens,
+          fallbackPromptTokens
+        });
       } else {
-        pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath);
+        pipePassThrough(req, res, bodyBuf, flowCfg.upstream, reqPath, {
+          onUsagePromptTokens,
+          fallbackPromptTokens
+        });
       }
       return;
     }
@@ -1219,6 +1443,10 @@ export function createFlowProxyServer({
     });
     emit('outcome', { cascadeId: origTraj, mode, verdict, detail, actions, ms: Date.now() - t0 });
 
+    if (flowCfg.compactEnabled && !isSubagent && origTraj && bestSse?.usageMetadata?.promptTokenCount) {
+      maybeScheduleAutoCompact(origTraj, Number(bestSse.usageMetadata.promptTokenCount), modelName, flowCfg);
+    }
+
     // Prevent upstream filter text from entering client history and poisoning subsequent turns
     if (isPolicyBlockText(finalText)) {
       sendSseResult(res, buildGeminiSse(BLOCK_FALLBACK_TEXT, { finishReason: 'STOP', model: modelName }), 200);
@@ -1236,6 +1464,66 @@ export function createFlowProxyServer({
     }
 
     sendSseResult(res, bestRaw, bestStatus);
+  }
+
+  function maybeScheduleAutoCompact(cascadeId, promptTokenCount, model, flowCfg) {
+    if (!cascadeId || !flowCfg?.compactEnabled || !lastAuthHeaders) return;
+    const contextWindow = typeof getContextWindow === 'function' ? Number(getContextWindow(cascadeId, model) || 0) : 0;
+    if (
+      !compactor.shouldAutoCompact(cascadeId, {
+        promptTokenCount,
+        model,
+        contextWindow,
+        thresholdPct: flowCfg.compactThresholdPct,
+        keepTailTokens: flowCfg.compactKeepTailTokens
+      })
+    ) {
+      return;
+    }
+    log(
+      `[FlowCompactor] Scheduling auto compaction for ${String(cascadeId).slice(0, 8)} (promptTokens=${promptTokenCount}, window=${contextWindow || 'est'})`
+    );
+    void compactor
+      .runCompaction(cascadeId, {
+        sendUpstream,
+        upstream: flowCfg.upstream,
+        authHeaders: lastAuthHeaders,
+        compactModel: flowCfg.compactModel,
+        keepTailTokens: flowCfg.compactKeepTailTokens,
+        reason: 'auto'
+      })
+      .then((res) => {
+        if (!res?.ok) {
+          log(`[FlowCompactor] Auto compaction skipped/failed for ${String(cascadeId).slice(0, 8)}: ${res?.error || 'unknown'}`);
+        }
+        emit('compact', { cascadeId, reason: 'auto', ...res });
+      })
+      .catch((err) => {
+        log(`[FlowCompactor] Auto compaction error for ${String(cascadeId).slice(0, 8)}: ${err?.message || err}`);
+      });
+  }
+
+  async function compactNow(cascadeId) {
+    const flowCfg = normalizeFlowConfig(getConfig());
+    if (!lastAuthHeaders) return { ok: false, error: 'no_auth_headers' };
+    const res = await compactor.runCompaction(cascadeId, {
+      sendUpstream,
+      upstream: flowCfg.upstream,
+      authHeaders: lastAuthHeaders,
+      compactModel: flowCfg.compactModel,
+      keepTailTokens: flowCfg.compactKeepTailTokens,
+      reason: 'manual'
+    });
+    if (res.ok) emit('compact', { cascadeId, reason: 'manual', ...res });
+    return res;
+  }
+
+  function clearCompaction(cascadeId) {
+    return compactor.clearCompaction(cascadeId);
+  }
+
+  function getCompactionStatus(cascadeId) {
+    return compactor.getStatus(cascadeId);
   }
 
   async function callUtilityModel(
@@ -1271,6 +1559,9 @@ export function createFlowProxyServer({
   }
 
   const server = http.createServer((req, res) => {
+    try {
+      req.socket?.setKeepAlive?.(true, 15_000);
+    } catch {}
     const chunks = [];
     req.on('error', (err) => log(`[Flow] req error: ${err.message}`));
     req.on('data', (c) => chunks.push(c));
@@ -1295,12 +1586,19 @@ export function createFlowProxyServer({
         return;
       }
       if (req.method === 'GET' && reqPath === '/ag-flow/diag') {
+        const mains = (typeof getActiveMainSessions === 'function' ? getActiveMainSessions() || [] : []).filter(Boolean);
+        const compactions = {};
+        for (const cid of mains) {
+          compactions[String(cid).slice(0, 12)] = compactor.getStatus(cid);
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(
           JSON.stringify({
             ok: true,
             h2Degraded: h2ConsecutiveFails >= 3,
             quotaCooldownMs: Math.max(0, quotaCooldownUntil - Date.now()),
+            activeMainIds: mains.map((id) => String(id).slice(0, 12)),
+            compactions,
             recent: recentDiag.slice(-15)
           })
         );
@@ -1328,9 +1626,26 @@ export function createFlowProxyServer({
     });
   });
 
+  // Harden Node.js HTTP server timeouts for long-running agentic streams & persistent keep-alive
+  server.requestTimeout = 0;
+  server.timeout = 0;
+  server.headersTimeout = 120_000;
+  server.keepAliveTimeout = 65_000;
+  server.on('close', () => {
+    try {
+      httpAgent.destroy();
+    } catch {}
+    try {
+      httpsAgent.destroy();
+    } catch {}
+  });
+
   return {
     server,
     callUtilityModel,
+    compactNow,
+    clearCompaction,
+    getCompactionStatus,
     getHealth: () => ({
       listening: Boolean(server.listening),
       quotaCooldownMs: Math.max(0, quotaCooldownUntil - Date.now()),
@@ -1345,7 +1660,10 @@ export function createFlowProxyController({
   getSystemPrompt = () => null,
   getSubagentRouting = () => null,
   getActiveMainSessions = () => [],
+  resolveCascadeId = (id) => id,
+  getContextWindow = () => 0,
   sessionStore,
+  compactionDir = '',
   onEvent = null,
   onMainTurn = null,
   log = () => {}
@@ -1355,8 +1673,35 @@ export function createFlowProxyController({
   let activeApi = null;
   let lastError = '';
   let starting = false;
+  let desiredEnabled = false;
+  let manualStopping = false;
+  let healTimer = null;
+  let healAttempts = 0;
+
+  function clearHealTimer() {
+    if (healTimer) {
+      clearTimeout(healTimer);
+      healTimer = null;
+    }
+  }
+
+  function scheduleSelfHeal() {
+    if (manualStopping || !desiredEnabled || healTimer) return;
+    const delayMs = [1000, 2000, 5000][Math.min(healAttempts, 2)];
+    healAttempts += 1;
+    log(`[Flow] Proxy closed unexpectedly; scheduling self-heal restart in ${delayMs}ms`);
+    healTimer = setTimeout(() => {
+      healTimer = null;
+      if (!manualStopping && desiredEnabled) {
+        void syncState({ enabled: true });
+      }
+    }, delayMs);
+    if (typeof healTimer.unref === 'function') healTimer.unref();
+  }
 
   async function stop() {
+    manualStopping = true;
+    clearHealTimer();
     const srv = activeServer;
     activeServer = null;
     activeApi = null;
@@ -1372,6 +1717,7 @@ export function createFlowProxyController({
   }
 
   async function syncState({ enabled = false } = {}) {
+    desiredEnabled = Boolean(enabled);
     const flowCfg = normalizeFlowConfig(getConfig());
     if (!enabled) {
       await stop();
@@ -1385,12 +1731,16 @@ export function createFlowProxyController({
     starting = true;
     try {
       await stop();
+      manualStopping = false;
       const created = createFlowProxyServer({
         getConfig,
         getSystemPrompt,
         getSubagentRouting,
         getActiveMainSessions,
+        resolveCascadeId,
+        getContextWindow,
         sessionStore,
+        compactionDir,
         onEvent,
         onMainTurn,
         log
@@ -1406,11 +1756,30 @@ export function createFlowProxyController({
       activeApi = created;
       activePort = flowCfg.port;
       lastError = '';
+      healAttempts = 0;
+      created.server.on('error', (err) => {
+        lastError = err?.message || String(err || 'server error');
+        log(`[Flow] Proxy server runtime error: ${lastError}`);
+      });
+      created.server.on('close', () => {
+        if (activeServer === created.server) {
+          activeServer = null;
+          activeApi = null;
+          activePort = 0;
+          if (!manualStopping && desiredEnabled) {
+            scheduleSelfHeal();
+          }
+        }
+      });
       log(`[Flow] Local proxy listening on http://127.0.0.1:${activePort}`);
     } catch (err) {
       lastError = err?.message || String(err || 'listen failed');
       log(`[Flow] Failed to start proxy: ${lastError}`);
       await stop();
+      if (desiredEnabled) {
+        manualStopping = false;
+        scheduleSelfHeal();
+      }
     } finally {
       starting = false;
     }
@@ -1433,5 +1802,26 @@ export function createFlowProxyController({
     return await activeApi.callUtilityModel(prompt, opts);
   }
 
-  return { syncState, stop, getStatus, callUtilityModel };
+  async function compactNow(cascadeId) {
+    if (!activeApi || typeof activeApi.compactNow !== 'function') {
+      return { ok: false, error: 'proxy_not_running' };
+    }
+    return await activeApi.compactNow(cascadeId);
+  }
+
+  function clearCompaction(cascadeId) {
+    if (!activeApi || typeof activeApi.clearCompaction !== 'function') {
+      return { ok: false, error: 'proxy_not_running' };
+    }
+    return activeApi.clearCompaction(cascadeId);
+  }
+
+  function getCompactionStatus(cascadeId) {
+    if (!activeApi || typeof activeApi.getCompactionStatus !== 'function') {
+      return { active: false, count: 0, inFlight: false, hasSnapshot: false };
+    }
+    return activeApi.getCompactionStatus(cascadeId);
+  }
+
+  return { syncState, stop, getStatus, callUtilityModel, compactNow, clearCompaction, getCompactionStatus };
 }

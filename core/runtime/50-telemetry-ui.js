@@ -4,11 +4,11 @@
  */
   // Remove any stale DOM nodes and observers from a prior bundle version so fresh listeners attach cleanly
   try {
-    for (const staleId of ['ag-live-metrics-pill', 'ag-side-metrics-pill', 'ag-live-metrics-tooltip', 'ag-turn-metrics-tooltip']) {
+    for (const staleId of ['ag-live-metrics-pill', 'ag-side-metrics-pill', 'ag-live-metrics-tooltip', 'ag-turn-metrics-tooltip', 'ag-composer-quota-halo']) {
       const staleEl = document.getElementById(staleId);
       if (staleEl) staleEl.remove();
     }
-    document.querySelectorAll('.ag-live-metrics-pill').forEach((el) => el.remove());
+    document.querySelectorAll('.ag-live-metrics-pill, #ag-composer-quota-halo, svg[id*="quota-halo"]').forEach((el) => el.remove());
     document.querySelectorAll('[data-ag-row-mode]').forEach((el) => el.removeAttribute('data-ag-row-mode'));
     document.querySelectorAll('[data-ag-turn-row]').forEach((el) => el.removeAttribute('data-ag-turn-row'));
     if (window.__ag_pane_states && typeof window.__ag_pane_states === 'object') {
@@ -62,6 +62,9 @@
     const keys = Object.keys(metricsByCid);
     if (keys.length > 12) {
       delete metricsByCid[keys[0]];
+    }
+    if (typeof window.__ag_sync_overview_extensions === 'function') {
+      try { window.__ag_sync_overview_extensions(); } catch {}
     }
   }
 
@@ -198,89 +201,170 @@
     if (!tt) return;
     const wrap = tt.querySelector('.ag-tt-wrap');
     if (!wrap) return;
-    let bar = wrap.querySelector('.ag-tt-flow-bar');
-    if (!MODULES.flow) {
-      if (bar) bar.remove();
-      return;
-    }
-    const cache = window.__ag_flow_status_state;
-    const pk = paneKey === 'side' ? 'side' : 'main';
-    const paneSt = (cache && cache.panes && cache.panes[pk]) || {
-      mode: (boot.flow && boot.flow.defaultMode) || 'default',
-      runtime: null
-    };
-    const proxy = (cache && cache.proxy) || { running: false, port: (boot.flow && boot.flow.port) || 18100 };
-    const asar = (cache && cache.asar) || { found: false, patched: false };
-
-    const loc = I18N_LOCALE || 'zh-CN';
-    const isEn = loc === 'en';
-    const isTw = loc === 'zh-TW';
-    const modeMap = isEn
-      ? { default: 'Default', writing: 'Writing', engineering: 'Eng', full: 'Full' }
-      : isTw
-      ? { default: '預設', writing: '寫作', engineering: '工程', full: '全面' }
-      : { default: '默认', writing: '写作', engineering: '工程', full: '全面' };
-    const modeLabel = modeMap[paneSt.mode] || modeMap.default;
-
-    const relayText = proxy.running
-      ? (isEn ? 'Relay :' : isTw ? '轉發 :' : '转发 :') +
-        proxy.port +
-        ' · ' +
-        (asar.patched
-          ? isEn ? 'Active' : isTw ? '已接管' : '已接管'
-          : isEn ? 'Direct' : isTw ? '未接管' : '未接管')
-      : isEn ? 'Relay Off' : isTw ? '轉發未啟' : '转发未启';
-
-    const detail = paneSt.runtime && paneSt.runtime.lastDetail ? String(paneSt.runtime.lastDetail) : '';
-    const msStr = paneSt.runtime && paneSt.runtime.ms ? ' · ' + (paneSt.runtime.ms / 1000).toFixed(1) + 's' : '';
-    const lastText =
-      (isEn ? 'Last: ' : isTw ? '上輪：' : '上轮：') +
-      (detail ? detail + msStr : isEn ? 'Idle' : isTw ? '待命' : '待命');
-
-    const v = (paneSt.runtime && paneSt.runtime.lastVerdict) || '';
-    const tone =
-      v === 'refused' || v === 'blocked'
-        ? 'is-err'
-        : v === 'continued' || v === 'staged' || v === 'empty'
-        ? 'is-warn'
-        : proxy.running && paneSt.mode !== 'default'
-        ? 'is-ok'
-        : 'is-idle';
-
-    const nextSig = modeLabel + '|' + relayText + '|' + lastText + '|' + tone;
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.className = 'ag-tt-flow-bar';
-      const footer = wrap.querySelector('.ag-tt-footer');
-      if (footer) {
-        wrap.insertBefore(bar, footer);
+    wrap.querySelectorAll('.ag-tt-flow-bar').forEach((el) => el.remove());
+    const slot = wrap.querySelector('.ag-tt-flow-chip-slot');
+    if (slot) {
+      if (!MODULES.flow) {
+        slot.innerHTML = '';
       } else {
-        wrap.appendChild(bar);
+        const cache = window.__ag_flow_status_state;
+        const pk = paneKey === 'side' ? 'side' : 'main';
+        const paneSt = (cache && cache.panes && cache.panes[pk]) || {
+          mode: (boot.flow && boot.flow.defaultMode) || 'default',
+          runtime: null
+        };
+        const proxy = (cache && cache.proxy) || { running: false, port: (boot.flow && boot.flow.port) || 18100 };
+        const asar = (cache && cache.asar) || { found: false, patched: false };
+
+        const loc = I18N_LOCALE || 'zh-CN';
+        const isEn = loc === 'en';
+        const isTw = loc === 'zh-TW';
+        const modeMap = isEn
+          ? { default: 'Default', writing: 'Writing', engineering: 'Eng', full: 'Full' }
+          : isTw
+          ? { default: '預設', writing: '寫作', engineering: '工程', full: '全面' }
+          : { default: '默认', writing: '写作', engineering: '工程', full: '全面' };
+        const modeLabel = modeMap[paneSt.mode] || modeMap.default;
+        const tipText =
+          modeLabel +
+          ' · ' +
+          (proxy.running
+            ? (asar.patched ? (isEn ? 'Relay Active :' : '接管 :') : isEn ? 'Direct :' : '仅转发 :') + proxy.port
+            : isEn ? 'Relay Off' : '未启动');
+        const isActive = proxy.running && asar.patched;
+        const sig = modeLabel + '|' + isActive + '|' + tipText;
+        if (slot.getAttribute('data-ag-flow-sig') !== sig) {
+          slot.setAttribute('data-ag-flow-sig', sig);
+          slot.innerHTML =
+            '<span class="ag-tt-flow-chip' +
+            (isActive ? ' is-on' : '') +
+            '" title="' +
+            escapeStatusHtml(tipText) +
+            '">' +
+            '<i class="ag-tt-flow-chip-dot"></i>' +
+            escapeStatusHtml(modeLabel) +
+            '</span>';
+        }
       }
     }
-    if (bar.getAttribute('data-ag-flow-sig') !== nextSig) {
-      bar.setAttribute('data-ag-flow-sig', nextSig);
-      bar.innerHTML =
-        '<span class="ag-tt-flow-left">' +
-        '<span class="ag-tt-flow-dot ' +
-        tone +
-        '"></span>' +
-        '<span class="ag-tt-flow-mode">' +
-        escapeStatusHtml(modeLabel) +
-        '</span>' +
-        '<span class="ag-tt-flow-relay">' +
-        escapeStatusHtml(relayText) +
-        '</span>' +
-        '</span>' +
-        '<span class="ag-tt-flow-last">' +
-        escapeStatusHtml(lastText) +
-        '</span>';
+
+    const compEl = wrap.querySelector('.ag-tt-comp-status');
+    if (compEl) {
+      const nCount = Number(compEl.getAttribute('data-native-count') || 0);
+      const nPending = compEl.getAttribute('data-native-pending') === '1';
+      const nRunning = compEl.getAttribute('data-native-running') === '1';
+      const nKb = Number(compEl.getAttribute('data-native-kb') || 0);
+
+      const cache = window.__ag_flow_status_state || {};
+      const pk = paneKey === 'side' ? 'side' : 'main';
+      const proxy = cache.proxy || { running: false };
+      const asar = cache.asar || { patched: false };
+      const prefsFlow = (window.__ag_ui_prefs && window.__ag_ui_prefs.flow) || {};
+      const baseCfg = cache.compactConfig || {};
+      const bootFlow = boot.flow || {};
+      const compactEnabled = Boolean(
+        prefsFlow.compactEnabled !== undefined
+          ? prefsFlow.compactEnabled
+          : baseCfg.enabled !== undefined
+          ? baseCfg.enabled
+          : bootFlow.compactEnabled
+      );
+      const threshPct = Number(prefsFlow.compactThresholdPct || baseCfg.thresholdPct || bootFlow.compactThresholdPct || 70);
+      const tailTokens = Number(prefsFlow.compactKeepTailTokens || baseCfg.keepTailTokens || bootFlow.compactKeepTailTokens || 20000);
+      const tailK = Math.round(tailTokens / 1000) + 'k';
+      const compSt = (cache.panes && cache.panes[pk] && cache.panes[pk].compaction) || {};
+
+      const loc = I18N_LOCALE || 'zh-CN';
+      const isEn = loc === 'en';
+      const isTw = loc === 'zh-TW';
+
+      const hdrTxt = isEn ? 'Compaction' : isTw ? '壓縮狀態' : '压缩状态';
+      const nativeLbl = isEn ? 'Native' : isTw ? '原生壓縮' : '原生压缩';
+      const slideLbl = isEn ? 'Sliding' : isTw ? '滑動壓縮' : '滑动压缩';
+
+      const isHijacked = compactEnabled && proxy.running && asar.patched;
+      const isPendingHijack = compactEnabled && (!proxy.running || !asar.patched);
+      const modePillCls = isHijacked ? 'is-hijacked' : isPendingHijack ? 'is-pending' : 'is-native';
+      const modePillTxt = isHijacked
+        ? (isEn ? 'Hijacked' : '已接管')
+        : isPendingHijack
+        ? (isEn ? 'Pending' : '待接管')
+        : (isEn ? 'Native' : '原生');
+
+      const nativeTone = nRunning ? 'is-active' : nPending || nCount > 0 ? 'is-ready' : 'is-idle';
+      const nativeVal = nRunning
+        ? (isEn ? 'Compacting…' : isTw ? '壓縮中…' : '压缩中…')
+        : nPending
+        ? (isEn ? 'Just compacted' : isTw ? '剛完成壓縮' : '刚完成压缩') + (nKb > 0 ? ` · ${nKb} KB` : '')
+        : nCount > 0
+        ? (isEn ? `${nCount}× triggered` : isTw ? `已觸發 ${nCount} 次` : `已触发 ${nCount} 次`)
+        : (isEn ? '0× · Idle' : isTw ? '0 次 · 未觸發' : '0 次 · 未触发');
+
+      let slideTone = 'is-idle';
+      let slideVal = isEn ? 'Off' : isTw ? '未開啟' : '未开启';
+      if (compactEnabled) {
+        const cnt = Math.max(0, Number(compSt.count || 0));
+        if (compSt.inFlight) {
+          slideTone = 'is-active';
+          slideVal = isEn
+            ? `Compacting #${cnt + 1}`
+            : isTw
+            ? `壓縮中 · 第 ${cnt + 1} 次`
+            : `压缩中 · 第 ${cnt + 1} 次`;
+        } else if (!proxy.running || !asar.patched) {
+          slideTone = 'is-warn';
+          slideVal = isEn ? '0× · Needs Redirect' : isTw ? '0 次 · 需開啟接管' : '0 次 · 需开启接管';
+        } else if (compSt.active || cnt > 0) {
+          slideTone = 'is-ready';
+          const effCnt = Math.max(1, cnt);
+          slideVal = isEn
+            ? `${effCnt}× triggered`
+            : isTw
+            ? `已觸發 ${effCnt} 次`
+            : `已触发 ${effCnt} 次`;
+        } else {
+          slideTone = 'is-ready';
+          slideVal = isEn
+            ? `0× · ${threshPct}% / ${tailK}`
+            : isTw
+            ? `0 次 · 閾值 ${threshPct}%`
+            : `0 次 · 阈值 ${threshPct}%`;
+        }
+      }
+
+      const compSig = [hdrTxt, modePillCls, modePillTxt, nativeTone, nativeVal, slideTone, slideVal].join('|');
+      if (compEl.getAttribute('data-ag-comp-sig') !== compSig) {
+        compEl.setAttribute('data-ag-comp-sig', compSig);
+        compEl.innerHTML =
+          '<div class="ag-tt-comp-hdr"><span class="ag-tt-sub-hdr" style="margin-bottom:0">' +
+          escapeStatusHtml(hdrTxt) +
+          '</span><span class="ag-tt-comp-mode-pill ' +
+          modePillCls +
+          '">' +
+          escapeStatusHtml(modePillTxt) +
+          '</span></div>' +
+          '<div class="ag-tt-comp-row"><span class="ag-tt-comp-lbl"><i class="ag-tt-comp-dot ' +
+          nativeTone +
+          '"></i>' +
+          escapeStatusHtml(nativeLbl) +
+          '</span><span class="ag-tt-comp-val">' +
+          escapeStatusHtml(nativeVal) +
+          '</span></div>' +
+          '<div class="ag-tt-comp-row"><span class="ag-tt-comp-lbl"><i class="ag-tt-comp-dot ' +
+          slideTone +
+          '"></i>' +
+          escapeStatusHtml(slideLbl) +
+          '</span><span class="ag-tt-comp-val">' +
+          escapeStatusHtml(slideVal) +
+          '</span></div>';
+      }
     }
   }
 
   window.__ag_refresh_telemetry_flow = function () {
     const tt = document.getElementById('ag-live-metrics-tooltip');
     if (!tt) return;
+    syncTooltipCacheObs(tt);
     syncTooltipQuotaOverlay(tt);
     syncTooltipFlowOverlay(tt, window.__ag_tt_owner_pane || 'main');
   };
@@ -314,257 +398,63 @@
     }
   }
 
+  function resolveLiveQuotaWindow(win, nowMs) {
+    if (!win || typeof win !== 'object') return null;
+    const pct = typeof win.remainingPct === 'number' ? Math.max(0, Math.min(100, win.remainingPct)) : null;
+    let resetInSec =
+      typeof win.resetInSec === 'number' && Number.isFinite(win.resetInSec) ? Math.max(0, win.resetInSec) : null;
+    const resetMs = win.resetTime ? Date.parse(win.resetTime) : NaN;
+    if (Number.isFinite(resetMs)) {
+      const liveSec = Math.round((resetMs - nowMs) / 1000);
+      if (liveSec <= 0) {
+        return { pct: 100, resetInSec: 0, expired: true };
+      }
+      resetInSec = liveSec;
+    }
+    return { pct, resetInSec, expired: false };
+  }
+
+  function syncTooltipCacheObs(tt) {
+    if (!tt) return;
+    const el = tt.querySelector('.ag-tt-cache-obs-val');
+    if (!el) return;
+    const ts = Number(el.getAttribute('data-last-req-ts') || 0);
+    const model = el.getAttribute('data-model') || '';
+    if (!ts || !/gemini|claude/i.test(model)) {
+      el.textContent = '—';
+      return;
+    }
+    const remMs = 300000 - (Date.now() - ts);
+    if (remMs <= 0) {
+      el.textContent = I18N_LOCALE === 'en' ? 'Expired' : '已过 5m';
+      return;
+    }
+    const sec = Math.ceil(remMs / 1000);
+    const m = Math.floor(sec / 60);
+    const s = String(sec % 60).padStart(2, '0');
+    el.textContent = `≈ ${m}:${s}`;
+  }
+
   function syncTooltipQuotaOverlay(tt) {
     if (!tt) return;
     const wrap = tt.querySelector('.ag-tt-wrap');
     if (!wrap) return;
-    const l2 = wrap.querySelector('.ag-tt-l2');
-    const host = l2 || wrap;
-    // Remove any stale quota box from wrong container (e.g. L1 -> L2 migration)
-    wrap.querySelectorAll('.ag-tt-quota-box').forEach((el) => {
-      if (el.parentElement !== host) el.remove();
-    });
+    wrap.querySelectorAll('.ag-tt-quota-box, .ag-tt-quota-l1').forEach((el) => el.remove());
+
     const q = window.__ag_quota_state;
-    const loading = Boolean(window.__ag_quota_loading);
-    const groups =
-      q && Array.isArray(q.groups) && q.groups.length > 0
-        ? q.groups
-        : q && Array.isArray(q.buckets)
-        ? q.buckets.map((b) => ({
-            key: b.key,
-            label: b.label,
-            fiveHour: { remainingPct: b.remainingPct, resetInSec: b.resetInSec },
-            weekly: null
-          }))
-        : [];
-    let box = host.querySelector('.ag-tt-quota-box');
-    if (!groups.length && !loading) {
-      if (box) box.remove();
-      const staleL1 = wrap.querySelector('.ag-tt-quota-l1');
-      if (staleL1) staleL1.remove();
-      return;
-    }
-
-    const loc = I18N_LOCALE || 'zh-CN';
-    const isEn = loc === 'en';
-    const isTw = loc === 'zh-TW';
-    const titleText = isEn ? 'Model Quota' : isTw ? '模型額度' : '模型额度';
-    const title5hText = isEn ? '5h Quota' : isTw ? '5h 額度' : '5h 额度';
-    const refreshTitle = isEn ? 'Refresh quota' : isTw ? '重新整理額度' : '刷新额度';
-    const lbl5h = '5h';
-    const lblWeek = isEn ? '7d' : isTw ? '週額' : '周额';
-    const planText = q && q.planName ? String(q.planName) : '';
-
-    // L1 compact quota strip (visible when collapsed; hidden when L2 expanded)
-    let l1Box = wrap.querySelector('.ag-tt-quota-l1');
-    if (l2 && (groups.length > 0 || loading)) {
-      const l1RowsHtml = groups.length
-        ? groups
-            .slice(0, 4)
-            .map((g) => {
-              const win5h = g.fiveHour;
-              const winWeek = g.weekly;
-              const primaryWin = win5h || winWeek;
-              const pct5h =
-                win5h && typeof win5h.remainingPct === 'number' ? Math.max(0, Math.min(100, win5h.remainingPct)) : null;
-              const pctWeek =
-                winWeek && typeof winWeek.remainingPct === 'number' ? Math.max(0, Math.min(100, winWeek.remainingPct)) : null;
-              const primaryPct = pct5h ?? pctWeek;
-              const tone = primaryPct === null ? 'is-ok' : primaryPct <= 20 ? 'is-crit' : primaryPct <= 50 ? 'is-warn' : 'is-ok';
-              // Only display countdown when quota has actually been consumed (< 100%)
-              const reset5hStr =
-                win5h && pct5h !== null && pct5h < 100 && win5h.resetInSec > 0
-                  ? formatQuotaResetDuration(win5h.resetInSec, loc)
-                  : '';
-              const resetWeekStr =
-                winWeek && pctWeek !== null && pctWeek < 100 && winWeek.resetInSec > 0
-                  ? formatQuotaResetDuration(winWeek.resetInSec, loc)
-                  : '';
-              const resetStr = reset5hStr || resetWeekStr;
-              return (
-                '<div class="ag-tt-quota-row">' +
-                '<span class="ag-tt-quota-name">' +
-                escapeStatusHtml(g.label || g.key || 'Model') +
-                '</span>' +
-                '<span class="ag-tt-quota-track"><span class="ag-tt-quota-fill ' +
-                tone +
-                '" style="width:' +
-                (primaryPct === null ? 0 : primaryPct) +
-                '%"></span></span>' +
-                '<span class="ag-tt-quota-val ' +
-                tone +
-                '">' +
-                escapeStatusHtml(primaryPct === null ? '—' : primaryPct + '%') +
-                '</span>' +
-                (resetStr ? '<span class="ag-tt-quota-reset">' + escapeStatusHtml(resetStr) + '</span>' : '') +
-                '</div>'
-              );
-            })
-            .join('')
-        : '<div class="ag-tt-quota-empty">' + escapeStatusHtml(isEn ? 'Loading…' : isTw ? '讀取中…' : '获取中…') + '</div>';
-      const l1Sig =
-        'l1|' +
-        planText +
-        '|' +
-        (loading ? '1' : '0') +
-        '|' +
-        groups
-          .map((g) => `${g.key}:${g.fiveHour?.remainingPct ?? ''}:${g.weekly?.remainingPct ?? ''}:${Math.floor(((g.fiveHour || g.weekly)?.resetInSec || 0) / 60)}`)
-          .join(',');
-      if (!l1Box) {
-        l1Box = document.createElement('div');
-        l1Box.className = 'ag-tt-quota-l1';
-        const l1Anchor = wrap.querySelector('.ag-tt-flow-bar') || wrap.querySelector('.ag-tt-footer');
-        if (l1Anchor) {
-          wrap.insertBefore(l1Box, l1Anchor);
-        } else {
-          wrap.appendChild(l1Box);
-        }
+    const nowMs = Date.now();
+    const groups = q && Array.isArray(q.groups) ? q.groups : [];
+    let hasExpiredWindow = false;
+    for (const g of groups) {
+      const l5 = resolveLiveQuotaWindow(g.fiveHour, nowMs);
+      const lw = resolveLiveQuotaWindow(g.weekly, nowMs);
+      if ((l5 && l5.expired) || (lw && lw.expired)) {
+        hasExpiredWindow = true;
+        break;
       }
-      if (l1Box.getAttribute('data-ag-quota-sig') !== l1Sig) {
-        l1Box.setAttribute('data-ag-quota-sig', l1Sig);
-        l1Box.innerHTML =
-          '<div class="ag-tt-quota-hdr">' +
-          '<span class="ag-tt-quota-hdr-left">' +
-          '<span>' +
-          escapeStatusHtml(title5hText) +
-          '</span>' +
-          (planText ? '<span class="ag-tt-quota-plan">' + escapeStatusHtml(planText) + '</span>' : '') +
-          '</span>' +
-          '<button type="button" class="ag-tt-quota-refresh' +
-          (loading ? ' is-loading' : '') +
-          '" title="' +
-          escapeStatusHtml(refreshTitle) +
-          '" aria-label="' +
-          escapeStatusHtml(refreshTitle) +
-          '">' +
-          '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
-          '</button>' +
-          '</div>' +
-          '<div class="ag-tt-quota-l1-rows">' +
-          l1RowsHtml +
-          '</div>';
-      }
-    } else if (l1Box) {
-      l1Box.remove();
     }
-
-    const renderWinRow = (tag, win) => {
-      if (!win) return '';
-      const pct = typeof win.remainingPct === 'number' ? Math.max(0, Math.min(100, win.remainingPct)) : null;
-      const tone = pct === null ? 'is-ok' : pct <= 20 ? 'is-crit' : pct <= 50 ? 'is-warn' : 'is-ok';
-      // Hide misleading countdown when quota is fully available (100%)
-      const showReset = pct !== null && pct < 100 && win.resetInSec > 0;
-      const resetStr = showReset ? formatQuotaResetDuration(win.resetInSec, loc) : '';
-      const pctStr = pct === null ? '—' : pct + '%';
-      return (
-        '<div class="ag-tt-quota-row">' +
-        '<span class="ag-tt-quota-win">' +
-        escapeStatusHtml(tag) +
-        '</span>' +
-        '<span class="ag-tt-quota-track"><span class="ag-tt-quota-fill ' +
-        tone +
-        '" style="width:' +
-        (pct === null ? 0 : pct) +
-        '%"></span></span>' +
-        '<span class="ag-tt-quota-val ' +
-        tone +
-        '">' +
-        escapeStatusHtml(pctStr) +
-        '</span>' +
-        (resetStr ? '<span class="ag-tt-quota-reset">' + escapeStatusHtml(resetStr) + '</span>' : '<span class="ag-tt-quota-reset"></span>') +
-        '</div>'
-      );
-    };
-
-    const groupsHtml = groups.length
-      ? groups
-          .slice(0, 4)
-          .map((g) => {
-            const hasBoth = Boolean(g.fiveHour && g.weekly);
-            if (!hasBoth) {
-              const singleWin = g.fiveHour || g.weekly;
-              const pct =
-                singleWin && typeof singleWin.remainingPct === 'number'
-                  ? Math.max(0, Math.min(100, singleWin.remainingPct))
-                  : null;
-              const tone = pct === null ? 'is-ok' : pct <= 20 ? 'is-crit' : pct <= 50 ? 'is-warn' : 'is-ok';
-              const showReset = pct !== null && pct < 100 && singleWin && singleWin.resetInSec > 0;
-              const resetStr = showReset ? formatQuotaResetDuration(singleWin.resetInSec, loc) : '';
-              return (
-                '<div class="ag-tt-quota-group">' +
-                '<div class="ag-tt-quota-row">' +
-                '<span class="ag-tt-quota-name">' +
-                escapeStatusHtml(g.label || g.key || 'Model') +
-                '</span>' +
-                '<span class="ag-tt-quota-track"><span class="ag-tt-quota-fill ' +
-                tone +
-                '" style="width:' +
-                (pct === null ? 0 : pct) +
-                '%"></span></span>' +
-                '<span class="ag-tt-quota-val ' +
-                tone +
-                '">' +
-                escapeStatusHtml(pct === null ? '—' : pct + '%') +
-                '</span>' +
-                (resetStr ? '<span class="ag-tt-quota-reset">' + escapeStatusHtml(resetStr) + '</span>' : '') +
-                '</div>' +
-                '</div>'
-              );
-            }
-            return (
-              '<div class="ag-tt-quota-group">' +
-              '<div class="ag-tt-quota-gname">' +
-              escapeStatusHtml(g.label || g.key || 'Model') +
-              '</div>' +
-              renderWinRow(lbl5h, g.fiveHour) +
-              renderWinRow(lblWeek, g.weekly) +
-              '</div>'
-            );
-          })
-          .join('')
-      : '<div class="ag-tt-quota-empty">' + escapeStatusHtml(isEn ? 'Loading…' : isTw ? '讀取中…' : '获取中…') + '</div>';
-
-    const nextSig =
-      planText +
-      '|' +
-      (loading ? '1' : '0') +
-      '|' +
-      groups
-        .map(
-          (g) =>
-            `${g.key}:${g.fiveHour?.remainingPct ?? ''}:${Math.floor((g.fiveHour?.resetInSec || 0) / 60)}:${g.weekly?.remainingPct ?? ''}:${Math.floor((g.weekly?.resetInSec || 0) / 600)}`
-        )
-        .join(',');
-
-    if (!box) {
-      box = document.createElement('div');
-      box.className = 'ag-tt-quota-box';
-      host.appendChild(box);
-    }
-    if (box.getAttribute('data-ag-quota-sig') !== nextSig) {
-      box.setAttribute('data-ag-quota-sig', nextSig);
-      box.innerHTML =
-        '<div class="ag-tt-quota-hdr">' +
-        '<span class="ag-tt-quota-hdr-left">' +
-        '<span>' +
-        escapeStatusHtml(titleText) +
-        '</span>' +
-        (planText ? '<span class="ag-tt-quota-plan">' + escapeStatusHtml(planText) + '</span>' : '') +
-        '</span>' +
-        '<button type="button" class="ag-tt-quota-refresh' +
-        (loading ? ' is-loading' : '') +
-        '" title="' +
-        escapeStatusHtml(refreshTitle) +
-        '" aria-label="' +
-        escapeStatusHtml(refreshTitle) +
-        '">' +
-        '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67M13.5 2.5v2.8h-2.8"/></svg>' +
-        '</button>' +
-        '</div>' +
-        '<div class="ag-tt-quota-rows">' +
-        groupsHtml +
-        '</div>';
+    if (hasExpiredWindow && q && q.fetchedAt && nowMs - q.fetchedAt >= 15000) {
+      requestQuotaStatus(true, 15000);
     }
   }
 
@@ -572,6 +462,12 @@
     window.__ag_quota_loading = false;
     if (payload && typeof payload === 'object' && Array.isArray(payload.buckets)) {
       window.__ag_quota_state = payload;
+    }
+    if (typeof window.__ag_refresh_topbar_usage === 'function') {
+      try { window.__ag_refresh_topbar_usage(); } catch {}
+    }
+    if (typeof window.__ag_sync_overview_extensions === 'function') {
+      try { window.__ag_sync_overview_extensions(); } catch {}
     }
     const tt = document.getElementById('ag-live-metrics-tooltip');
     if (!tt) return;
@@ -604,6 +500,7 @@
         }
       }
     }
+    syncTooltipCacheObs(tt);
     syncTooltipQuotaOverlay(tt);
     syncTooltipFlowOverlay(tt, window.__ag_tt_owner_pane || 'main');
   }
@@ -663,6 +560,23 @@
     return tt;
   }
 
+  function fitSingleLineNodes(root, selector, minPx = 8.5) {
+    if (!root || !root.querySelectorAll) return;
+    const nodes = root.querySelectorAll(selector);
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (!el) continue;
+      el.style.fontSize = '';
+      const cw = el.clientWidth;
+      const sw = el.scrollWidth;
+      if (cw > 0 && sw > cw + 1) {
+        const curPx = parseFloat(getComputedStyle(el).fontSize) || 10;
+        const nextPx = Math.max(minPx, Number((curPx * (cw / sw) - 0.2).toFixed(2)));
+        el.style.fontSize = nextPx + 'px';
+      }
+    }
+  }
+
   function hydrateTooltipForPane(paneKey) {
     const tt = ensureMetricsTooltipEl();
     if (!tt) return null;
@@ -681,10 +595,12 @@
       const pill = document.getElementById(pane ? pane.pillId : 'ag-live-metrics-pill');
       syncTooltipLiveOverlay(tt, ps.lastSnap, pill, pane ? pane.inputBox : null);
     } else {
+      syncTooltipCacheObs(tt);
       syncTooltipQuotaOverlay(tt);
       syncTooltipFlowOverlay(tt, paneKey);
     }
     requestQuotaStatus(false);
+    fitSingleLineNodes(tt, '.ag-tt-kpi-sub', 8.5);
     return { tt, pane };
   }
 
@@ -828,6 +744,9 @@
           positionMetricsTooltip(pill, res.tt, res.pane ? res.pane.inputBox : inputBox);
           res.tt.setAttribute('data-visible', '1');
           requestQuotaStatus(true);
+          if (typeof window.__ag_refresh_flow_state_for_pane === 'function') {
+            window.__ag_refresh_flow_state_for_pane(paneKey);
+          }
         }, 85);
       });
 
@@ -887,6 +806,9 @@
         }
         if (tt.getAttribute('data-visible') === '1') {
           positionMetricsTooltip(pill, tt, res.pane ? res.pane.inputBox : inputBox);
+          if (typeof window.__ag_refresh_flow_state_for_pane === 'function') {
+            window.__ag_refresh_flow_state_for_pane(paneKey);
+          }
         }
       });
     }
@@ -1633,6 +1555,7 @@
 
   window.__ag_render_metrics = function (payload) {
     window.__ag_last_daemon_hb = Date.now();
+    if (window.__ag_demo_mode && window.__ag_demo_mode.lockTelemetry) return;
     if (!payload || typeof payload !== 'object') return;
     const payloadCid = String(payload.cid || payload.cascadeId || '').trim();
     const watched = getWatchedCascadeIds();
@@ -1642,6 +1565,9 @@
     const mainCid = extractCascadeId();
     if (payloadCid === mainCid) {
       window.__ag_last_metrics = payload;
+      if (typeof window.__ag_refresh_topbar_usage === 'function') {
+        try { window.__ag_refresh_topbar_usage(); } catch {}
+      }
     }
     if (!MODULES.metrics) return;
 
@@ -1664,6 +1590,7 @@
         if (tt && tt.getAttribute('data-ag-raw-tt') !== payload.tooltipHtml) {
           tt.setAttribute('data-ag-raw-tt', payload.tooltipHtml);
           tt.innerHTML = payload.tooltipHtml;
+          fitSingleLineNodes(tt, '.ag-tt-kpi-sub', 8.5);
           if (pill && tt.getAttribute('data-visible') === '1') {
             positionMetricsTooltip(pill, tt, pane.inputBox);
           }
@@ -1705,6 +1632,9 @@
         ps.lastStreamLen = 0;
         if (pane.key === 'main') {
           window.__ag_last_metrics = pane.cid && metricsByCid[pane.cid] ? metricsByCid[pane.cid] : null;
+          if (typeof window.__ag_refresh_topbar_usage === 'function') {
+            try { window.__ag_refresh_topbar_usage(); } catch {}
+          }
         }
         if ((window.__ag_tt_owner_pane || 'main') === pane.key) {
           window.__ag_tt_pinned = false;

@@ -1,5 +1,5 @@
 /* ============================================================================
- * core/styles/10-light-codex.css — Default Light Theme: Codex Pure White
+ * core/styles/10-light-codex.css — Codex Pure White (Light Mode Default)
  * ============================================================================ */
 
 html:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)),

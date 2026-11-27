@@ -33,17 +33,27 @@
       let mo = null;
 
       const paneData = {
-        main: { cid: '', prevCid: '', mode: boot.flow?.defaultMode || 'default', seatOverride: '', runtime: null, isDraft: true },
-        side: { cid: '', prevCid: '', mode: boot.flow?.defaultMode || 'default', seatOverride: '', runtime: null, isDraft: true }
+        main: { cid: '', prevCid: '', mode: boot.flow?.defaultMode || 'default', seatOverride: '', runtime: null, compaction: null, isDraft: true },
+        side: { cid: '', prevCid: '', mode: boot.flow?.defaultMode || 'default', seatOverride: '', runtime: null, compaction: null, isDraft: true }
       };
-      let proxyInfo = { running: false, port: boot.flow?.port || 18100, error: '' };
-      let asarInfo = { found: false, patched: false, status: 'original' };
+      const prevFlowCache = window.__ag_flow_status_state && typeof window.__ag_flow_status_state === 'object' ? window.__ag_flow_status_state : null;
+      let proxyInfo = prevFlowCache?.proxy ? Object.assign({}, prevFlowCache.proxy) : { running: false, port: boot.flow?.port || 18100, error: '' };
+      let asarInfo = prevFlowCache?.asar ? Object.assign({}, prevFlowCache.asar) : { found: false, patched: false, status: 'original' };
+      let compactConfig = prevFlowCache?.compactConfig
+        ? Object.assign({}, prevFlowCache.compactConfig)
+        : {
+            enabled: Boolean(boot.flow?.compactEnabled),
+            thresholdPct: Number(boot.flow?.compactThresholdPct || 70),
+            keepTailTokens: Number(boot.flow?.compactKeepTailTokens || 20000)
+          };
+      let lastSuccessfulSyncAt = Number(prevFlowCache?.updatedAt || 0);
 
       function publishFlowStatusCache() {
         try {
           window.__ag_flow_status_state = {
             proxy: Object.assign({}, proxyInfo),
             asar: Object.assign({}, asarInfo),
+            compactConfig: Object.assign({}, compactConfig),
             panes: {
               main: Object.assign({}, paneData.main),
               side: Object.assign({}, paneData.side)
@@ -170,8 +180,22 @@
         }
       };
 
+      let lastPaneRefreshAt = { main: 0, side: 0 };
+      window.__ag_refresh_flow_state_for_pane = function (pkRaw) {
+        const pk = pkRaw === 'side' ? 'side' : 'main';
+        const now = Date.now();
+        if (now - (lastPaneRefreshAt[pk] || 0) < 1500) return;
+        lastPaneRefreshAt[pk] = now;
+        const st = paneData[pk];
+        void callFlowBinding('__agFlowGetState', {
+          cascadeId: st.cid || '__draft__:' + pk,
+          paneKey: pk
+        }).then((res) => applyFlowStateResponse(pk, res));
+      };
+
       window.__ag_on_flow_event = function (ev) {
         if (disposed || !ev || typeof ev !== 'object') return;
+        let shouldRefreshCompact = false;
         for (const pk of ['main', 'side']) {
           const st = paneData[pk];
           const matchCid =
@@ -181,6 +205,7 @@
           if (ev.mode) st.mode = ev.mode;
           if (typeof ev.seatOverride === 'string') st.seatOverride = ev.seatOverride;
           if (ev.runtime) st.runtime = ev.runtime;
+          if (ev.compaction && typeof ev.compaction === 'object') st.compaction = ev.compaction;
           if (ev.type === 'outcome') {
             st.runtime = Object.assign({}, st.runtime || {}, {
               lastVerdict: ev.verdict || 'pass',
@@ -188,10 +213,16 @@
               ms: ev.ms || 0
             });
           }
+          if (ev.type === 'compact' || ev.type === 'compaction') {
+            shouldRefreshCompact = pk;
+          }
           updateTriggerVisual(pk);
           if (openPaneKey === pk) renderMenuContent(pk);
         }
         publishFlowStatusCache();
+        if (shouldRefreshCompact && typeof window.__ag_refresh_flow_state_for_pane === 'function') {
+          window.__ag_refresh_flow_state_for_pane(shouldRefreshCompact);
+        }
       };
 
       function getMainCid() {
@@ -556,13 +587,20 @@
 
       function applyFlowStateResponse(pk, res) {
         if (!res || !res.ok) return;
+        lastSuccessfulSyncAt = Date.now();
         if (res.proxy) proxyInfo = res.proxy;
         if (res.asar) asarInfo = res.asar;
+        if (res.compactConfig && typeof res.compactConfig === 'object') {
+          compactConfig = Object.assign({}, compactConfig, res.compactConfig);
+        }
         const st = paneData[pk];
         if (res.session) {
           st.mode = res.session.mode || st.mode;
           st.seatOverride = res.session.seatOverride || '';
           st.runtime = res.session.runtime || st.runtime;
+        }
+        if (res.compaction && typeof res.compaction === 'object') {
+          st.compaction = res.compaction;
         }
         updateTriggerVisual(pk);
         publishFlowStatusCache();
@@ -659,6 +697,17 @@
 
       scanAllPanes();
       scanTimer = setInterval(scanAllPanes, 1500);
+      const statusPollTimer = setInterval(() => {
+        if (disposed) return;
+        const stale = Date.now() - lastSuccessfulSyncAt >= 20000;
+        if (!proxyInfo.running || !asarInfo.patched || stale) {
+          const st = paneData.main;
+          void callFlowBinding('__agFlowGetState', {
+            cascadeId: st.cid || '__draft__:main',
+            paneKey: 'main'
+          }).then((res) => applyFlowStateResponse('main', res));
+        }
+      }, 5000);
       if (typeof MutationObserver === 'function') {
         let moScheduled = false;
         mo = new MutationObserver(() => {
@@ -678,6 +727,7 @@
         window.__ag_cleanup_fns.push(() => {
           disposed = true;
           if (scanTimer) clearInterval(scanTimer);
+          if (statusPollTimer) clearInterval(statusPollTimer);
           if (mo) {
             try {
               mo.disconnect();
@@ -685,6 +735,7 @@
           }
           document.removeEventListener('click', onDocClick, true);
           document.removeEventListener('keydown', onKeyDown, true);
+          try { delete window.__ag_refresh_flow_state_for_pane; } catch {}
           cleanupFlowModePickerDom();
         });
       }

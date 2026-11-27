@@ -11,6 +11,7 @@ import {
   evaluateWatchdogDecision,
   isWatchdogProxyEnabled,
   probeTcpEndpoint,
+  readAlivePidFromFiles,
   readConfiguredFlowPort,
   resolveCodexThemeUserDir,
   runFlowWatchdog,
@@ -200,4 +201,45 @@ test('Windows scheduled task tuning keeps the daemon alive across battery, crash
     spawnSyncImpl: () => ({ status: 1, stdout: '', stderr: 'denied' })
   });
   assert.equal(broken.ok, false);
+});
+
+test('watchdog double-checks transient probe failures before spawning and reads alive PIDs directly from pid files', async () => {
+  const home = makeHome({ enabled: true, modules: { flow: true }, flow: { port: 18100 } });
+  const entry = path.join(home, 'core', 'daemon.mjs');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, '// stub\n', 'utf8');
+
+  let probeCount = 0;
+  let spawnCount = 0;
+  const recovered = await runFlowWatchdog({
+    entryPath: entry,
+    homeDir: home,
+    platform: 'win32',
+    findDaemonPidsImpl: () => [],
+    probeImpl: async () => {
+      probeCount += 1;
+      return probeCount >= 2;
+    },
+    spawnImpl: () => {
+      spawnCount += 1;
+      return { pid: 9999, unref() {} };
+    },
+    doubleCheckMs: 15
+  });
+  assert.equal(recovered.action, 'noop');
+  assert.equal(recovered.reason, 'proxy-recovered');
+  assert.equal(spawnCount, 0);
+
+  const pidDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-pid-check-'));
+  try {
+    fs.writeFileSync(path.join(pidDir, 'ag-codex-daemon-default.pid'), String(process.pid + 1000), 'utf8');
+    const alive = readAlivePidFromFiles({
+      pidDirs: [pidDir],
+      excludePids: [process.pid],
+      isPidAliveImpl: (pid) => pid === process.pid + 1000
+    });
+    assert.deepEqual(alive, [process.pid + 1000]);
+  } finally {
+    try { fs.rmSync(pidDir, { recursive: true, force: true }); } catch {}
+  }
 });

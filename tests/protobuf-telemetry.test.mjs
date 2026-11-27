@@ -221,3 +221,101 @@ test('computeSegPcts & buildTurnSummaries compute balanced bar percentages and t
   assert.equal(fmtTok(1500), '1.5k');
   assert.equal(fmtTok(1500000), '1.50M');
 });
+
+test('buildMetricsTooltipHtml renders dual-column Powertools layout and preserves #ag-live-metrics-pill CSS', async () => {
+  const { buildMetricsTooltipHtml } = await import('../core/daemon/telemetry-renderer.mjs');
+  const html = buildMetricsTooltipHtml({
+    genIdx: 12,
+    streamTps: 90,
+    e2eTps: 45,
+    streamTpsValid: true,
+    last: {
+      modelName: 'Gemini 4 Hydrogen (XHigh)',
+      inTok: 40000,
+      cacheRead: 36000,
+      cacheWrite: 1200,
+      respTok: 280,
+      thinkTok: 420,
+      ttft: 0.6,
+      stream: 1.4,
+      totDur: 2.0,
+      stepIdx: 12
+    },
+    lastCacheRate: '91.5%',
+    ctxPct: 56,
+    contextLimitTokens: 256000,
+    limitKStr: '256k',
+    remainCtx: '112k',
+    compactedPending: false,
+    compactSummaryKb: 0,
+    compactingNow: false,
+    generatingPending: false,
+    pendingRetrying: false,
+    lastErrorMsg: '',
+    turnSteps: 2,
+    turnOut: 700,
+    turnThink: 420,
+    turnResp: 280,
+    turnDur: 2.0,
+    userStepsCount: 4,
+    validCount: 10,
+    totalStepsCount: 12,
+    totalIn: 120000,
+    totalCacheWrite: 12000,
+    totalCache: 108000,
+    totalPrompt: 228000,
+    sessionCacheRate: '89.0%',
+    totalOut: 4200,
+    totalThink: 1800,
+    totalResp: 2400,
+    ctxBreakdown: {
+      usedTokens: 143360,
+      maxTokens: 256000,
+      usedPercent: 56.0,
+      categories: [
+        { key: 'system', label: 'System', tokens: 12000, percent: 8.4 },
+        { key: 'skills', label: 'Skills', tokens: 8000, percent: 5.6 },
+        { key: 'history', label: 'History', tokens: 123360, percent: 86.0 }
+      ]
+    },
+    sessAvgTps: 84,
+    peakTps: 128,
+    latestTps: 90,
+    avgTtftSec: 0.7,
+    modelTimeSec: 18.4,
+    estCostUsd: 0.14,
+    totalErrorCount: 0,
+    toolCount: 6,
+    lastReqTsMs: Date.now() - 30000
+  });
+  assert.ok(html.includes('ag-tt-dual-grid'));
+  assert.ok(html.includes('ag-tt-kpi-pair'));
+  assert.ok(html.includes('ag-tt-mini-pair'));
+  assert.ok(html.includes('响应耗时'));
+  assert.ok(html.includes('本步输出'));
+  assert.ok(!html.includes('ag-tt-btn-compact'));
+  assert.ok(!html.includes('ag-tt-btn-heatmap'));
+  assert.ok(!html.includes('ag-tt-gen-chip'));
+  assert.ok(!html.includes('ag-tt-footer'));
+  assert.ok(!html.includes('ag-tt-flow-bar'));
+  assert.ok(html.includes('上下文窗口'));
+  assert.ok(html.includes('会话统计'));
+  assert.ok(html.includes('技能'));
+
+  // Uint8Array input (as returned by node:sqlite) must decode ctxCategories cleanly
+  const grpMsg = Buffer.concat([fieldBytes(1, 'System Prompt'), fieldVarint(4, 12000)]);
+  const bdMsg = fieldBytes(1, grpMsg);
+  const u8CtxMeta = Buffer.concat([fieldBytes(3, bdMsg), fieldVarint(4, 512000)]);
+  const u8ChatStart = fieldBytes(10, u8CtxMeta);
+  const u8Usage = Buffer.concat([fieldVarint(2, 500), fieldVarint(3, 100), fieldVarint(5, 11500)]);
+  const u8Chat = Buffer.concat([fieldBytes(4, u8Usage), fieldBytes(9, u8ChatStart)]);
+  const u8Top = fieldBytes(1, u8Chat);
+  const u8Parsed = parseGenMetadataRow({ idx: 9, data: new Uint8Array(u8Top) });
+  assert.ok(u8Parsed);
+  assert.ok(Array.isArray(u8Parsed.ctxCategories));
+  assert.equal(u8Parsed.ctxCategories.length, 1);
+  assert.equal(u8Parsed.ctxCategories[0].label, 'System Prompt');
+
+  const css = fs.readFileSync(new URL('../core/styles/30-telemetry.css', import.meta.url), 'utf8');
+  assert.ok(css.includes('#ag-live-metrics-pill'));
+});

@@ -124,6 +124,7 @@ test('sanitizeConfigPatch validates whitelisted fields and preserves untouched c
   const next = sanitizeConfigPatch(baseCfg, {
     telemetryLayout: 'detailed',
     telemetryCacheMode: 'invalid-mode',
+    topbarUsageMetric: 'sessionTokens',
     promptSuggestionModel: 'gemini-4-neon-xhigh',
     sshHosts: ['node032', '  node032  ', '-oProxyCommand=evil', 'bad host', 'gpu@10.0.0.1'],
     modules: {
@@ -138,6 +139,7 @@ test('sanitizeConfigPatch validates whitelisted fields and preserves untouched c
   assert.deepEqual(next.themeVars, { '--ag-chat-font-size': '14px' });
   assert.equal(next.telemetryLayout, 'detailed');
   assert.equal(next.telemetryCacheMode, 'session', 'invalid cache mode should be ignored');
+  assert.equal(next.topbarUsageMetric, 'sessionTokens');
   assert.equal(next.promptSuggestionModel, 'gemini-4-neon-xhigh');
   assert.deepEqual(next.sshHosts, ['node032', 'gpu@10.0.0.1']);
   assert.equal(next.modules.promptSuggestions, true);

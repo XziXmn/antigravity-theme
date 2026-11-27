@@ -115,6 +115,41 @@ export function buildInlineTelemetryHtml({
   );
 }
 
+const CTX_CATEGORY_ZH = {
+  'Chat Messages': '消息',
+  'System Prompt': '系统提示',
+  'System Tools': '系统工具',
+  Skills: '技能',
+  Subagents: '子智能体',
+  Plugins: '插件',
+  'Other Overhead': '其他开销',
+  'MCP Tools': 'MCP 工具',
+  Rules: '规则',
+  Free: '剩余空间'
+};
+
+const CTX_CATEGORY_COLORS = {
+  'Chat Messages': '#2563EB',
+  'System Prompt': '#EA580C',
+  'System Tools': '#0D9488',
+  Skills: '#78716C',
+  Subagents: '#6366F1',
+  Plugins: '#9333EA',
+  'Other Overhead': '#94A3B8',
+  'MCP Tools': '#A1A1AA',
+  Rules: '#64748B',
+  Free: 'var(--ag-tt-track)'
+};
+
+function fmtDurationText(sec) {
+  if (!Number.isFinite(sec) || sec <= 0) return '—';
+  if (sec < 1) return `${Math.round(sec * 1000)}ms`;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const mins = Math.floor(sec / 60);
+  const rem = Math.round(sec % 60);
+  return `${mins}分${rem}秒`;
+}
+
 export function buildMetricsTooltipHtml({
   genIdx,
   streamTps,
@@ -139,6 +174,7 @@ export function buildMetricsTooltipHtml({
   turnDur,
   userStepsCount,
   validCount,
+  totalStepsCount = 0,
   totalIn,
   totalCacheWrite,
   totalCache,
@@ -146,7 +182,18 @@ export function buildMetricsTooltipHtml({
   sessionCacheRate,
   totalOut,
   totalThink,
-  totalResp
+  totalResp,
+  ctxBreakdown = null,
+  multiModels = null,
+  sessAvgTps = 0,
+  peakTps = 0,
+  latestTps = 0,
+  avgTtftSec = 0,
+  modelTimeSec = 0,
+  estCostUsd = 0,
+  totalErrorCount = 0,
+  toolCount = 0,
+  lastReqTsMs = 0
 }) {
   const ctxLevelClass = compactedPending
     ? 'ag-tt-compacted'
@@ -245,117 +292,190 @@ export function buildMetricsTooltipHtml({
     ? `<span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-slate"></span>写缓存 ${fmtTok(totalCacheWrite)}</span>`
     : '';
 
+  const usedPctDisp =
+    ctxBreakdown && typeof ctxBreakdown.usedPercent === 'number'
+      ? ctxBreakdown.usedPercent.toFixed(1)
+      : String(ctxPct);
+  const usedTokDisp = ctxBreakdown && ctxBreakdown.usedTokens > 0 ? fmtTok(ctxBreakdown.usedTokens) : fmtTok(last.ctx);
+  const maxTokDisp = ctxBreakdown && ctxBreakdown.maxTokens > 0 ? fmtTok(ctxBreakdown.maxTokens) : limitKStr;
+  const totalCompactions = multiModels?.compactions || (compactedPending ? 1 : 0);
+
+  const rawCats = Array.isArray(ctxBreakdown?.categories) && ctxBreakdown.categories.length > 0
+    ? ctxBreakdown.categories
+    : [
+        { key: 'new', label: '本步新增', tokens: last.inTok, percent: contextLimitTokens > 0 ? Number(((last.inTok / contextLimitTokens) * 100).toFixed(1)) : 0 },
+        { key: 'cache', label: '缓存复用', tokens: last.cacheRead, percent: contextLimitTokens > 0 ? Number(((last.cacheRead / contextLimitTokens) * 100).toFixed(1)) : 0 },
+        { key: 'free', label: 'Free', tokens: remainCtx, percent: contextLimitTokens > 0 ? Number(((remainCtx / contextLimitTokens) * 100).toFixed(1)) : 0 }
+      ];
+  const fallbackSwatches = ['#3B82F6', '#06B6D4', '#8B5CF6', '#EC4899', '#F59E0B', '#10B981'];
+  const catColor = (c, idx) =>
+    c.key === 'free'
+      ? 'var(--ag-tt-track)'
+      : CTX_CATEGORY_COLORS[c.label] || fallbackSwatches[idx % fallbackSwatches.length];
+
+  const catBarHtml = rawCats
+    .filter((c) => c.key !== 'free' && (c.percent || 0) > 0)
+    .map((c, idx) => `<span class="ag-tt-cat-seg" style="width:${Math.max(0.5, c.percent || 0)}%;background:${catColor(c, idx)}"></span>`)
+    .join('');
+
+  const catListHtml = rawCats
+    .map((c, idx) => {
+      const dispName = CTX_CATEGORY_ZH[c.label] || c.label;
+      const pctStr = c.percent == null ? '-' : `${Number(c.percent).toFixed(1)}%`;
+      const swStyle =
+        c.key === 'free'
+          ? `background:var(--ag-tt-track);box-shadow:inset 0 0 0 1px var(--ag-tt-hairline)`
+          : `background:${catColor(c, idx)}`;
+      return `<div class="ag-tt-cat-row">
+        <span class="ag-tt-cat-sw" style="${swStyle}"></span>
+        <span class="ag-tt-cat-lbl">${escapeHtml(dispName)}</span>
+        <span class="ag-tt-cat-tok">${fmtTok(c.tokens)}</span>
+        <span class="ag-tt-cat-pct">${pctStr}</span>
+      </div>`;
+    })
+    .join('');
+
+  const stepPromptTotal = (last.cacheRead || 0) + (last.inTok || 0);
+  const stepNewPct = stepPromptTotal > 0 ? ((last.inTok / stepPromptTotal) * 100).toFixed(1) : '0.0';
+
+  const nativeCompStateText = compactingNow
+    ? '压缩中…'
+    : compactedPending
+    ? `刚完成压缩${compactSummaryKb > 0 ? ` · ${compactSummaryKb} KB` : ''}`
+    : totalCompactions > 0
+    ? `已触发 ${totalCompactions} 次`
+    : '未触发';
+  const nativeCompTone = compactingNow ? 'is-active' : compactedPending || totalCompactions > 0 ? 'is-ready' : 'is-idle';
+  const compStatusHtml = `<div class="ag-tt-comp-status" data-native-count="${totalCompactions}" data-native-pending="${compactedPending ? '1' : '0'}" data-native-running="${compactingNow ? '1' : '0'}" data-native-kb="${compactSummaryKb || 0}">
+    <div class="ag-tt-comp-hdr"><span class="ag-tt-sub-hdr" style="margin-bottom:0">压缩状态</span><span class="ag-tt-comp-mode-pill is-native">原生</span></div>
+    <div class="ag-tt-comp-row"><span class="ag-tt-comp-lbl"><i class="ag-tt-comp-dot ${nativeCompTone}"></i>原生压缩</span><span class="ag-tt-comp-val">${nativeCompStateText}</span></div>
+  </div>`;
+
+  const orchModelsHtml =
+    multiModels?.hasOrchestrator && Array.isArray(multiModels.models) && multiModels.models.length > 1
+      ? `<div class="ag-tt-orch-blk">
+          <div class="ag-tt-sub-hdr">Orchestrator 上下文</div>
+          ${multiModels.models
+            .map((m) => {
+              const roleTxt = m.role === 'execution' ? '执行' : m.role === 'planner' ? '规划' : '';
+              const pct = Math.min(100, Math.max(0, m.usedPercent || 0));
+              const fillClr = pct >= 95 ? '#DC2626' : pct >= 80 ? '#D97706' : m.isCurrent ? '#2563EB' : '#60A5FA';
+              return `<div class="ag-tt-orch-item" title="${escapeHtml(m.fullName)}">
+                <div class="ag-tt-orch-top">
+                  <span class="ag-tt-orch-name">${roleTxt ? `<span class="ag-tt-role-pill">${roleTxt}</span>` : ''}${escapeHtml(m.shortName)}${m.isCurrent ? '<span class="ag-tt-active-pill">当前</span>' : ''}</span>
+                  <span class="ag-tt-orch-pct">${m.usedPercent != null ? `${m.usedPercent.toFixed(1)}%` : ''}</span>
+                </div>
+                <div class="ag-tt-orch-bar"><span style="width:${pct}%;background:${fillClr}"></span></div>
+              </div>`;
+            })
+            .join('')}
+        </div>`
+      : '';
+
+  const sessTotalAll = totalPrompt + totalOut;
+  const avgTpsShow = sessAvgTps > 0 ? sessAvgTps.toFixed(1) : mainTpsVal.toFixed(1);
+  const peakTpsShow = peakTps > 0 ? peakTps.toFixed(1) : mainTpsVal.toFixed(1);
+  const latestTpsShow = latestTps > 0 ? latestTps.toFixed(1) : mainTpsVal.toFixed(1);
+
   return `<div class="ag-tt-wrap ${ctxLevelClass}">
     <div class="ag-tt-hdr">
-      <span class="ag-tt-hdr-left">本轮最新调用</span>
-      <span class="ag-tt-hdr-right">${liveChipHtml}<span class="ag-tt-gen-chip">Gen #${genIdx}</span></span>
+      <span class="ag-tt-hdr-left">会话统计</span>
+      <span class="ag-tt-hdr-right">${liveChipHtml}<span class="ag-tt-flow-chip-slot"></span></span>
     </div>
     <div class="ag-tt-wait-note" id="ag-tt-wait-note"></div>
-    <div class="ag-tt-bento">
-      <div class="ag-tt-bento-cell">
-        <div class="ag-tt-bento-lbl">生成速度</div>
-        <div class="ag-tt-bento-val-row">
-          <span class="ag-tt-bento-val">${mainTpsVal.toFixed(1)}</span>
-          <span class="ag-tt-bento-unit">t/s</span>
+    <div class="ag-tt-dual-grid">
+      <div class="ag-tt-col ag-tt-col-ctx">
+        <div class="ag-tt-col-top">
+          <span class="ag-tt-col-title">上下文窗口</span>
         </div>
-        <div class="ag-tt-bento-sub">${speedSub}</div>
-      </div>
-      <div class="ag-tt-bento-cell">
-        <div class="ag-tt-bento-lbl">上下文窗口</div>
-        <div class="ag-tt-bento-val-row">${ctxBentoValHtml}</div>
-        <div class="ag-tt-bento-sub">${ctxBentoSubText}</div>
-      </div>
-      <div class="ag-tt-bento-cell">
-        <div class="ag-tt-bento-lbl">累计缓存命中</div>
-        <div class="ag-tt-bento-val-row">
-          <span class="ag-tt-bento-val${hasSessionCache ? ' ag-tt-val-good' : ''}">${sessionCacheRate}%</span>
+        <div class="ag-tt-ctx-headline">
+          <span class="ag-tt-ctx-pct-main">${compactedPending ? '约已使用 ' : '已使用 '}${usedPctDisp}%</span>
+          <span class="ag-tt-ctx-cap">${compactedPending ? '≈' : ''}${usedTokDisp} / ${maxTokDisp}</span>
         </div>
-        <div class="ag-tt-bento-sub">本步 ${lastCacheRate}%</div>
-      </div>
-    </div>
-    <div class="ag-tt-bar-blk ag-tt-none">
-      <div class="ag-tt-bar-top">
-        <span class="ag-tt-bar-name">当前上下文</span>
-        <span class="ag-tt-bar-meta">${ctxBarTopMetaHtml}</span>
-      </div>
-      <div class="ag-tt-track">${ctxSegsHtml}</div>
-      <div class="ag-tt-legend">${ctxBarLegendHtml}</div>
-    </div>
-    <div class="ag-tt-l2">
-      <div class="ag-tt-grid-2">
-        <div class="ag-tt-grid-2-col">
-          <div class="ag-tt-bar-top">
-            <span class="ag-tt-bar-name">响应耗时</span>
-            <span class="ag-tt-bar-meta"><strong>${last.totDur.toFixed(2)}s</strong></span>
+        <div class="ag-tt-cat-bar">${catBarHtml}</div>
+        <div class="ag-tt-cat-list">${catListHtml}</div>
+        <div class="ag-tt-step-cache-blk">
+          <div class="ag-tt-cat-row">
+            <span class="ag-tt-dot-round" style="background:#2563EB"></span>
+            <span class="ag-tt-cat-lbl">缓存复用上下文</span>
+            <span class="ag-tt-cat-tok">${fmtTok(last.cacheRead)}</span>
+            <span class="ag-tt-cat-pct">${lastCacheRate}%</span>
           </div>
-          <div class="ag-tt-track">
-            <div class="ag-tt-seg ag-tt-c-slate" style="width:${durPcts[0]}%"></div>
-            <div class="ag-tt-seg ag-tt-c-brand" style="width:${durPcts[1]}%"></div>
-          </div>
-          <div class="ag-tt-legend">
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-slate"></span>TTFT ${last.ttft.toFixed(2)}s</span>
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-brand"></span>流式 ${last.stream.toFixed(2)}s</span>
+          ${last.cacheWrite > 0 ? `<div class="ag-tt-cat-row">
+            <span class="ag-tt-dot-round" style="background:#94A3B8"></span>
+            <span class="ag-tt-cat-lbl">写缓存</span>
+            <span class="ag-tt-cat-tok">${fmtTok(last.cacheWrite)}</span>
+            <span class="ag-tt-cat-pct">—</span>
+          </div>` : ''}
+          <div class="ag-tt-cat-row">
+            <span class="ag-tt-dot-round" style="background:#38BDF8"></span>
+            <span class="ag-tt-cat-lbl">本步新增输入</span>
+            <span class="ag-tt-cat-tok">${fmtTok(last.inTok)}</span>
+            <span class="ag-tt-cat-pct">${stepNewPct}%</span>
           </div>
         </div>
-        <div class="ag-tt-grid-2-col">
-          <div class="ag-tt-bar-top">
-            <span class="ag-tt-bar-name">本步输出</span>
-            <span class="ag-tt-bar-meta"><strong>${fmtNum(last.outTok)}</strong></span>
+        ${compStatusHtml}
+        ${orchModelsHtml}
+      </div>
+      <div class="ag-tt-col ag-tt-col-stats">
+        <div class="ag-tt-col-top">
+          <span class="ag-tt-col-title">运行指标</span>
+          <span class="ag-tt-col-sub">${escapeHtml(last.modelName ? shortModelDisplaySafe(last.modelName) : '')}</span>
+        </div>
+        <div class="ag-tt-kpi-pair">
+          <div class="ag-tt-kpi-item">
+            <div class="ag-tt-kpi-lbl">生成速度</div>
+            <div class="ag-tt-kpi-val">${mainTpsVal.toFixed(1)} <span>t/s</span></div>
+            <div class="ag-tt-kpi-sub">均 ${Math.round(e2eTps)} · 峰 ${peakTpsShow}</div>
           </div>
-          <div class="ag-tt-track">
-            <div class="ag-tt-seg ag-tt-c-indigo" style="width:${stepOutPcts[0]}%"></div>
-            <div class="ag-tt-seg ag-tt-c-brand" style="width:${stepOutPcts[1]}%"></div>
-          </div>
-          <div class="ag-tt-legend">
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-indigo"></span>思考 ${fmtNum(last.thinkTok)}</span>
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-brand"></span>正文 ${fmtNum(last.respTok)}</span>
+          <div class="ag-tt-kpi-item">
+            <div class="ag-tt-kpi-lbl">缓存命中</div>
+            <div class="ag-tt-kpi-val${hasSessionCache ? ' ag-tt-val-good' : ''}">${sessionCacheRate}%</div>
+            <div class="ag-tt-kpi-sub">本步 ${lastCacheRate}% · <span class="ag-tt-cache-obs-val" data-last-req-ts="${lastReqTsMs || 0}" data-model="${escapeHtml(last.modelName || '')}">—</span></div>
           </div>
         </div>
+        <div class="ag-tt-mini-pair">
+          <div class="ag-tt-mini-col">
+            <div class="ag-tt-mini-top"><span>响应耗时</span><b>${last.totDur.toFixed(1)}s</b></div>
+            <div class="ag-tt-mini-track"><div class="ag-tt-seg ag-tt-c-slate" style="width:${durPcts[0]}%"></div><div class="ag-tt-seg ag-tt-c-brand" style="width:${durPcts[1]}%"></div></div>
+            <div class="ag-tt-mini-leg"><span>TTFT ${last.ttft.toFixed(1)}s</span><span>流式 ${last.stream.toFixed(1)}s</span></div>
+          </div>
+          <div class="ag-tt-mini-col">
+            <div class="ag-tt-mini-top"><span>本步输出</span><b>${fmtTok(last.outTok)}</b></div>
+            <div class="ag-tt-mini-track"><div class="ag-tt-seg ag-tt-c-indigo" style="width:${stepOutPcts[0]}%"></div><div class="ag-tt-seg ag-tt-c-brand" style="width:${stepOutPcts[1]}%"></div></div>
+            <div class="ag-tt-mini-leg"><span>思考 ${fmtTok(last.thinkTok)}</span><span>响应 ${fmtTok(last.respTok)}</span></div>
+          </div>
+        </div>
+        ${turnSteps > 1 && turnPcts ? `<div class="ag-tt-turn-blk">
+          <div class="ag-tt-mini-top"><span>本轮合计（${turnSteps}步 · ${turnDur.toFixed(1)}s）</span><b>输出 ${fmtTok(turnOut)}</b></div>
+          <div class="ag-tt-mini-track"><div class="ag-tt-seg ag-tt-c-indigo" style="width:${turnPcts[0]}%"></div><div class="ag-tt-seg ag-tt-c-brand" style="width:${turnPcts[1]}%"></div></div>
+          <div class="ag-tt-mini-leg"><span>思考 ${fmtTok(turnThink)}</span><span>响应 ${fmtTok(turnResp)}</span></div>
+        </div>` : ''}
+        <div class="ag-tt-stats-rows">
+          <div class="ag-tt-stat-row"><span>轮次 / 步数</span><b>${userStepsCount} / ${totalStepsCount || validCount}</b></div>
+          <div class="ag-tt-stat-row"><span>累计 Token</span><b>${fmtTok(sessTotalAll)}</b></div>
+          <div class="ag-tt-stat-row"><span>API 参考费用</span><b>$${Number(estCostUsd || 0).toFixed(2)}</b></div>
+          <div class="ag-tt-stat-row"><span>模型总用时</span><b>${fmtDurationText(modelTimeSec)}</b></div>
+        </div>
+        <details class="ag-tt-more-stats">
+          <summary>更多明细</summary>
+          <div class="ag-tt-more-body">
+            <div class="ag-tt-stat-row"><span>累计输入</span><b>${fmtTok(totalIn)}</b></div>
+            <div class="ag-tt-stat-row"><span>缓存读取</span><b>${fmtTok(totalCache)}</b></div>
+            ${hasTotalWrite ? `<div class="ag-tt-stat-row"><span>写缓存</span><b>${fmtTok(totalCacheWrite)}</b></div>` : ''}
+            <div class="ag-tt-stat-row"><span>累计输出</span><b>${fmtTok(totalOut)}</b></div>
+            <div class="ag-tt-stat-row"><span>思考 Token</span><b>${fmtTok(totalThink)}</b></div>
+            <div class="ag-tt-stat-row"><span>平均 / 最近速度</span><b>${avgTpsShow} / ${latestTpsShow} t/s</b></div>
+            <div class="ag-tt-stat-row"><span>请求 / 工具 / 错误</span><b>${validCount} / ${toolCount} / ${totalErrorCount}</b></div>
+          </div>
+        </details>
       </div>
-      ${turnBarHtml}
-      <div class="ag-tt-sec-hdr">
-        <span>当前会话累计</span>
-        <span class="ag-tt-badge-inline">${userStepsCount} 轮提问 / ${validCount} 次有效调用</span>
-      </div>
-      <div class="ag-tt-bar-blk">
-        <div class="ag-tt-bar-top">
-          <span class="ag-tt-bar-name">累计输入量</span>
-          <span class="ag-tt-bar-meta">总 <strong>${fmtTok(totalPrompt)}</strong> · 命中率 ${sessionCacheRate}%</span>
-        </div>
-        <div class="ag-tt-track">${totalInSegsHtml}</div>
-        <div class="ag-tt-legend">
-          <span class="ag-tt-legend-left">
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-mist"></span>新增 ${fmtTok(totalIn)}</span>
-            ${totalWriteLeg}
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-emerald"></span>缓存读取 ${fmtTok(totalCache)}</span>
-          </span>
-        </div>
-      </div>
-      <div class="ag-tt-bar-blk ag-tt-none">
-        <div class="ag-tt-bar-top">
-          <span class="ag-tt-bar-name">累计输出量</span>
-          <span class="ag-tt-bar-meta">总计 <strong>${fmtTok(totalOut)}</strong></span>
-        </div>
-        <div class="ag-tt-track">
-          <div class="ag-tt-seg ag-tt-c-indigo" style="width:${totalOutPcts[0]}%"></div>
-          <div class="ag-tt-seg ag-tt-c-brand" style="width:${totalOutPcts[1]}%"></div>
-        </div>
-        <div class="ag-tt-legend">
-          <span class="ag-tt-legend-left">
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-indigo"></span>思考链 ${fmtTok(totalThink)}</span>
-            <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-brand"></span>正文/工具 ${fmtTok(totalResp)}</span>
-          </span>
-        </div>
-      </div>
-    </div>
-    <div class="ag-tt-footer">
-      <span class="ag-tt-footer-summary">${userStepsCount} 轮 · ${validCount} 次 · 耗时 ${last.totDur.toFixed(2)}s</span>
-      <button type="button" class="ag-tt-btn-toggle" data-ag-tt-toggle="1">
-        <span>展开明细</span>
-        <svg class="ag-tt-chevron" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>
-      </button>
     </div>
   </div>`;
+}
+
+function shortModelDisplaySafe(name) {
+  return String(name || '').replace(/\s*\([^)]*\)\s*/g, ' ').trim();
 }
 
 export function formatTurnModelName(gens) {

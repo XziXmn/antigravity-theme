@@ -40,7 +40,11 @@ export const DEFAULT_FLOW_CONFIG = Object.freeze({
   defaultSeat: '',
   writingSeat: '',
   engineeringSeat: '',
-  fullSeat: ''
+  fullSeat: '',
+  compactEnabled: false,
+  compactThresholdPct: 70,
+  compactKeepTailTokens: 20000,
+  compactModel: ''
 });
 
 export const Outcome = Object.freeze({
@@ -152,6 +156,19 @@ export function normalizeFlowConfig(raw) {
   const writingSeat = typeof src.writingSeat === 'string' ? src.writingSeat.slice(0, 20000) : '';
   const engineeringSeat = typeof src.engineeringSeat === 'string' ? src.engineeringSeat.slice(0, 20000) : '';
   const fullSeat = typeof src.fullSeat === 'string' ? src.fullSeat.slice(0, 20000) : '';
+  const compactThresholdNum = Number(src.compactThresholdPct);
+  const compactThresholdPct = Number.isFinite(compactThresholdNum)
+    ? Math.max(50, Math.min(88, Math.round(compactThresholdNum)))
+    : DEFAULT_FLOW_CONFIG.compactThresholdPct;
+  const compactKeepNum = Number(src.compactKeepTailTokens);
+  const compactKeepTailTokens = Number.isFinite(compactKeepNum)
+    ? Math.max(4000, Math.min(60000, Math.round(compactKeepNum)))
+    : DEFAULT_FLOW_CONFIG.compactKeepTailTokens;
+  const rawCompactModel = typeof src.compactModel === 'string' ? src.compactModel.trim() : '';
+  const compactModel =
+    rawCompactModel && !rawCompactModel.startsWith('-') && VALID_MODEL_ID_RE.test(rawCompactModel)
+      ? rawCompactModel
+      : '';
 
   return {
     port,
@@ -172,7 +189,11 @@ export function normalizeFlowConfig(raw) {
     defaultSeat,
     writingSeat,
     engineeringSeat,
-    fullSeat
+    fullSeat,
+    compactEnabled: Boolean(src.compactEnabled),
+    compactThresholdPct,
+    compactKeepTailTokens,
+    compactModel
   };
 }
 
@@ -229,6 +250,20 @@ export function sanitizeFlowPatch(base, patch) {
   if (typeof p.writingSeat === 'string') merged.writingSeat = p.writingSeat.slice(0, 20000);
   if (typeof p.engineeringSeat === 'string') merged.engineeringSeat = p.engineeringSeat.slice(0, 20000);
   if (typeof p.fullSeat === 'string') merged.fullSeat = p.fullSeat.slice(0, 20000);
+  if (typeof p.compactEnabled === 'boolean') merged.compactEnabled = p.compactEnabled;
+  if (p.compactThresholdPct !== undefined) {
+    const n = Number(p.compactThresholdPct);
+    if (Number.isFinite(n) && n >= 50 && n <= 88) merged.compactThresholdPct = Math.round(n);
+  }
+  if (p.compactKeepTailTokens !== undefined) {
+    const n = Number(p.compactKeepTailTokens);
+    if (Number.isFinite(n) && n >= 4000 && n <= 60000) merged.compactKeepTailTokens = Math.round(n);
+  }
+  if (typeof p.compactModel === 'string') {
+    const m = p.compactModel.trim();
+    if (!m) merged.compactModel = '';
+    else if (!m.startsWith('-') && VALID_MODEL_ID_RE.test(m)) merged.compactModel = m;
+  }
 
   base.flow = normalizeFlowConfig(merged);
 }

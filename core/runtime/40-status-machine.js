@@ -134,10 +134,15 @@
     const isLiveNonCancelErr = Boolean(liveErrRaw && !isUserCancelError(liveErrRaw));
 
     const stRetrying = Boolean(st && st.pendingRetrying);
+    const hasLiveRetrySignal = Boolean(
+      execCase === 'modelRequest' &&
+        ((live.execAttempt && Number(live.execAttempt) > 1) ||
+          (live.execRetryAtMs && Number(live.execRetryAtMs) > now))
+    );
     const liveRetrying = Boolean(
       isExecuting &&
         hasProvider &&
-        (execCase === 'modelRequest' || Boolean(loadingRetryMatch) || isLiveNonCancelErr)
+        (hasLiveRetrySignal || Boolean(loadingRetryMatch) || isLiveNonCancelErr)
     );
     const isRetrying = Boolean(isExecuting && !liveDefinitelyStopped && (stRetrying || liveRetrying));
 
@@ -208,7 +213,7 @@
       }
       dotTitle = '会话状态：异常 · ' + errDetail;
       noteClass = 'is-visible is-error';
-      noteHtml = '<strong>连接 / 执行异常</strong><br/>' + escapeStatusHtml(errDetail);
+      noteHtml = '<strong>执行异常</strong><span>' + escapeStatusHtml(errDetail) + '</span>';
     } else if (visualState === 'slow') {
       chipClass = 'is-slow';
       if (unconnSlow) {
@@ -216,15 +221,15 @@
         dotTitle = '会话状态：等待或重试 · 正在建立会话流连接（已等待 ' + fmtWaitDuration(unconnDurSec) + '）';
         noteClass = 'is-visible';
         noteHtml =
-          '<strong>会话连接中 (' +
+          '<strong>连接同步中</strong><span>已等待 ' +
           escapeStatusHtml(fmtWaitDuration(unconnDurSec)) +
-          ')</strong><br/>当前窗口暂未完成数据流同步；若网络受限将转为红灯脉冲提示。';
+          '，正在恢复会话流</span>';
       } else if (isRetrying) {
         const retryBrief =
           (loadingRetryMatch && loadingRetryMatch[0]) ||
           (st && st.retryReason) ||
           (live && live.execAttempt && live.execMaxAttempts
-            ? '正在重试连接 (attempt ' + live.execAttempt + '/' + live.execMaxAttempts + ')'
+            ? '第 ' + live.execAttempt + '/' + live.execMaxAttempts + ' 次重试'
             : '正在自动重试模型连接');
         let countdownSuffix = '';
         if (hasProvider && live.execRetryAtMs && live.execRetryAtMs > now) {
@@ -234,7 +239,7 @@
         chipText = '重试连接中' + countdownSuffix;
         dotTitle = '会话状态：等待或重试 · ' + retryBrief;
         noteClass = 'is-visible';
-        noteHtml = '<strong>模型自动重试中</strong><br/>' + escapeStatusHtml(retryBrief);
+        noteHtml = '<strong>自动重试</strong><span>' + escapeStatusHtml(retryBrief) + '</span>';
       } else {
         const waitStr = fmtWaitDuration(waitDurSec);
         if (effKind === 'compact') {
@@ -242,39 +247,33 @@
           dotTitle = '会话状态：等待或重试 · 上下文压缩中（已等待 ' + waitStr + '）';
           noteClass = 'is-visible';
           noteHtml =
-            '<strong>正在执行 /compact 上下文压缩（' +
+            '<strong>正在压缩（' +
             escapeStatusHtml(waitStr) +
-            '）</strong>' +
+            '）</strong><span>' +
             (modelSwitched
-              ? '<br/>检测到模型已从 <code>' +
-                escapeStatusHtml(lastModelDisplay) +
-                '</code> 切换为 <code>' +
-                escapeStatusHtml(curModelDisplay) +
-                '</code>，无法复用原 KV 缓存，全量重算耗时较长属正常现象。建议下次保持原模型压缩后再切换模型。'
-              : '<br/>系统正在汇总长对话历史，生成检查点后将自动恢复蓝色常亮。');
+              ? '模型切换至 ' + escapeStatusHtml(curModelDisplay) + '，正在重算上下文'
+              : '正在折叠长对话历史') +
+            '</span>';
         } else if (effKind === 'tool') {
           chipText = '工具等待 · ' + waitStr;
           dotTitle = '会话状态：等待或重试 · 工具执行等待中（已等待 ' + waitStr + '）';
           noteClass = 'is-visible';
           noteHtml =
-            '<strong>工具步执行等待中（' +
+            '<strong>工具等待（' +
             escapeStatusHtml(waitStr) +
-            '）</strong><br/>本地命令、文件检索或子任务尚未返回结果，请稍候。';
+            '）</strong><span>本地命令或子任务尚未返回</span>';
         } else {
           chipText = '首字等待 · ' + waitStr;
           dotTitle = '会话状态：等待或重试 · 等待模型响应（已等待 ' + waitStr + '）';
           noteClass = 'is-visible';
           noteHtml =
-            '<strong>等待模型首字输出（' +
+            '<strong>等待响应（' +
             escapeStatusHtml(waitStr) +
-            '）</strong>' +
+            '）</strong><span>' +
             (modelSwitched
-              ? '<br/>模型已切换为 <code>' +
-                escapeStatusHtml(curModelDisplay) +
-                '</code>（原 <code>' +
-                escapeStatusHtml(lastModelDisplay) +
-                '</code>），当前正在冷启动预填充上下文，完成后即可恢复高速输出。'
-              : '<br/>长上下文预填充或后端排队耗时较长，连接仍处于激活状态。');
+              ? '已切换至 ' + escapeStatusHtml(curModelDisplay) + '，正在预填充上下文'
+              : '后端排队或长上下文预填充中') +
+            '</span>';
         }
       }
     } else if (visualState === 'running') {

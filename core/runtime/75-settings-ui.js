@@ -175,7 +175,7 @@
       let boundSidebarClick = null;
       let boundNavBtn = null;
       let boundPane = null;
-      const SECTION_TAB_KEYS = ['appearance', 'prompts', 'flow', 'advanced'];
+      const SECTION_TAB_KEYS = ['appearance', 'accounts', 'prompts', 'flow', 'advanced'];
       let activeSectionTab =
         typeof window.__ag_settings_section_tab === 'string' && SECTION_TAB_KEYS.includes(window.__ag_settings_section_tab)
           ? window.__ag_settings_section_tab
@@ -269,7 +269,11 @@
         defaultSeat: '',
         writingSeat: '',
         engineeringSeat: '',
-        fullSeat: ''
+        fullSeat: '',
+        compactEnabled: false,
+        compactThresholdPct: 70,
+        compactKeepTailTokens: 20000,
+        compactModel: ''
       };
       const DEFAULT_AUTO_TITLE_UI = { enabled: false, turnInterval: 4, minIntervalMin: 5 };
       const DEFAULT_SUBAGENT_ROUTING_UI = { enabled: false, allowedModels: [] };
@@ -313,6 +317,11 @@
           },
           telemetryLayout: bootUserCfg.telemetryLayout || boot.telemetryLayout || 'compact',
           telemetryCacheMode: bootUserCfg.telemetryCacheMode || boot.telemetryCacheMode || 'session',
+          compactTypography: bootUserCfg.compactTypography !== false && boot.compactTypography !== false,
+          topbarUsageMetric: bootUserCfg.topbarUsageMetric || boot.topbarUsageMetric || 'quota',
+          overviewQuota: bootUserCfg.overviewQuota !== false && boot.overviewQuota !== false,
+          overviewProgress: bootUserCfg.overviewProgress !== false && boot.overviewProgress !== false,
+          showClaudeQuota: Boolean(bootUserCfg.showClaudeQuota ?? boot.showClaudeQuota),
           promptSuggestionModel: bootUserCfg.promptSuggestionModel || 'gemini-3.8-flash-low',
           sshHosts: Array.isArray(bootUserCfg.sshHosts) ? bootUserCfg.sshHosts.slice() : [],
           modules: Object.assign({}, MODULES, bootUserCfg.modules || {})
@@ -366,6 +375,7 @@
             githubLabel: 'GitHub',
             feedbackLabel: '回報問題',
             tabAppearance: '外觀與狀態',
+            tabAccounts: '帳號管理',
             tabPrompts: '提示詞與權限',
             tabFlow: '代理與恢復',
             tabAdvanced: '擴充與更新',
@@ -373,7 +383,17 @@
             secFlowProxy: '本機代理',
             secFlowStrategy: '輸出恢復',
             modTheme: 'Codex 晝夜主題',
-            modThemeDesc: '淺色與深色自動跟隨 IDE 外觀',
+            modThemeDesc: '跟隨 IDE 淺/深色外觀',
+            compactTypoLbl: '緊湊對話排版',
+            compactTypoDesc: '收緊行高與工具間距',
+            bubbleTintLbl: '使用者訊息氣泡著色',
+            bubbleTintDesc: '為發出訊息添加低飽和底色',
+            overviewQuotaLbl: '右側概覽顯示額度',
+            overviewQuotaDesc: '在右側概覽底部顯示額度',
+            showClaudeQuotaLbl: '顯示 Claude / GPT 額度',
+            showClaudeQuotaDesc: '預設僅顯示 Gemini 額度',
+            overviewProgressLbl: '右側概覽顯示任務進度',
+            overviewProgressDesc: '顯示步驟與即時用時',
             modI18n: '中文介面本地化',
             modI18nDesc: '關閉即還原英文介面',
             localeLbl: '介面語言',
@@ -413,8 +433,16 @@
             flowAsarPatched: '已接管',
             flowAsarOriginal: '未接管',
             flowAsarMissing: '未找到 app.asar',
+            secFlowCompact: 'Codex 智慧壓縮接管',
+            flowCompactLbl: '啟用 Codex 虛擬滑動壓縮',
+            flowCompactDesc: '原生觸發前折疊舊歷史並保留近期原文（推薦預設：70% · 20k）',
+            flowCompactThreshLbl: '自動觸發門檻',
+            flowCompactThreshDesc: '上下文達到此比例時預先壓縮',
+            flowCompactTailLbl: '保留近期原文尾部',
+            flowCompactTailDesc: '壓縮後保留最新對話的 Token 上限',
+            flowCompactNeedAsar: '需先開啟上方「流量接管」與「本機轉發」。',
             modCustomPrompt: '系統級自訂提示詞',
-            modCustomPromptDesc: '支援全域與各模式專屬提示詞，子代理自動繼承',
+            modCustomPromptDesc: '支援全域與分模式提示詞',
             promptModeLbl: '注入方式',
             promptModeDescProxy: '直注系統指令，不留對話歷史殘留',
             promptModeDescHook: '透過原生 Hook 注入，內建指紋去重',
@@ -515,6 +543,14 @@
             cacheDesc: '顯示工作階段累計或單步命中率',
             cacheSession: '工作階段累計',
             cacheStep: '單步',
+            topbarMetricLbl: '頂欄用量顯示',
+            topbarMetricDesc: '自訂右上角熱力圖按鈕顯示指標',
+            topbarOptQuota: '5h 額度',
+            topbarOptSessionTok: '目前會話',
+            topbarOptTodayTok: '今日 Token',
+            topbarOptMonthTok: '本月 Token',
+            topbarOptMonthCost: '本月費用',
+            topbarOptIcon: '僅圖示',
             secUpdate: '版本與更新',
             updTitle: '外掛版本',
             updDescIdle: '從 GitHub 檢查更新，保留個人設定',
@@ -550,6 +586,7 @@
             githubLabel: 'GitHub',
             feedbackLabel: '反馈',
             tabAppearance: '外观与状态',
+            tabAccounts: '账号管理',
             tabPrompts: '提示词与权限',
             tabFlow: '代理与恢复',
             tabAdvanced: '扩展与更新',
@@ -557,7 +594,17 @@
             secFlowProxy: '本地代理',
             secFlowStrategy: '输出恢复',
             modTheme: 'Codex 昼夜主题',
-            modThemeDesc: '浅色与深色自动跟随 IDE 外观',
+            modThemeDesc: '跟随 IDE 浅/深色外观',
+            compactTypoLbl: '紧凑对话排版',
+            compactTypoDesc: '收紧行高与工具间距',
+            bubbleTintLbl: '用户消息气泡着色',
+            bubbleTintDesc: '为发送消息添加低饱和底色',
+            overviewQuotaLbl: '右侧概览显示额度',
+            overviewQuotaDesc: '在右侧概览底部显示额度',
+            showClaudeQuotaLbl: '显示 Claude / GPT 额度',
+            showClaudeQuotaDesc: '默认仅显示 Gemini 额度',
+            overviewProgressLbl: '右侧概览显示任务进度',
+            overviewProgressDesc: '显示步骤与实时用时',
             modI18n: '中文界面汉化',
             modI18nDesc: '关闭即恢复英文界面',
             localeLbl: '界面语言',
@@ -597,8 +644,16 @@
             flowAsarPatched: '已接管',
             flowAsarOriginal: '未接管',
             flowAsarMissing: '未找到 app.asar',
+            secFlowCompact: 'Codex 智能压缩接管',
+            flowCompactLbl: '启用 Codex 智能滑动压缩',
+            flowCompactDesc: '在原生压缩前折叠旧历史并保留近期原文（推荐默认：70% · 20k）',
+            flowCompactThreshLbl: '自动触发阈值',
+            flowCompactThreshDesc: '上下文达到该比例时后台预压缩',
+            flowCompactTailLbl: '保留最近原文尾部',
+            flowCompactTailDesc: '压缩后保留最新对话的 Token 上限',
+            flowCompactNeedAsar: '需先开启上方「流量接管」与「本地转发」。',
             modCustomPrompt: '系统级自定义提示词',
-            modCustomPromptDesc: '支持全局与各模式专属提示词，子代理自动继承',
+            modCustomPromptDesc: '支持全局与分模式提示词',
             promptModeLbl: '注入方式',
             promptModeDescProxy: '发包时注入高权重系统指令，不污染对话历史',
             promptModeDescHook: '通过原生 Hook 注入，内置指纹去重',
@@ -699,6 +754,14 @@
             cacheDesc: '展示会话累计或单步命中率',
             cacheSession: '会话累计',
             cacheStep: '单步',
+            topbarMetricLbl: '顶栏用量显示',
+            topbarMetricDesc: '自定义右上角热力图按钮显示的指标',
+            topbarOptQuota: '5h 额度',
+            topbarOptSessionTok: '当前会话',
+            topbarOptTodayTok: '今日 Token',
+            topbarOptMonthTok: '本月 Token',
+            topbarOptMonthCost: '本月费用',
+            topbarOptIcon: '仅图标',
             secUpdate: '版本与更新',
             updTitle: '插件版本',
             updDescIdle: '从 GitHub 检查更新，保留个人配置',
@@ -733,14 +796,25 @@
           githubLabel: 'GitHub',
           feedbackLabel: 'Issues',
           tabAppearance: 'Appearance',
-          tabPrompts: 'Prompts & Hooks',
-          tabFlow: 'Relay & Recovery',
-          tabAdvanced: 'Add-ons & Updates',
+          tabAccounts: 'Accounts',
+          tabPrompts: 'Prompts',
+          tabFlow: 'Relay',
+          tabAdvanced: 'Add-ons',
           secCore: 'Appearance & Language',
           secFlowProxy: 'Local Relay',
           secFlowStrategy: 'Output Recovery',
           modTheme: 'Codex Light & Dark Theme',
           modThemeDesc: 'Follows IDE light/dark appearance automatically',
+          compactTypoLbl: 'Compact Typography',
+          compactTypoDesc: 'Tighten line-height to 1.4 & tool row padding',
+          bubbleTintLbl: 'User Message Bubble Tint',
+          bubbleTintDesc: 'Apply subtle low-saturation tint to user messages',
+          overviewQuotaLbl: 'Show Quota in Overview',
+          overviewQuotaDesc: 'Display quota bars in right overview',
+          showClaudeQuotaLbl: 'Show Claude / GPT Quota',
+          showClaudeQuotaDesc: 'Only Gemini quota is shown by default',
+          overviewProgressLbl: 'Show Task Progress in Overview',
+          overviewProgressDesc: 'Display phase steps & elapsed clock',
           modI18n: 'Chinese UI Localization',
           modI18nDesc: 'Disable to restore English immediately',
           localeLbl: 'Display Language',
@@ -780,6 +854,14 @@
           flowAsarPatched: 'Active',
           flowAsarOriginal: 'Off',
           flowAsarMissing: 'app.asar missing',
+          secFlowCompact: 'Codex Compaction Hijack',
+          flowCompactLbl: 'Enable Codex Virtual Sliding Compaction',
+          flowCompactDesc: 'Preempt native checkpoints while keeping recent tail verbatim (Recommended: 70% · 20k)',
+          flowCompactThreshLbl: 'Auto Trigger Threshold',
+          flowCompactThreshDesc: 'Pre-compact in background when prompt context ratio reaches this percentage',
+          flowCompactTailLbl: 'Verbatim Tail Budget',
+          flowCompactTailDesc: 'Maximum recent tokens kept verbatim without splitting tool call/response pairs',
+          flowCompactNeedAsar: 'Note: Enable Traffic Redirect and Local Relay above for compaction hijack to take effect.',
           modCustomPrompt: 'System-Level Custom Prompt',
           modCustomPromptDesc: 'Global & per-mode prompts (inherited by subagents)',
           promptModeLbl: 'Injection Method',
@@ -882,6 +964,14 @@
           cacheDesc: 'Cumulative session or last-step hit rate',
           cacheSession: 'Session',
           cacheStep: 'Step',
+          topbarMetricLbl: 'Topbar Usage Badge',
+          topbarMetricDesc: 'Choose what the top-right heatmap button displays',
+          topbarOptQuota: '5h Quota',
+          topbarOptSessionTok: 'Session',
+          topbarOptTodayTok: 'Today Tok',
+          topbarOptMonthTok: 'Month Tok',
+          topbarOptMonthCost: 'Month Cost',
+          topbarOptIcon: 'Icon Only',
           secUpdate: 'Updates',
           updTitle: 'Plugin Version',
           updDescIdle: 'Check GitHub for updates; user config is preserved',
@@ -1019,6 +1109,15 @@
             subagentRouting: nextSubRouting,
             telemetryLayout: res.config.telemetryLayout || uiState.config.telemetryLayout,
             telemetryCacheMode: res.config.telemetryCacheMode || uiState.config.telemetryCacheMode,
+            compactTypography:
+              typeof res.config.compactTypography === 'boolean' ? res.config.compactTypography : uiState.config.compactTypography,
+            topbarUsageMetric: res.config.topbarUsageMetric || uiState.config.topbarUsageMetric || 'quota',
+            overviewQuota:
+              typeof res.config.overviewQuota === 'boolean' ? res.config.overviewQuota : uiState.config.overviewQuota,
+            overviewProgress:
+              typeof res.config.overviewProgress === 'boolean' ? res.config.overviewProgress : uiState.config.overviewProgress,
+            showClaudeQuota:
+              typeof res.config.showClaudeQuota === 'boolean' ? res.config.showClaudeQuota : Boolean(uiState.config.showClaudeQuota),
             promptSuggestionModel: res.config.promptSuggestionModel || uiState.config.promptSuggestionModel,
             sshHosts: Array.isArray(res.config.sshHosts) ? res.config.sshHosts.slice() : uiState.config.sshHosts,
             modules: Object.assign({}, uiState.config.modules, res.config.modules || {})
@@ -1189,6 +1288,32 @@
         }
         if (patch.telemetryLayout) uiState.config.telemetryLayout = patch.telemetryLayout;
         if (patch.telemetryCacheMode) uiState.config.telemetryCacheMode = patch.telemetryCacheMode;
+        if (typeof patch.compactTypography === 'boolean') uiState.config.compactTypography = patch.compactTypography;
+        if (typeof patch.topbarUsageMetric === 'string') uiState.config.topbarUsageMetric = patch.topbarUsageMetric;
+        if (typeof patch.overviewQuota === 'boolean') uiState.config.overviewQuota = patch.overviewQuota;
+        if (typeof patch.overviewProgress === 'boolean') uiState.config.overviewProgress = patch.overviewProgress;
+        if (typeof patch.showClaudeQuota === 'boolean') uiState.config.showClaudeQuota = patch.showClaudeQuota;
+        window.__ag_ui_prefs = Object.assign({}, window.__ag_ui_prefs || {}, {
+          compactTypography: uiState.config.compactTypography,
+          topbarUsageMetric: uiState.config.topbarUsageMetric || 'quota',
+          overviewQuota: uiState.config.overviewQuota,
+          overviewProgress: uiState.config.overviewProgress,
+          showClaudeQuota: Boolean(uiState.config.showClaudeQuota),
+          flow: uiState.config.flow
+        });
+        boot.userConfig = Object.assign({}, boot.userConfig || {}, window.__ag_ui_prefs);
+        if (typeof window.__ag_sync_overview_extensions === 'function') {
+          try { window.__ag_sync_overview_extensions(); } catch {}
+        }
+        if (typeof window.__ag_refresh_topbar_usage === 'function') {
+          try { window.__ag_refresh_topbar_usage(); } catch {}
+        }
+        if (typeof window.__ag_sync_preset_fn === 'function') {
+          try { window.__ag_sync_preset_fn(); } catch {}
+        }
+        if (typeof window.__ag_sync_overview_extensions === 'function') {
+          try { window.__ag_sync_overview_extensions(); } catch {}
+        }
         if (patch.promptSuggestionModel) {
           uiState.config.promptSuggestionModel = patch.promptSuggestionModel;
           if (uiState.config.modules.promptSuggestions && uiState.agyStatus.available) {
@@ -2063,6 +2188,13 @@
             const hide = k !== curSection;
             if (Boolean(panel.hidden) !== hide) panel.hidden = hide;
           });
+          if (typeof window.__ag_on_accounts_tab_active === 'function') {
+            try {
+              window.__ag_on_accounts_tab_active(Boolean(window.__ag_settings_tab_open && curSection === 'accounts'), {
+                forceMount: curSection === 'accounts'
+              });
+            } catch {}
+          }
 
           const syncSwitch = (id, checked) => {
             const el = document.getElementById(id);
@@ -2071,7 +2203,6 @@
             }
           };
           syncSwitch('ag-s-sw-theme', mods.theme !== false);
-          syncSwitch('ag-s-sw-i18n', mods.i18n !== false);
           syncSwitch('ag-s-sw-ai-lang', Boolean(cfg.syncAiOutputLang));
           syncSwitch('ag-s-sw-metrics', metricsOn);
           syncSwitch('ag-s-sw-suggest', psOn);
@@ -2086,6 +2217,10 @@
           syncSwitch('ag-s-sw-flow-judge', Boolean(fl.judgeEnabled));
           syncSwitch('ag-s-sw-flow-soften', Boolean(fl.softenEnabled));
           syncSwitch('ag-s-sw-flow-remap', Boolean(fl.remapEnabled));
+          syncSwitch('ag-s-sw-flow-compact', Boolean(fl.compactEnabled));
+          syncSwitch('ag-s-sw-ovquota', cfg.overviewQuota !== false);
+          syncSwitch('ag-s-sw-show-claude', Boolean(cfg.showClaudeQuota));
+          syncSwitch('ag-s-sw-ovprogress', cfg.overviewProgress !== false);
 
           pane.querySelectorAll('.ag-s-seg-btn[data-seg]').forEach((btn) => {
             const field = btn.getAttribute('data-seg');
@@ -2121,7 +2256,7 @@
             const el = document.getElementById(id);
             if (el && Boolean(el.hidden) !== Boolean(hide)) el.hidden = Boolean(hide);
           };
-          setHidden('ag-s-sub-ai-lang', !(mods.i18n !== false && activeLoc !== 'en'));
+          setHidden('ag-s-sub-ai-lang', activeLoc === 'en');
           setHidden('ag-s-sub-metrics-layout', !metricsOn);
           setHidden('ag-s-sub-metrics-cache', !metricsOn);
           setHidden('ag-s-sub-suggest', !psOn);
@@ -2134,6 +2269,8 @@
           setHidden('ag-s-sub-auto-title', !at.enabled);
           setHidden('ag-s-sub-flow-head', !flowOn);
           setHidden('ag-s-flow-strategy-wrap', !flowOn);
+          setHidden('ag-s-sub-flow-compact', !Boolean(fl.compactEnabled));
+          setHidden('ag-s-compact-asar-warn', !Boolean(fl.compactEnabled && !flAsar.patched));
 
           const subListEl = document.getElementById('ag-s-subagent-list');
           if (subListEl && subListEl.__ag_html !== subModelsHtml) {
@@ -2255,6 +2392,11 @@
           '">' +
           '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11M8 8h5.5"/></svg>' +
           '<span>' + escHtml(s.tabAppearance) + '</span></button>' +
+          '<button type="button" class="ag-s-nav-tab" role="tab" data-section-tab="accounts" aria-selected="' +
+          (curSection === 'accounts' ? 'true' : 'false') +
+          '">' +
+          '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.2" cy="5.2" r="2.4"/><path d="M1.8 13.5c.4-2.2 2.2-3.5 4.4-3.5s4 1.3 4.4 3.5"/><path d="M11.8 4.2a2 2 0 0 1 0 3.8M13.5 13.2c.3-1.4-.5-2.6-1.8-3.1"/></svg>' +
+          '<span>' + escHtml(s.tabAccounts) + '</span></button>' +
           '<button type="button" class="ag-s-nav-tab" role="tab" data-section-tab="prompts" aria-selected="' +
           (curSection === 'prompts' ? 'true' : 'false') +
           '">' +
@@ -2330,23 +2472,48 @@
           '" ' +
           (mods.theme !== false ? 'checked' : '') +
           ' />' +
-          '</div></div>' +
-          '<div class="ag-s-row"><div class="ag-s-row-main">' +
-          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-i18n">' +
-          escHtml(s.modI18n) +
-          '</label><div class="ag-s-row-desc">' +
-          escHtml(s.modI18nDesc) +
-          '</div></div>' +
-          '<input id="ag-s-sw-i18n" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-mod="i18n" aria-label="' +
-          escHtml(s.modI18n) +
-          '" ' +
-          (mods.i18n !== false ? 'checked' : '') +
-          ' />' +
           '</div>' +
           '<div class="ag-s-subrow">' +
-          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-compact" style="cursor:pointer">' +
+          escHtml(s.compactTypoLbl) +
+          '</label><div class="ag-s-sub-desc">' +
+          escHtml(s.compactTypoDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-compact" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-flag="compactTypography" ' +
+          (cfg.compactTypography !== false ? 'checked' : '') +
+          ' /></div>' +
+          '<div class="ag-s-subrow">' +
+          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-ovquota" style="cursor:pointer">' +
+          escHtml(s.overviewQuotaLbl) +
+          '</label><div class="ag-s-sub-desc">' +
+          escHtml(s.overviewQuotaDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-ovquota" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-flag="overviewQuota" ' +
+          (cfg.overviewQuota !== false ? 'checked' : '') +
+          ' /></div>' +
+          '<div class="ag-s-subrow">' +
+          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-show-claude" style="cursor:pointer">' +
+          escHtml(s.showClaudeQuotaLbl) +
+          '</label><div class="ag-s-sub-desc">' +
+          escHtml(s.showClaudeQuotaDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-show-claude" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-flag="showClaudeQuota" ' +
+          (cfg.showClaudeQuota ? 'checked' : '') +
+          ' /></div>' +
+          '<div class="ag-s-subrow">' +
+          '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-ovprogress" style="cursor:pointer">' +
+          escHtml(s.overviewProgressLbl) +
+          '</label><div class="ag-s-sub-desc">' +
+          escHtml(s.overviewProgressDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-ovprogress" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-flag="overviewProgress" ' +
+          (cfg.overviewProgress !== false ? 'checked' : '') +
+          ' /></div>' +
+          '</div>' +
+          '<div class="ag-s-row"><div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><div class="ag-s-row-label">' +
           escHtml(s.localeLbl) +
-          '</div><div class="ag-s-sub-desc">' +
+          '</div><div class="ag-s-row-desc">' +
           escHtml(s.localeDesc) +
           '</div></div>' +
           '<div class="ag-s-seg" role="group" aria-label="' +
@@ -2375,7 +2542,7 @@
           '</div>' +
           '</div>' +
           '<div id="ag-s-sub-ai-lang" class="ag-s-subrow"' +
-          (mods.i18n !== false && activeLoc !== 'en' ? '' : ' hidden') +
+          (activeLoc !== 'en' ? '' : ' hidden') +
           '>' +
           '<div class="ag-s-row-info"><label class="ag-s-sub-label" for="ag-s-sw-ai-lang" style="cursor:pointer">' +
           escHtml(s.syncAiLangLbl) +
@@ -2456,10 +2623,46 @@
           '</div>' +
           '</div>' +
           '</div>' +
+          '<div class="ag-s-row"><div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><div class="ag-s-row-label">' +
+          escHtml(s.topbarMetricLbl) +
+          '</div><div class="ag-s-row-desc">' +
+          escHtml(s.topbarMetricDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group" aria-label="' +
+          escHtml(s.topbarMetricLbl) +
+          '">' +
+          [
+            ['quota', s.topbarOptQuota],
+            ['sessionTokens', s.topbarOptSessionTok],
+            ['todayTokens', s.topbarOptTodayTok],
+            ['monthTokens', s.topbarOptMonthTok],
+            ['monthCost', s.topbarOptMonthCost],
+            ['icon', s.topbarOptIcon]
+          ]
+            .map(
+              ([val, lbl]) =>
+                '<button type="button" class="ag-s-seg-btn" data-seg="topbarUsageMetric" data-val="' +
+                val +
+                '" aria-pressed="' +
+                ((cfg.topbarUsageMetric || 'quota') === val ? 'true' : 'false') +
+                '">' +
+                escHtml(lbl) +
+                '</button>'
+            )
+            .join('') +
+          '</div>' +
+          '</div></div>' +
           '</div>' +
           '</div>' +
           '</div>' +
-          // ==================== TAB 2: Prompts & Hooks ====================
+          // ==================== TAB 2: Accounts ====================
+          '<div class="ag-s-tab-panel" data-settings-panel="accounts"' +
+          (curSection === 'accounts' ? '' : ' hidden') +
+          '>' +
+          '<div id="ag-accounts-pane" class="ag-s-accounts-host"></div>' +
+          '</div>' +
+          // ==================== TAB 3: Prompts & Hooks ====================
           '<div class="ag-s-tab-panel" data-settings-panel="prompts"' +
           (curSection === 'prompts' ? '' : ' hidden') +
           '>' +
@@ -2654,58 +2857,6 @@
           '</div>' +
           '</div>' +
           '</div>' +
-          // Subagent Allowed-Model Whitelist & Routing Card
-          '<div>' +
-          '<div class="ag-s-section-head">' +
-          '<span class="ag-s-section-title">' +
-          escHtml(s.secSubagentRouting) +
-          '</span>' +
-          '</div>' +
-          '<div class="ag-s-card">' +
-          '<div class="ag-s-row">' +
-          '<div class="ag-s-row-main">' +
-          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-subagent-routing">' +
-          escHtml(s.modSubagentRouting) +
-          '</label><div class="ag-s-row-desc">' +
-          escHtml(s.modSubagentRoutingDesc) +
-          '</div></div>' +
-          '<input id="ag-s-sw-subagent-routing" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="subagentRouting.enabled" aria-label="' +
-          escHtml(s.modSubagentRouting) +
-          '" ' +
-          (sr.enabled ? 'checked' : '') +
-          ' />' +
-          '</div>' +
-          '<div id="ag-s-sub-subagent-routing" class="ag-s-subrow-stack"' +
-          (sr.enabled ? '' : ' hidden') +
-          '>' +
-          '<div id="ag-s-subagent-list" class="ag-s-submodel-list">' +
-          subModelsHtml +
-          '</div>' +
-          '<div class="ag-s-submodel-add-bar">' +
-          '<button type="button" id="ag-s-subagent-pick-btn" class="ag-s-btn-secondary" data-model-picker-target="subagentRouting.add" aria-haspopup="menu" aria-expanded="false">' +
-          escHtml(s.subagentPickBtn) +
-          '</button>' +
-          '<div class="ag-s-custom-model-form">' +
-          '<input type="text" id="ag-s-subagent-custom-input" class="ag-s-text-input" placeholder="' +
-          escHtml(s.subagentCustomPh) +
-          '" autocomplete="off" spellcheck="false" />' +
-          '<select id="ag-s-subagent-custom-tier" class="ag-s-select" aria-label="' +
-          escHtml(s.tierAuto) +
-          '">' +
-          '<option value="">' + escHtml(s.tierAuto) + '</option>' +
-          '<option value="fast">' + escHtml(s.tierFast) + '</option>' +
-          '<option value="balanced">' + escHtml(s.tierBalanced) + '</option>' +
-          '<option value="strong">' + escHtml(s.tierStrong) + '</option>' +
-          '</select>' +
-          '<button type="button" id="ag-s-subagent-custom-add" class="ag-s-btn-primary">' +
-          escHtml(s.subagentAddBtn) +
-          '</button>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
-          '</div>' +
           '</div>' +
           // ==================== TAB 3: Relay & Recovery ====================
           '<div class="ag-s-tab-panel" data-settings-panel="flow"' +
@@ -2818,6 +2969,79 @@
           '</button>' +
           '<input id="ag-s-sw-flow-remap" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.remapEnabled" ' + (fl.remapEnabled ? 'checked' : '') + ' />' +
           '</div></div></div>' +
+          '</div>' +
+          '</div>' +
+          '<div>' +
+          '<div class="ag-s-section-head"><span class="ag-s-section-title">' +
+          escHtml(s.secFlowCompact) +
+          '</span></div>' +
+          '<div class="ag-s-card">' +
+          '<div class="ag-s-row"><div class="ag-s-row-main">' +
+          '<div class="ag-s-row-info"><label class="ag-s-row-label" for="ag-s-sw-flow-compact">' +
+          escHtml(s.flowCompactLbl) +
+          '</label><div class="ag-s-row-desc">' +
+          escHtml(s.flowCompactDesc) +
+          '</div></div>' +
+          '<input id="ag-s-sw-flow-compact" type="checkbox" switch role="switch" class="ag-s-switch" data-bind-nested="flow.compactEnabled" ' +
+          (fl.compactEnabled ? 'checked' : '') +
+          ' />' +
+          '</div>' +
+          '<div id="ag-s-sub-flow-compact" class="ag-s-subrow-stack"' +
+          (fl.compactEnabled ? '' : ' hidden') +
+          '>' +
+          '<div id="ag-s-compact-asar-warn" class="ag-s-warn-note"' +
+          (flAsar.patched ? ' hidden' : '') +
+          '>' +
+          escHtml(s.flowCompactNeedAsar) +
+          '</div>' +
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.flowCompactThreshLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.flowCompactThreshDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group">' +
+          [60, 70, 80]
+            .map(
+              (pct) =>
+                '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.compactThresholdPct" data-val="' +
+                pct +
+                '" aria-pressed="' +
+                (Number(fl.compactThresholdPct || 70) === pct ? 'true' : 'false') +
+                '">' +
+                (pct === 70 ? pct + '% (' + escHtml(s.recommendedBadge) + ')' : pct + '%') +
+                '</button>'
+            )
+            .join('') +
+          '</div>' +
+          '</div>' +
+          '<div class="ag-s-sub-head">' +
+          '<div class="ag-s-row-info"><div class="ag-s-sub-label">' +
+          escHtml(s.flowCompactTailLbl) +
+          '</div><div class="ag-s-sub-desc">' +
+          escHtml(s.flowCompactTailDesc) +
+          '</div></div>' +
+          '<div class="ag-s-seg" role="group">' +
+          [
+            [10000, '10k'],
+            [20000, '20k'],
+            [40000, '40k']
+          ]
+            .map(
+              ([val, lbl]) =>
+                '<button type="button" class="ag-s-seg-btn" data-nested-seg="flow.compactKeepTailTokens" data-val="' +
+                val +
+                '" aria-pressed="' +
+                (Number(fl.compactKeepTailTokens || 20000) === val ? 'true' : 'false') +
+                '">' +
+                (val === 20000 ? escHtml(lbl + ' (' + s.recommendedBadge + ')') : escHtml(lbl)) +
+                '</button>'
+            )
+            .join('') +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          '</div>' +
           '</div>' +
           '</div>' +
           '</div>' +
@@ -3015,6 +3239,13 @@
           '</div>';
 
         if (pane.setAttribute) pane.setAttribute('data-ag-rendered-locale', activeLoc);
+        if (typeof window.__ag_on_accounts_tab_active === 'function') {
+          try {
+            window.__ag_on_accounts_tab_active(Boolean(window.__ag_settings_tab_open && curSection === 'accounts'), {
+              forceMount: curSection === 'accounts'
+            });
+          } catch {}
+        }
         const chipsMounted = document.getElementById('ag-s-ssh-chips');
         if (chipsMounted) chipsMounted.__ag_html = chipsHtml;
         const subListMounted = document.getElementById('ag-s-subagent-list');
@@ -3073,10 +3304,29 @@
           });
           syncStatusPoller();
         } else {
+          if (typeof window.__ag_on_accounts_tab_active === 'function') {
+            try { window.__ag_on_accounts_tab_active(false); } catch {}
+          }
           hideModelMenus({ restoreFocus: false });
           syncStatusPoller();
         }
       }
+      window.__ag_set_codex_settings_open = setCodexTabOpen;
+      window.__ag_open_settings_tab = (tabKey) => {
+        const nextTab = SECTION_TAB_KEYS.includes(tabKey) ? tabKey : 'appearance';
+        setActiveSectionTab(nextTab);
+        const activate = () => {
+          tryMountInSettingsModal();
+          setCodexTabOpen(true);
+        };
+        if (document.querySelector('[data-testid="settings-sidebar"]')) {
+          activate();
+        } else {
+          const settingsBtn = document.querySelector('[data-testid="settings-button"]');
+          if (settingsBtn) settingsBtn.click();
+          setTimeout(activate, 180);
+        }
+      };
 
       function bindPaneEvents(pane) {
         listen(pane, 'change', (ev) => {
@@ -3212,6 +3462,8 @@
             if (parts.length === 2 && rawVal !== null && rawVal !== '') {
               const val =
                 spec === 'flow.maxContinuations' ||
+                spec === 'flow.compactThresholdPct' ||
+                spec === 'flow.compactKeepTailTokens' ||
                 spec === 'autoTitle.turnInterval' ||
                 spec === 'autoTitle.minIntervalMin'
                   ? Number(rawVal)
@@ -3352,7 +3604,22 @@
             autoTitleBusy = true;
             autoTitleStatusMsg = '';
             renderPane();
-            void callDaemonBinding('__agRefreshConversationTitle', {}, 20000).then((res) => {
+            let activeCid = '';
+            try {
+              if (typeof window.__ag_get_watched_cascade_ids === 'function') {
+                const list = window.__ag_get_watched_cascade_ids();
+                if (Array.isArray(list) && list[0]) activeCid = String(list[0]).trim();
+              }
+              if (!activeCid) {
+                const m = String(window.location?.pathname || '').match(/\/c\/([0-9a-f-]{36})/i);
+                if (m && m[1]) activeCid = m[1];
+              }
+              if (!activeCid) {
+                const cv = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
+                if (cv) activeCid = String(cv.getAttribute('data-cascade-id') || '').trim();
+              }
+            } catch {}
+            void callDaemonBinding('__agRefreshConversationTitle', { cascadeId: activeCid }, 40000).then((res) => {
               if (disposed) return;
               autoTitleBusy = false;
               if (res && res.ok && res.title) {
@@ -3415,7 +3682,7 @@
 
       function isProtectedSettingsChild(node) {
         if (!node || node.nodeType !== 1) return true;
-        if (node.id === 'ag-settings-pane' || node.tagName === 'STYLE' || node.tagName === 'BUTTON') return true;
+        if (node.id === 'ag-settings-pane' || node.id === 'ag-accounts-pane' || node.tagName === 'STYLE' || node.tagName === 'BUTTON') return true;
         const tid = String(node.getAttribute ? node.getAttribute('data-testid') || '' : '');
         const aria = String(node.getAttribute ? node.getAttribute('aria-label') || '' : '');
         const cls = String(node.className || '');
@@ -3622,6 +3889,9 @@
             syncStatusPoller();
           }
         }
+        if (typeof window.__ag_sync_accounts_dialog === 'function') {
+          try { window.__ag_sync_accounts_dialog(); } catch {}
+        }
       }
 
       function scheduleScan(delayMs) {
@@ -3707,6 +3977,7 @@
           // so the next bundle seamlessly re-binds in place with zero visual flicker.
           // Full teardown when disabled is handled by 00-head.js (!ENABLED) and mountCodexSettingsUi().
           try { delete window.__ag_on_settings_state; } catch { window.__ag_on_settings_state = null; }
+          try { delete window.__ag_open_settings_tab; } catch { window.__ag_open_settings_tab = null; }
         });
       }
     })();

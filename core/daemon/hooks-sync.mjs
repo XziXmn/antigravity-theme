@@ -221,13 +221,7 @@ export function syncSystemPromptAndHooks(
         (k) => typeof flow[k] === 'string' && flow[k].trim().length > 0
       )
   );
-  const hasSubagentRouting = Boolean(
-    subagentRouting &&
-      typeof subagentRouting === 'object' &&
-      subagentRouting.enabled &&
-      Array.isArray(subagentRouting.allowedModels) &&
-      subagentRouting.allowedModels.length > 0
-  );
+  const hasSubagentRouting = false; // Temporarily disabled per UX/stability decision
   const spFileActive = Boolean(enabled && sp.enabled && spTextTrimmed);
   const spHookActive = Boolean(enabled && ((sp.enabled && (spTextTrimmed || hasModeSeat)) || hasSubagentRouting));
   const aaActive = Boolean(enabled && aa.enabled);

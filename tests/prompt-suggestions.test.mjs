@@ -254,3 +254,37 @@ test('model switch serializes teardown before spawning new model and disabling d
   await wait(40);
   assert.equal(spawned.length, 2, 'disabling promptSuggestions during rotation must cancel pending spawn');
 });
+
+test('runUtilityPrompt executes isolated one-shot call and never reuses promptSuggestions warm worker', async () => {
+  const spawned = [];
+  let execCalls = 0;
+  const engine = createPromptSuggestionEngine({
+    getConfig: () => ({ enabled: true, promptSuggestionModel: 'gemini-3.8-flash-low', modules: { promptSuggestions: true } }),
+    resolveBin: () => '/usr/local/bin/agy',
+    spawnImpl: (bin, args) => {
+      const c = createMockChild(bin, args);
+      spawned.push(c);
+      return c;
+    },
+    execFileImpl: async (_bin, args) => {
+      execCalls += 1;
+      assert.ok(args.includes('--print'));
+      return { stdout: '重构账号管理与预测卡片\n' };
+    }
+  });
+
+  engine.syncState();
+  assert.equal(spawned.length, 1);
+  // Warm up the persistent worker
+  spawned[0].stdout.emit('data', Buffer.from(JSON.stringify({ event: 'init' }) + '\n'));
+  spawned[0].stdout.emit('data', Buffer.from(JSON.stringify({ event: 'result', result: { response: 'OK' } }) + '\n'));
+  await wait(20);
+  const writesBefore = spawned[0].written.length;
+
+  const out = await engine.runUtilityPrompt('总结会话标题');
+  assert.equal(out, '重构账号管理与预测卡片');
+  assert.equal(execCalls, 1);
+  assert.equal(spawned[0].written.length, writesBefore, 'runUtilityPrompt must not write to persistent suggestion worker');
+  engine.stop();
+  spawned[0].finishExit(0, 'SIGTERM');
+});

@@ -3,9 +3,12 @@
  * antigravity-codex-theme · CDP Theme, Localization & Live Telemetry Daemon (core/daemon.mjs)
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
 import {
+  ROOT_DIR,
   USER_DIR,
   parseDaemonCliArgs,
   createBundleController
@@ -34,6 +37,10 @@ const protoMod = await loadOptionalModule('daemon/protobuf.mjs');
 const lsLogMod = await loadOptionalModule('daemon/ls-log.mjs');
 const lsClientMod = await loadOptionalModule('daemon/ls-client.mjs');
 const titleUpdaterMod = await loadOptionalModule('daemon/title-updater.mjs');
+const credVaultMod = await loadOptionalModule('daemon/credential-vault.mjs');
+const accountsMod = await loadOptionalModule('daemon/accounts.mjs');
+const usageAnalyticsMod = await loadOptionalModule('daemon/usage-analytics.mjs');
+const cdpLaunchMod = await loadOptionalModule('installer/cdp-launch.mjs');
 const sqliteMetricsMod = await loadOptionalModule('daemon/sqlite-metrics.mjs');
 const promptSuggestMod = await loadOptionalModule('daemon/prompt-suggest.mjs');
 const flowSessionsMod = await loadOptionalModule('flow/sessions.mjs');
@@ -117,6 +124,67 @@ const flowSessionStore = flowSessionsMod
 
 const lsClient = lsClientMod ? lsClientMod.createLanguageServerClient() : null;
 
+function openGoogleOAuthUrl(rawUrl) {
+  const url = String(rawUrl || '').trim();
+  if (!url.startsWith('https://accounts.google.com/')) return;
+  if (process.platform === 'win32') {
+    const escaped = url.replace(/'/g, "''");
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', `Start-Process -FilePath '${escaped}'`],
+      { windowsHide: true },
+      () => {}
+    );
+  } else if (process.platform === 'darwin') {
+    execFile('open', [url], () => {});
+  } else {
+    execFile('xdg-open', [url], () => {});
+  }
+}
+
+const credVault = credVaultMod ? credVaultMod.createCredentialVault() : null;
+const accountsManager =
+  accountsMod && credVault && !cliOpts.runOnce
+    ? accountsMod.createAccountsManager({
+        userDir: USER_DIR,
+        vault: credVault,
+        lsClient,
+        getDatabaseSync: () => DatabaseSync,
+        relaunchHost:
+          cdpLaunchMod && typeof cdpLaunchMod.relaunchAntigravityWithCdp === 'function'
+            ? async (opts = {}) => {
+                const ch = bundleCtrl.getState().activeConfig?.channel || 'auto';
+                const res = await cdpLaunchMod.relaunchAntigravityWithCdp({
+                  channel: ch,
+                  force: Boolean(opts?.force),
+                  targetDir: ROOT_DIR,
+                  onboardingSync: opts?.onboardingSync || null,
+                  detachedRelaunch: process.platform === 'win32',
+                  detectEnvironment: cdpLaunchMod.detectEnvironment,
+                  inspectLiveWindow: cdpLaunchMod.inspectLiveWindow
+                });
+                if (res?.exitCode !== 0 && res?.payload?.ok === false) {
+                  return { ok: false, reason: res.payload.reason || res.payload.hint || 'relaunch_failed' };
+                }
+                return res?.payload || { ok: true };
+              }
+            : null,
+        openExternalUrl: openGoogleOAuthUrl,
+        log: (msg) => console.log(msg)
+      })
+    : null;
+
+const usageAnalytics =
+  usageAnalyticsMod && !cliOpts.runOnce
+    ? usageAnalyticsMod.createUsageAnalytics({
+        getDatabaseSync: () => DatabaseSync,
+        conversationsDir:
+          bundleCtrl.getState().activeEndpoints?.[0]?.conversationsDir ||
+          path.join(os.homedir(), '.gemini', 'antigravity', 'conversations'),
+        userDir: USER_DIR
+      })
+    : null;
+
 let flowProxyCtrl = null;
 const autoTitleUpdater =
   titleUpdaterMod && lsClient && !cliOpts.runOnce
@@ -125,7 +193,13 @@ const autoTitleUpdater =
         lsClient,
         generateTitle: async (prompt) => {
           if (flowProxyCtrl && typeof flowProxyCtrl.callUtilityModel === 'function') {
-            return await flowProxyCtrl.callUtilityModel(prompt);
+            try {
+              const out = await flowProxyCtrl.callUtilityModel(prompt);
+              if (out) return out;
+            } catch {}
+          }
+          if (promptSuggester && typeof promptSuggester.runUtilityPrompt === 'function') {
+            return await promptSuggester.runUtilityPrompt(prompt);
           }
           return '';
         },
@@ -138,9 +212,23 @@ flowProxyCtrl =
     ? flowProxyMod.createFlowProxyController({
         getConfig: () => bundleCtrl.getState().activeConfig?.flow || {},
         getSystemPrompt: () => bundleCtrl.getState().activeConfig?.customSystemPrompt || null,
-        getSubagentRouting: () => bundleCtrl.getState().activeConfig?.subagentRouting || null,
+        getSubagentRouting: () => ({ enabled: false, allowedModels: [] }),
         getActiveMainSessions: () => activeMainSessionIds,
+        resolveCascadeId: (id) =>
+          typeof metricsReader.resolveCascadeId === 'function'
+            ? metricsReader.resolveCascadeId(id, {
+                conversationsDir:
+                  bundleCtrl.getState().activeEndpoints?.[0]?.conversationsDir ||
+                  path.join(os.homedir(), '.gemini', 'antigravity', 'conversations'),
+                candidateCascadeIds: activeMainSessionIds
+              })
+            : id,
+        getContextWindow: (cid) =>
+          typeof metricsReader.getSessionContextLimit === 'function'
+            ? metricsReader.getSessionContextLimit(cid)
+            : 0,
         sessionStore: flowSessionStore,
+        compactionDir: path.join(USER_DIR, 'flow-compactions'),
         onEvent: (ev) => {
           if (typeof flowEventSink === 'function') {
             try {
@@ -222,8 +310,31 @@ const flowController =
             defaultMode: flowCfg.defaultMode || 'default',
             proxy,
             session,
-            asar
+            asar,
+            compaction: flowProxyCtrl ? flowProxyCtrl.getCompactionStatus(cascadeId) : null,
+            compactConfig: {
+              enabled: Boolean(flowCfg.compactEnabled),
+              thresholdPct: Number(flowCfg.compactThresholdPct || 70),
+              keepTailTokens: Number(flowCfg.compactKeepTailTokens || 20000)
+            }
           };
+        },
+        compactNow: async ({ cascadeId = '' } = {}) => {
+          if (!flowProxyCtrl || typeof flowProxyCtrl.compactNow !== 'function') {
+            return { ok: false, error: 'flow_proxy_unavailable' };
+          }
+          return await flowProxyCtrl.compactNow(cascadeId);
+        },
+        clearCompaction: ({ cascadeId = '' } = {}) => {
+          if (!flowProxyCtrl || typeof flowProxyCtrl.clearCompaction !== 'function') {
+            return { ok: false, error: 'flow_proxy_unavailable' };
+          }
+          return flowProxyCtrl.clearCompaction(cascadeId);
+        },
+        getCompactionStatus: (cascadeId = '') => {
+          return flowProxyCtrl && typeof flowProxyCtrl.getCompactionStatus === 'function'
+            ? flowProxyCtrl.getCompactionStatus(cascadeId)
+            : { active: false, count: 0, inFlight: false, hasSnapshot: false };
         },
         setSessionMode: ({ cascadeId = '', paneKey = 'main', mode, seatOverride } = {}) => {
           return flowSessionStore.setSessionMode({ cascadeId, paneKey, mode, seatOverride });
@@ -296,6 +407,8 @@ const cdpManager = createCdpManager({
   flowController,
   lsClient,
   autoTitleUpdater,
+  accountsManager,
+  usageAnalytics,
   hasSqlite: () => Boolean(DatabaseSync && sqliteMetricsMod),
   runOnce: cliOpts.runOnce,
   safeMode: cliOpts.safeMode,

@@ -24,7 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { findRunningDaemonPids } from '../shared.mjs';
+import { findRunningDaemonPids, getDaemonPidCandidateDirs, isPidAlive } from '../shared.mjs';
 
 export const WATCHDOG_EXTRA_PATTERNS = Object.freeze([
   'theme-patch',
@@ -67,9 +67,36 @@ export function isWatchdogProxyEnabled({ homeDir = os.homedir(), readFileImpl = 
   return true;
 }
 
+export function readAlivePidFromFiles({
+  platform = process.platform,
+  pidDirs = null,
+  excludePids = [process.pid],
+  isPidAliveImpl = isPidAlive,
+  readFileImpl = fs.readFileSync
+} = {}) {
+  const dirs = Array.isArray(pidDirs) ? pidDirs : getDaemonPidCandidateDirs({ platform });
+  const exclude = new Set((Array.isArray(excludePids) ? excludePids : []).map(Number));
+  const alive = [];
+  for (const dir of dirs) {
+    try {
+      if (!dir || !fs.existsSync(dir)) continue;
+      for (const f of fs.readdirSync(dir)) {
+        if (!/^ag-(?:codex|theme)-daemon-.*\.pid$/i.test(f)) continue;
+        try {
+          const pid = parseInt(String(readFileImpl(path.join(dir, f), 'utf8')).trim(), 10);
+          if (Number.isInteger(pid) && pid > 0 && !exclude.has(pid) && isPidAliveImpl(pid) && !alive.includes(pid)) {
+            alive.push(pid);
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  return alive;
+}
+
 export function probeTcpEndpoint(
   port,
-  { host = '127.0.0.1', timeoutMs = 700, connectImpl = null } = {}
+  { host = '127.0.0.1', timeoutMs = 1500, connectImpl = null } = {}
 ) {
   return new Promise((resolve) => {
     let settled = false;
@@ -160,11 +187,12 @@ export async function runFlowWatchdog({
   homeDir = os.homedir(),
   platform = process.platform,
   excludePids = [process.pid],
-  findDaemonPidsImpl = findRunningDaemonPids,
+  findDaemonPidsImpl = null,
   probeImpl = probeTcpEndpoint,
   spawnImpl = spawn,
   port = null,
   flowEnabled = null,
+  doubleCheckMs = 0,
   settleMs = 0
 } = {}) {
   const resolvedPort =
@@ -174,14 +202,29 @@ export async function runFlowWatchdog({
   const relayEnabled = flowEnabled === null ? isWatchdogProxyEnabled({ homeDir }) : Boolean(flowEnabled);
 
   let daemonPids = [];
-  try {
-    daemonPids = findDaemonPidsImpl({
-      platform,
-      excludePids,
-      extraPatterns: WATCHDOG_EXTRA_PATTERNS
-    }) || [];
-  } catch {
-    daemonPids = [];
+  if (typeof findDaemonPidsImpl === 'function') {
+    try {
+      daemonPids = findDaemonPidsImpl({
+        platform,
+        excludePids,
+        extraPatterns: WATCHDOG_EXTRA_PATTERNS
+      }) || [];
+    } catch {
+      daemonPids = [];
+    }
+  } else {
+    daemonPids = readAlivePidFromFiles({ platform, excludePids });
+    if (daemonPids.length === 0) {
+      try {
+        daemonPids = findRunningDaemonPids({
+          platform,
+          excludePids,
+          extraPatterns: WATCHDOG_EXTRA_PATTERNS
+        }) || [];
+      } catch {
+        daemonPids = [];
+      }
+    }
   }
 
   let proxyListening = false;
@@ -191,11 +234,30 @@ export async function runFlowWatchdog({
     proxyListening = false;
   }
 
-  const decision = evaluateWatchdogDecision({
+  let decision = evaluateWatchdogDecision({
     aliveDaemonPids: daemonPids,
     proxyListening,
     flowEnabled: relayEnabled
   });
+
+  if (decision.action === 'spawn' && Number(doubleCheckMs) > 0) {
+    await wait(Number(doubleCheckMs));
+    let recovered = false;
+    try {
+      recovered = await probeImpl(resolvedPort);
+    } catch {
+      recovered = false;
+    }
+    if (recovered) {
+      decision = {
+        proxyListening: true,
+        daemonPids,
+        flowEnabled: relayEnabled,
+        action: 'noop',
+        reason: 'proxy-recovered'
+      };
+    }
+  }
 
   const out = {
     ...decision,
@@ -239,6 +301,7 @@ export async function main(argv = process.argv.slice(2)) {
   const entryArg = argv.find((a) => a.startsWith('--entry='));
   const result = await runFlowWatchdog({
     entryPath: entryArg ? entryArg.slice('--entry='.length) : undefined,
+    doubleCheckMs: 600,
     settleMs: Number.isFinite(settleMs) ? settleMs : 0
   });
   if (!quiet) console.log(JSON.stringify(result));

@@ -12,7 +12,25 @@
     window.__ag_theme_mode_observer = null;
   }
 
+  function syncUiStyleAttrs() {
+    const prefs = window.__ag_ui_prefs && typeof window.__ag_ui_prefs === 'object' ? window.__ag_ui_prefs : null;
+    const cfg = Object.assign({}, boot.userConfig || boot || {}, prefs || {});
+    const compact = cfg.compactTypography !== false;
+    const docEl = document.documentElement;
+    if (!docEl) return;
+    docEl.removeAttribute('data-ag-ui-style');
+    docEl.removeAttribute('data-ag-user-bubble');
+    docEl.style?.removeProperty?.('--ag-bubble-tint');
+    if (MODULES.theme === false) {
+      docEl.removeAttribute('data-ag-compact');
+      return;
+    }
+    if (compact) docEl.setAttribute('data-ag-compact', '1');
+    else docEl.removeAttribute('data-ag-compact');
+  }
+
   function syncThemePreset() {
+    syncUiStyleAttrs();
     if (MODULES.theme === false) {
       document.documentElement.removeAttribute('data-ag-preset');
       document.documentElement.removeAttribute('data-ag-theme-mode');

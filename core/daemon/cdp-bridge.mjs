@@ -350,6 +350,8 @@ export function createCdpManager({
   flowController = null,
   lsClient = null,
   autoTitleUpdater = null,
+  accountsManager = null,
+  usageAnalytics = null,
   hasSqlite,
   runOnce = false,
   safeMode = false,
@@ -713,6 +715,20 @@ export function createCdpManager({
               returnByValue: false
             });
             pushedSessions.set(cid, { hash: sessionKey, pendingActive: nextPendingActive });
+            if (
+              !isRemote &&
+              payload.hasData &&
+              activeConfig.autoTitle?.enabled &&
+              autoTitleUpdater &&
+              typeof autoTitleUpdater.observeTurnCount === 'function'
+            ) {
+              const turnCnt = Array.isArray(payload.turns) ? payload.turns.length : 0;
+              const snippets =
+                typeof metricsReader.extractTitleSnippets === 'function'
+                  ? metricsReader.extractTitleSnippets(cid, endpoint.conversationsDir, 4)
+                  : [];
+              autoTitleUpdater.observeTurnCount({ cascadeId: cid, turnCount: turnCnt, snippets });
+            }
           }
         };
 
@@ -803,8 +819,11 @@ export function createCdpManager({
             await send('Runtime.addBinding', { name: '__agFlowSetSessionMode' });
             await send('Runtime.addBinding', { name: '__agFlowAsarAction' });
             await send('Runtime.addBinding', { name: '__agFlowScanHotWords' });
+            await send('Runtime.addBinding', { name: '__agFlowCompactAction' });
             await send('Runtime.addBinding', { name: '__agGetQuotaStatus' });
             await send('Runtime.addBinding', { name: '__agRefreshConversationTitle' });
+            await send('Runtime.addBinding', { name: '__agAccountsAction' });
+            await send('Runtime.addBinding', { name: '__agUsageAnalytics' });
           }
           await updateNewDocScript();
           const ok = await inject();
@@ -821,7 +840,7 @@ export function createCdpManager({
           await syncMetricsForSession(true);
           if (!isSwarmIframe && lsClient && typeof lsClient.getQuotaStatus === 'function') {
             void lsClient
-              .getQuotaStatus({ force: false })
+              .getQuotaStatus({ force: true })
               .then((q) => {
                 if (!q || ws.readyState !== WebSocket.OPEN) return;
                 const payloadJson = JSON.stringify(q).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
@@ -1114,6 +1133,42 @@ export function createCdpManager({
               }
               return;
             }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agFlowCompactAction') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              const action = String(req?.action || 'status').trim();
+              const cid = String(req?.cascadeId || '').trim() || lastFocusedCascadeId || activeCascadeIds[0] || '';
+              void (async () => {
+                let out = { ok: false, error: 'flow_module_unavailable' };
+                try {
+                  if (!flowController) {
+                    out = { ok: false, error: 'flow_module_unavailable' };
+                  } else if (action === 'compact') {
+                    out = await flowController.compactNow({ cascadeId: cid });
+                  } else if (action === 'revert') {
+                    out = flowController.clearCompaction({ cascadeId: cid });
+                  } else {
+                    out = { ok: true, status: flowController.getCompactionStatus(cid) };
+                  }
+                } catch (err) {
+                  out = { ok: false, error: err?.message || String(err || 'compact_action_failed') };
+                }
+                if (ws.readyState === WebSocket.OPEN) {
+                  const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                  try {
+                    await send('Runtime.evaluate', {
+                      expression: `if (typeof window.__ag_on_flow_compact_response === 'function') { window.__ag_on_flow_compact_response(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                      returnByValue: false
+                    });
+                  } catch {}
+                }
+              })();
+              return;
+            }
             if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agGetQuotaStatus') {
               if (isSwarmIframe || !hostConfirmed) return;
               let req = {};
@@ -1143,6 +1198,67 @@ export function createCdpManager({
               })();
               return;
             }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agAccountsAction') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              void (async () => {
+                let out = { ok: false, error: 'accounts manager unavailable' };
+                if (accountsManager && typeof accountsManager.dispatchAction === 'function') {
+                  try {
+                    out = await accountsManager.dispatchAction(req);
+                  } catch (err) {
+                    out = { ok: false, error: err?.message || String(err || 'accounts action failed') };
+                  }
+                }
+                if (ws.readyState === WebSocket.OPEN) {
+                  const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                  try {
+                    await send('Runtime.evaluate', {
+                      expression: `if (typeof window.__ag_on_accounts_response === 'function') { window.__ag_on_accounts_response(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                      returnByValue: false
+                    });
+                  } catch {}
+                }
+              })();
+              return;
+            }
+            if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agUsageAnalytics') {
+              if (isSwarmIframe || !hostConfirmed) return;
+              let req = {};
+              try {
+                req = msg.params.payload ? JSON.parse(String(msg.params.payload)) : {};
+              } catch {}
+              const reqId = String(req?.reqId || '');
+              void (async () => {
+                let out = { ok: false, error: 'usage analytics unavailable' };
+                if (usageAnalytics && typeof usageAnalytics.getDashboardData === 'function') {
+                  try {
+                    out = usageAnalytics.getDashboardData({
+                      range: req?.range || 'month',
+                      account: req?.account || 'all',
+                      heatmapDays: req?.heatmapDays || 365,
+                      force: Boolean(req?.force)
+                    });
+                  } catch (err) {
+                    out = { ok: false, error: err?.message || String(err || 'usage analytics failed') };
+                  }
+                }
+                if (ws.readyState === WebSocket.OPEN) {
+                  const payloadJson = JSON.stringify(out).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+                  try {
+                    await send('Runtime.evaluate', {
+                      expression: `if (typeof window.__ag_on_usage_analytics === 'function') { window.__ag_on_usage_analytics(${JSON.stringify(reqId)}, ${payloadJson}); }`,
+                      returnByValue: false
+                    });
+                  } catch {}
+                }
+              })();
+              return;
+            }
             if (msg.method === 'Runtime.bindingCalled' && msg.params?.name === '__agRefreshConversationTitle') {
               if (isSwarmIframe || !hostConfirmed) return;
               let req = {};
@@ -1155,6 +1271,21 @@ export function createCdpManager({
                 let out = { ok: false, error: 'auto-title unavailable' };
                 if (autoTitleUpdater && typeof autoTitleUpdater.maybeRefreshTitle === 'function') {
                   try {
+                    if (cid && typeof metricsReader.extractTitleSnippets === 'function' && typeof autoTitleUpdater.recordSnippet === 'function') {
+                      let snippets = metricsReader.extractTitleSnippets(cid, endpoint.conversationsDir, 4);
+                      if (!snippets || snippets.length === 0) {
+                        const endpoints = bundleCtrl.getState().activeConfig?.endpoints || [];
+                        for (const ep of endpoints) {
+                          if (!ep?.conversationsDir || ep.conversationsDir === endpoint.conversationsDir) continue;
+                          const extra = metricsReader.extractTitleSnippets(cid, ep.conversationsDir, 4);
+                          if (extra && extra.length > 0) {
+                            snippets = extra;
+                            break;
+                          }
+                        }
+                      }
+                      for (const sn of snippets || []) autoTitleUpdater.recordSnippet(cid, sn);
+                    }
                     out = await autoTitleUpdater.maybeRefreshTitle(cid, { force: true });
                   } catch (err) {
                     out = { ok: false, error: err?.message || String(err || 'refresh failed') };
@@ -1228,6 +1359,11 @@ export function createCdpManager({
                     enabled: activeConfig.enabled,
                     i18nLocale: activeConfig.i18nLocale || 'zh-CN',
                     syncAiOutputLang: Boolean(activeConfig.syncAiOutputLang),
+                    compactTypography: activeConfig.compactTypography !== false,
+                    topbarUsageMetric: activeConfig.topbarUsageMetric || 'quota',
+                    overviewQuota: activeConfig.overviewQuota !== false,
+                    overviewProgress: activeConfig.overviewProgress !== false,
+                    showClaudeQuota: Boolean(activeConfig.showClaudeQuota),
                     customSystemPrompt: activeConfig.customSystemPrompt || {
                       enabled: false,
                       mode: 'flow-proxy',
@@ -1326,6 +1462,11 @@ export function createCdpManager({
                     enabled: activeConfig.enabled,
                     i18nLocale: activeConfig.i18nLocale || 'zh-CN',
                     syncAiOutputLang: Boolean(activeConfig.syncAiOutputLang),
+                    compactTypography: activeConfig.compactTypography !== false,
+                    topbarUsageMetric: activeConfig.topbarUsageMetric || 'quota',
+                    overviewQuota: activeConfig.overviewQuota !== false,
+                    overviewProgress: activeConfig.overviewProgress !== false,
+                    showClaudeQuota: Boolean(activeConfig.showClaudeQuota),
                     customSystemPrompt: activeConfig.customSystemPrompt || {
                       enabled: false,
                       mode: 'flow-proxy',
@@ -1444,12 +1585,39 @@ export function createCdpManager({
         targetThemeModes.clear();
       }
       const shouldHeartbeatCheck = bundleChanged || syncTickCount % 6 === 1;
-      const shouldBroadcastQuota = syncTickCount % 12 === 1;
+      const shouldBroadcastQuota = syncTickCount % 4 === 1;
+      const shouldBackgroundRefreshAccounts = syncTickCount % 100 === 5;
+      if (shouldBackgroundRefreshAccounts && accountsManager && typeof accountsManager.refreshQuota === 'function') {
+        void accountsManager
+          .refreshQuota('active', { minIntervalMs: 240_000 })
+          .then((res) => {
+            if (!res?.ok || res.throttled || !res.overview) return;
+            const ovJson = JSON.stringify({ ok: true, overview: res.overview })
+              .replace(/\u2028/g, '\\u2028')
+              .replace(/\u2029/g, '\\u2029');
+            for (const entry of attachedTargets.values()) {
+              if (!entry.hostConfirmed || entry.isSwarmIframe || entry.ws?.readyState !== WebSocket.OPEN) continue;
+              entry
+                .send('Runtime.evaluate', {
+                  expression: `if (typeof window.__ag_on_accounts_response === 'function') { window.__ag_on_accounts_response('', ${ovJson}); }`,
+                  returnByValue: false
+                })
+                .catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
       if (shouldBroadcastQuota && lsClient && typeof lsClient.getQuotaStatus === 'function') {
         void lsClient
           .getQuotaStatus({ force: true })
-          .then((q) => {
+          .then(async (q) => {
             if (!q || !q.ok) return;
+            if (accountsManager && typeof accountsManager.observeLiveStatus === 'function') {
+              try {
+                const identity = typeof lsClient.getUserIdentity === 'function' ? await lsClient.getUserIdentity() : null;
+                await accountsManager.observeLiveStatus({ identity, quota: q });
+              } catch {}
+            }
             const payloadJson = JSON.stringify(q).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
             for (const entry of attachedTargets.values()) {
               if (!entry.hostConfirmed || entry.isSwarmIframe || entry.ws?.readyState !== WebSocket.OPEN) continue;

@@ -53,7 +53,11 @@ let DEFAULT_FLOW_CONFIG = {
   defaultSeat: '',
   writingSeat: '',
   engineeringSeat: '',
-  fullSeat: ''
+  fullSeat: '',
+  compactEnabled: false,
+  compactThresholdPct: 70,
+  compactKeepTailTokens: 20000,
+  compactModel: ''
 };
 let normalizeFlowConfig = (raw) => Object.assign({}, DEFAULT_FLOW_CONFIG, raw && typeof raw === 'object' ? raw : {});
 let sanitizeFlowPatch = () => {};
@@ -329,6 +333,21 @@ export function sanitizeConfigPatch(currentCfg, patch) {
   if (patch.telemetryCacheMode === 'session' || patch.telemetryCacheMode === 'step') {
     base.telemetryCacheMode = patch.telemetryCacheMode;
   }
+  if (typeof patch.compactTypography === 'boolean') {
+    base.compactTypography = patch.compactTypography;
+  }
+  if (['quota', 'sessionTokens', 'todayTokens', 'monthTokens', 'monthCost', 'icon'].includes(patch.topbarUsageMetric)) {
+    base.topbarUsageMetric = patch.topbarUsageMetric;
+  }
+  if (typeof patch.overviewQuota === 'boolean') {
+    base.overviewQuota = patch.overviewQuota;
+  }
+  if (typeof patch.overviewProgress === 'boolean') {
+    base.overviewProgress = patch.overviewProgress;
+  }
+  if (typeof patch.showClaudeQuota === 'boolean') {
+    base.showClaudeQuota = patch.showClaudeQuota;
+  }
   if (typeof patch.i18nLocale === 'string') {
     const loc = normalizeI18nLocale(patch.i18nLocale, '');
     if (loc && SUPPORTED_I18N_LOCALES.includes(loc)) {
@@ -393,6 +412,11 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     subagentRouting: { ...DEFAULT_SUBAGENT_ROUTING, allowedModels: [] },
     telemetryLayout: 'compact',
     telemetryCacheMode: 'session',
+    compactTypography: true,
+    topbarUsageMetric: 'quota',
+    overviewQuota: true,
+    overviewProgress: true,
+    showClaudeQuota: false,
     contextLimit: 'auto',
     manualContextLimit: 0,
     fallbackContextLimit: 256000,
@@ -456,6 +480,15 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     const preset = presetRaw === 'codex-dark' || presetRaw === 'onyx-dark' ? 'codex-dark' : 'codex-pure-white';
     const telemetryLayout = userCfg.telemetryLayout === 'detailed' ? 'detailed' : 'compact';
     const telemetryCacheMode = userCfg.telemetryCacheMode === 'step' ? 'step' : 'session';
+    const compactTypography = userCfg.compactTypography !== false;
+    const topbarUsageMetric = ['quota', 'sessionTokens', 'todayTokens', 'monthTokens', 'monthCost', 'icon'].includes(
+      userCfg.topbarUsageMetric
+    )
+      ? userCfg.topbarUsageMetric
+      : 'quota';
+    const overviewQuota = userCfg.overviewQuota !== false;
+    const overviewProgress = userCfg.overviewProgress !== false;
+    const showClaudeQuota = userCfg.showClaudeQuota === true;
 
     const rawContextLimit = userCfg.contextLimit;
     const isAutoLimit =
@@ -562,6 +595,11 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       enabled,
       channel,
       preset,
+      compactTypography,
+      topbarUsageMetric,
+      overviewQuota,
+      overviewProgress,
+      showClaudeQuota,
       i18nLocale,
       syncAiOutputLang,
       customSystemPrompt,
@@ -599,7 +637,7 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       if (base === '30-telemetry.css') return Boolean(modules.metrics);
       if (base === '40-prompt-suggestions.css') return Boolean(modules.promptSuggestions);
       if (base === '48-flow-mode-picker.css') return Boolean(modules.flow);
-      if (base === '45-settings-ui.css') return Boolean(enabled);
+      if (base === '45-settings-ui.css' || base === '49-accounts-dashboard.css') return Boolean(enabled);
       return modules.theme !== false;
     });
     const baseCss = activeStyleFiles.map((f) => readTextSafe(f, '')).join('\n\n');
@@ -623,6 +661,11 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       .update(
         JSON.stringify({
           preset,
+          compactTypography,
+          topbarUsageMetric,
+          overviewQuota,
+          overviewProgress,
+          showClaudeQuota,
           i18nLocale,
           syncAiOutputLang,
           customSystemPrompt,
@@ -650,6 +693,11 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       platform: process.platform,
       enabled,
       preset,
+      compactTypography,
+      topbarUsageMetric,
+      overviewQuota,
+      overviewProgress,
+      showClaudeQuota,
       i18nLocale,
       syncAiOutputLang,
       customSystemPrompt,
@@ -669,6 +717,11 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
         enabled,
         channel,
         preset,
+        compactTypography,
+        topbarUsageMetric,
+        overviewQuota,
+        overviewProgress,
+        showClaudeQuota,
         i18nLocale,
         syncAiOutputLang,
         customSystemPrompt,

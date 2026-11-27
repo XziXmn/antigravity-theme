@@ -510,10 +510,160 @@ export function hasRecentActiveConversationWal(channel = 'auto', windowSec = 15)
   return activeFiles;
 }
 
+function psSingleQuote(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+export function scheduleWindowsDetachedRelaunch({
+  targetExe,
+  onboardingSync = null,
+  dataDir = ''
+} = {}) {
+  if (process.platform !== 'win32' || !targetExe) {
+    return { scheduled: false, error: 'Missing Windows target executable' };
+  }
+  const workDir = dataDir || path.join(os.tmpdir(), 'ag-codex-relaunch');
+  fs.mkdirSync(workDir, { recursive: true });
+  const scriptPath = path.join(workDir, 'relaunch-antigravity.ps1');
+  const lnkPath = path.join(workDir, 'relaunch-antigravity.lnk');
+  const makeLnkPath = path.join(workDir, 'relaunch-make-lnk.ps1');
+  const logPath = path.join(workDir, 'relaunch-antigravity.log');
+
+  const appDataDir = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  const storagePath = path.join(appDataDir, 'Antigravity', 'app_storage.json');
+  const cleanEmail = onboardingSync && typeof onboardingSync.email === 'string' ? onboardingSync.email.trim().toLowerCase() : '';
+  const cleanTos = typeof onboardingSync?.isGcpTos === 'boolean' ? onboardingSync.isGcpTos : null;
+
+  const onboardingLines = cleanEmail
+    ? [
+        'try {',
+        `  $storagePath = ${psSingleQuote(storagePath)}`,
+        '  if (Test-Path -LiteralPath $storagePath) {',
+        '    $rawStorage = Get-Content -LiteralPath $storagePath -Raw -Encoding UTF8',
+        '    $storageObj = $rawStorage | ConvertFrom-Json',
+        '    if ($storageObj -is [System.Management.Automation.PSCustomObject]) {',
+        `      $storageObj | Add-Member -NotePropertyName 'agy.onboarding.lastLoginUsername' -NotePropertyValue ${psSingleQuote(cleanEmail)} -Force`,
+        ...(cleanTos !== null
+          ? [`      $storageObj | Add-Member -NotePropertyName 'agy.onboarding.lastLoginIsGcpTos' -NotePropertyValue ${psSingleQuote(String(cleanTos))} -Force`]
+          : []),
+        "      $tmpStorage = $storagePath + '.ag.tmp'",
+        '      $jsonOut = $storageObj | ConvertTo-Json -Depth 100',
+        '      [System.IO.File]::WriteAllText($tmpStorage, $jsonOut, [System.Text.UTF8Encoding]::new($false))',
+        '      Move-Item -LiteralPath $tmpStorage -Destination $storagePath -Force',
+        "      Write-AgLog 'synced onboarding app_storage'",
+        '    }',
+        '  }',
+        "} catch { Write-AgLog ('onboarding err: ' + $_.Exception.Message) }"
+      ]
+    : [];
+
+  const body = [
+    'param([switch]$LaunchOnly)',
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    'if ($LaunchOnly) {',
+    '  $t = $env:AG_HOP_TARGET; $a = $env:AG_HOP_ARGS; $d = $env:AG_HOP_DIR',
+    '  Remove-Item Env:AG_HOP_TARGET,Env:AG_HOP_ARGS,Env:AG_HOP_DIR -ErrorAction SilentlyContinue',
+    '  if ($t) {',
+    '    if ($a) { Start-Process -FilePath $t -ArgumentList $a -WorkingDirectory $d }',
+    '    else { Start-Process -FilePath $t -WorkingDirectory $d }',
+    '  }',
+    '  exit 0',
+    '}',
+    `$logPath = ${psSingleQuote(logPath)}`,
+    `$lnkPath = ${psSingleQuote(lnkPath)}`,
+    "function Write-AgLog([string]$m) { try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format 'HH:mm:ss.fff') + ' ' + $m) -Encoding UTF8 } catch {} }",
+    "Write-AgLog ('relaunch started pid=' + $PID)",
+    'Start-Sleep -Milliseconds 300',
+    `$target = ${psSingleQuote(targetExe)}`,
+    '$targetDir = Split-Path -Parent $target',
+    'function Get-AgProcs {',
+    '  @(Get-CimInstance Win32_Process -Filter "Name=\'Antigravity.exe\'" | Where-Object {',
+    '    -not $_.ExecutablePath -or $_.ExecutablePath.Equals($target, [System.StringComparison]::OrdinalIgnoreCase)',
+    '  })',
+    '}',
+    "foreach ($p in @(Get-Process -Name 'Antigravity')) { if ($p.MainWindowHandle -ne 0) { [void]$p.CloseMainWindow() } }",
+    '$deadline = (Get-Date).AddSeconds(3)',
+    'while ((Get-Date) -lt $deadline) { if ((Get-AgProcs).Count -eq 0) { break }; Start-Sleep -Milliseconds 250 }',
+    'foreach ($p in (Get-AgProcs)) { Stop-Process -Id ([int]$p.ProcessId) -Force }',
+    '$waitExit = (Get-Date).AddSeconds(6)',
+    'while ((Get-Date) -lt $waitExit) { if ((Get-AgProcs).Count -eq 0) { break }; Start-Sleep -Milliseconds 250 }',
+    'Start-Sleep -Milliseconds 400',
+    ...onboardingLines,
+    'Remove-Item Env:ELECTRON_RUN_AS_NODE,Env:NODE_OPTIONS,Env:ANTIGRAVITY_LS_ADDRESS,Env:ANTIGRAVITY_CSRF_TOKEN -ErrorAction SilentlyContinue',
+    "$argLine = '--remote-debugging-port=0'",
+    'function Start-AgDetached([string]$filePath, [string]$arguments, [string]$wDir) {',
+    '  $psi = New-Object System.Diagnostics.ProcessStartInfo',
+    '  $psi.FileName = $filePath',
+    '  $psi.Arguments = $arguments',
+    '  $psi.WorkingDirectory = $wDir',
+    '  $psi.UseShellExecute = $false',
+    '  $psi.CreateNoWindow = $true',
+    '  return [System.Diagnostics.Process]::Start($psi)',
+    '}',
+    "$hopPs = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
+    "if (-not (Test-Path -LiteralPath $hopPs)) { $hopPs = 'powershell.exe' }",
+    '$env:AG_HOP_TARGET = $target; $env:AG_HOP_ARGS = $argLine; $env:AG_HOP_DIR = $targetDir',
+    'try {',
+    '  $hop = Start-AgDetached $hopPs (\'-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "\' + $PSCommandPath + \'" -LaunchOnly\') $targetDir',
+    '  if ($hop) { [void]$hop.WaitForExit(5000) }',
+    "} catch { Write-AgLog ('LaunchOnly err: ' + $_.Exception.Message) }",
+    'Remove-Item Env:AG_HOP_TARGET,Env:AG_HOP_ARGS,Env:AG_HOP_DIR -ErrorAction SilentlyContinue',
+    'Start-Sleep -Milliseconds 1200',
+    'if ((Get-AgProcs).Count -eq 0) {',
+    "  $cmdExe = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }",
+    '  $shim = Start-AgDetached $cmdExe (\'/d /c start "" /D "\' + $targetDir + \'" "\' + $target + \'" \' + $argLine + \' <NUL >NUL 2>&1\') $targetDir',
+    '  if ($shim) { [void]$shim.WaitForExit(3000) }',
+    '}',
+    "Write-AgLog ('done ag_procs=' + (Get-AgProcs).Count)",
+    'Remove-Item -LiteralPath $lnkPath -Force',
+    'Remove-Item -LiteralPath $PSCommandPath -Force'
+  ].join('\r\n');
+  fs.writeFileSync(scriptPath, '\uFEFF' + body + '\r\n', 'utf8');
+
+  const psExePath =
+    process.env.SystemRoot && fs.existsSync(path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+      ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : 'powershell.exe';
+  const explorerExePath =
+    process.env.SystemRoot && fs.existsSync(path.join(process.env.SystemRoot, 'explorer.exe'))
+      ? path.join(process.env.SystemRoot, 'explorer.exe')
+      : 'explorer.exe';
+
+  const makeLnkBody = [
+    "$ErrorActionPreference = 'Stop'",
+    '$ws = New-Object -ComObject WScript.Shell',
+    '$s = $ws.CreateShortcut($env:AG_RELAUNCH_LNK)',
+    '$s.TargetPath = $env:AG_RELAUNCH_PS',
+    '$s.Arguments = \'-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "\' + $env:AG_RELAUNCH_SCRIPT + \'"\'',
+    '$s.WorkingDirectory = Split-Path -Parent $env:AG_RELAUNCH_SCRIPT',
+    '$s.WindowStyle = 7',
+    '$s.Save()'
+  ].join('\r\n');
+  fs.writeFileSync(makeLnkPath, '\uFEFF' + makeLnkBody + '\r\n', 'utf8');
+
+  try {
+    const mk = spawnSync(psExePath, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', makeLnkPath], {
+      env: { ...process.env, AG_RELAUNCH_LNK: lnkPath, AG_RELAUNCH_PS: psExePath, AG_RELAUNCH_SCRIPT: scriptPath },
+      windowsHide: true,
+      timeout: 6000
+    });
+    if (mk.status !== 0 || !fs.existsSync(lnkPath)) {
+      return { scheduled: false, error: 'Failed to create relaunch shortcut' };
+    }
+    const launcher = spawn(explorerExePath, [lnkPath], { detached: true, stdio: 'ignore', windowsHide: true });
+    launcher.unref();
+    return { scheduled: true };
+  } finally {
+    try { fs.rmSync(makeLnkPath, { force: true }); } catch {}
+  }
+}
+
 export async function relaunchAntigravityWithCdp({
   channel = 'auto',
   force = false,
   targetDir,
+  onboardingSync = null,
+  detachedRelaunch = false,
   detectEnvironment,
   inspectLiveWindow
 }) {
@@ -592,6 +742,23 @@ export async function relaunchAntigravityWithCdp({
     }
   }
 
+  if (detachedRelaunch && process.platform === 'win32' && launchTarget?.exePath) {
+    const sch = scheduleWindowsDetachedRelaunch({
+      targetExe: launchTarget.exePath,
+      onboardingSync,
+      dataDir: path.join(os.tmpdir(), 'ag-codex-relaunch')
+    });
+    return {
+      exitCode: sch.scheduled ? 0 : 1,
+      payload: {
+        ok: Boolean(sch.scheduled),
+        scheduled: Boolean(sch.scheduled),
+        reason: sch.error || '',
+        stoppedPids: procsToStop.map((p) => p.pid)
+      }
+    };
+  }
+
   for (const p of procsToStop) {
     if (process.platform === 'darwin' && p.appPath) {
       spawnSync('osascript', ['-e', `tell application "${p.appPath}" to quit`], { stdio: 'ignore', timeout: 3000 });
@@ -641,19 +808,24 @@ export async function relaunchAntigravityWithCdp({
   }
 
   let live = { reachable: false };
-  for (let i = 0; i < 30; i++) {
-    sleepSync(500);
-    const curEnv = await detectEnvironment(launchTarget.channel || channel);
-    const targetChInfo = curEnv.channels?.[launchTarget.channel || 'stable'];
-    if (targetChInfo && !targetChInfo.portFileExists) continue;
-    if (fs.existsSync(daemonPath)) {
-      spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', daemonPath, '--once'], {
-        stdio: 'ignore',
-        windowsHide: true
-      });
+  if (typeof detectEnvironment === 'function' && typeof inspectLiveWindow === 'function') {
+    for (let i = 0; i < 30; i++) {
+      sleepSync(500);
+      const curEnv = await detectEnvironment(launchTarget.channel || channel);
+      const targetChInfo = curEnv.channels?.[launchTarget.channel || 'stable'];
+      if (targetChInfo && !targetChInfo.portFileExists) continue;
+      if (fs.existsSync(daemonPath)) {
+        spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', daemonPath, '--once'], {
+          stdio: 'ignore',
+          windowsHide: true
+        });
+      }
+      live = await inspectLiveWindow(curEnv);
+      if (live.reachable && live.state?.hasStyle) break;
     }
-    live = await inspectLiveWindow(curEnv);
-    if (live.reachable && live.state?.hasStyle) break;
+  } else {
+    sleepSync(800);
+    live = { reachable: true, state: { hasStyle: true } };
   }
 
   const ok = Boolean(live.reachable && live.state?.hasStyle);

@@ -126,6 +126,54 @@ test('parseQuotaSummary extracts both 5-hour and weekly quota windows per model 
   assert.equal(parsed.groups[1].weekly.remainingPct, 100);
 });
 
+test('parseQuotaSummary and parseUserStatusQuota restore elapsed resetTime windows to 100%', () => {
+  const nowMs = Date.parse('2026-11-26T05:48:00.000Z');
+  const summaryRaw = {
+    response: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.5019, resetTime: '2026-12-02T16:02:11Z' },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.00626, resetTime: '2026-11-26T05:43:04Z' }
+          ]
+        }
+      ]
+    }
+  };
+  const parsedSum = parseQuotaSummary(summaryRaw, nowMs, { planName: 'Pro' });
+  assert.equal(parsedSum.groups[0].fiveHour.remainingPct, 100);
+  assert.equal(parsedSum.groups[0].fiveHour.remainingFraction, 1);
+  assert.equal(parsedSum.groups[0].fiveHour.resetInSec, 0);
+  assert.equal(parsedSum.groups[0].fiveHour.resetTime, '');
+  assert.equal(parsedSum.groups[0].fiveHour.expiredReset, true);
+  assert.equal(parsedSum.groups[0].weekly.remainingPct, 50);
+  assert.ok(parsedSum.groups[0].weekly.resetInSec > 0);
+  assert.equal(parsedSum.buckets[0].remainingPct, 100);
+
+  const statusRaw = {
+    userStatus: {
+      planStatus: { planInfo: { planName: 'Pro' } },
+      cascadeModelConfigData: {
+        clientModelConfigs: [
+          {
+            label: 'Gemini 4 Neon (High)',
+            quotaInfo: { remainingFraction: 0.01, resetTime: '2026-11-26T05:43:04Z' }
+          }
+        ]
+      }
+    }
+  };
+  const parsedSt = parseUserStatusQuota(statusRaw, nowMs);
+  assert.equal(parsedSt.buckets[0].remainingPct, 100);
+  assert.equal(parsedSt.buckets[0].resetInSec, 0);
+  assert.equal(parsedSt.buckets[0].resetTime, '');
+
+  const part50 = fs.readFileSync(path.join(process.cwd(), 'core', 'runtime', '50-telemetry-ui.js'), 'utf8');
+  assert.ok(part50.includes('function resolveLiveQuotaWindow(win, nowMs)'));
+  assert.ok(!part50.includes('const resetStr = reset5hStr || resetWeekStr;'), 'L1 must not fall back to weekly countdown');
+});
+
 test('createLanguageServerClient caches quota status within TTL and supports force refresh', async () => {
   let summaryCalls = 0;
   let now = 100000;
@@ -223,6 +271,18 @@ test('auto-title updater cleans generated titles, enforces turn interval & coold
   updater.observeTurn({ cascadeId: cid, userText: '热重载部署' });
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(updates.length, 1, 'cooldown must suppress premature refreshes');
+
+  // Direct DB turn-count observation without flow proxy interception
+  now += 400_000;
+  const cidDb = '99999999-9999-4999-8999-999999999999';
+  updater.observeTurnCount({ cascadeId: cidDb, turnCount: 1, snippets: ['排查标题更新与配额自动刷新'] });
+  updater.observeTurnCount({ cascadeId: cidDb, turnCount: 2, snippets: ['排查标题更新与配额自动刷新', '改为脱离 Proxy 本地触发'] });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(updates.length, 1, 'delta 1 from baseline must not trigger yet');
+  updater.observeTurnCount({ cascadeId: cidDb, turnCount: 3, snippets: ['第三轮触发标题生成'] });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(updates.length, 2, 'observeTurnCount must trigger auto-title once turn delta reaches interval');
+  assert.equal(updates[1].cid, cidDb);
 });
 
 test('subagent-routing supports custom third-party models, builds authorization prompt, and validates explicit tags', () => {

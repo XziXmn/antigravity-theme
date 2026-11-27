@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-26T03:30:49.929Z",
+  "updatedAt": "2026-11-26T15:00:00.000Z",
   "upstreams": {
     "theme": {
       "id": "antigravity-codex-theme",
@@ -12,6 +12,18 @@
       "commit": "8c5a353f322e442a60b09d343ad3d9add4b216d4",
       "shortCommit": "8c5a353",
       "commitDate": "2026-11-25"
+    },
+    "agyPowertools": {
+      "id": "agy-powertools",
+      "role": "secondary-primary-reference",
+      "repo": "WhiteBr1ck/agy-powertools",
+      "url": "https://github.com/WhiteBr1ck/agy-powertools",
+      "branch": "main",
+      "license": "MIT",
+      "commit": "8023884ec962b1206261d6c22081bbfd0fa2c8f7",
+      "shortCommit": "8023884",
+      "commitDate": "2026-11-26",
+      "commitSubject": "feat: add 9-language i18n, fix sidebar Display Options i18n (#79), and detach Windows relaunch ConPTY (#61) (v2.16.7)"
     },
     "langpack": {
       "id": "antigravity-langpack",
@@ -57,6 +69,14 @@
       "shortCommit": "73dc3e9",
       "commitDate": "2026-11-26",
       "commitSubject": "docs(changelog): document R2/GitHub mirrors, Feishu CN fallback & English lightweight repo in v6.0.4"
+    },
+    "contextViewer": {
+      "id": "antigravity-context-viewer",
+      "role": "multi-account-oauth-and-heatmap-reference",
+      "repo": "elviscjn-cjn/antigravity-context-viewer",
+      "url": "https://github.com/elviscjn-cjn/antigravity-context-viewer",
+      "branch": "main",
+      "license": "MIT"
     }
   },
   "locales": {

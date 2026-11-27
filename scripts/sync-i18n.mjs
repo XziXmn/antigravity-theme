@@ -84,6 +84,22 @@ export const UPSTREAM_SPECS = Object.freeze({
     url: 'https://github.com/Anarcadia/chuanban-antigravity-theme-patch',
     branch: 'main',
     license: 'MIT'
+  },
+  contextViewer: {
+    id: 'antigravity-context-viewer',
+    role: 'multi-account-oauth-and-heatmap-reference',
+    repo: 'elviscjn-cjn/antigravity-context-viewer',
+    url: 'https://github.com/elviscjn-cjn/antigravity-context-viewer',
+    branch: 'main',
+    license: 'MIT'
+  },
+  agyPowertools: {
+    id: 'agy-powertools',
+    role: 'credential-vault-and-analytics-reference',
+    repo: 'WhiteBr1ck/agy-powertools',
+    url: 'https://github.com/WhiteBr1ck/agy-powertools',
+    branch: 'main',
+    license: 'MIT'
   }
 });
 
@@ -405,7 +421,9 @@ export async function syncChineseLocales({ fromLocalDir = '', dryRun = false } =
         shortCommit: cbHead?.shortCommit || existingUpstreams?.upstreams?.chuanban?.shortCommit || 'bd8b937',
         commitDate: cbHead?.commitDate || existingUpstreams?.upstreams?.chuanban?.commitDate || '2026-11-25',
         commitSubject: cbHead?.commitSubject || existingUpstreams?.upstreams?.chuanban?.commitSubject || 'release: v6.0.4 — Antigravity 2.35.2 adaptation, Claude context menu (PR #46) & native menu i18n (#44)'
-      }
+      },
+      contextViewer: { ...UPSTREAM_SPECS.contextViewer },
+      agyPowertools: { ...UPSTREAM_SPECS.agyPowertools }
     },
     locales: localeStats
   };

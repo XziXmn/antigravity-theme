@@ -6,6 +6,8 @@
 /* Default: inherit native Antigravity theme tokens cleanly when Codex Theme is OFF */
 #ag-settings-nav-wrap,
 #ag-settings-pane,
+#ag-accounts-pane,
+#ag-usage-popover,
 #ag-settings-model-menu,
 #ag-settings-effort-menu {
   --ag-s-bg: var(--background, #FFFFFF);
@@ -35,14 +37,14 @@
   --ag-s-mono: var(--font-mono, "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
 }
 
-:is(html.dark body, body.dark, body.theme-dark, body[data-agy-theme].dark) :is(#ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu) {
+:is(html.dark body, body.dark, body.theme-dark, body[data-agy-theme].dark) :is(#ag-settings-nav-wrap, #ag-settings-pane, #ag-accounts-pane, #ag-usage-popover, #ag-settings-model-menu, #ag-settings-effort-menu) {
   --ag-s-switch-off: rgba(255, 255, 255, 0.22);
   --ag-s-seg-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
   --ag-s-dropdown-shadow: 0 20px 44px -6px rgba(0, 0, 0, 0.72), 0 4px 12px rgba(0, 0, 0, 0.42);
 }
 
-/* Codex Light palette — applied ONLY when Codex Theme module is enabled (html[data-ag-preset]) */
-html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is(#ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu) {
+/* Codex Light palette — applied when Codex Theme is active */
+html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is(#ag-settings-nav-wrap, #ag-settings-pane, #ag-accounts-pane, #ag-usage-popover, #ag-settings-model-menu, #ag-settings-effort-menu) {
   --ag-s-bg: var(--background, #FFFFFF);
   --ag-s-sidebar: var(--sidebar, #F9F9F9);
   --ag-s-selected: var(--sidebar-secondary, #EFEFEF);
@@ -67,8 +69,8 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   --ag-s-badge-bg: #F3F4F6;
 }
 
-/* Codex Dark palette — applied ONLY when Codex Theme module is enabled */
-:is(html[data-ag-preset][data-ag-theme-mode="dark"] body, html[data-ag-preset].dark body, html[data-ag-preset] body.dark, html[data-ag-preset] body.theme-dark, html[data-ag-preset] body[data-agy-theme].dark) :is(#ag-settings-nav-wrap, #ag-settings-pane, #ag-settings-model-menu, #ag-settings-effort-menu) {
+/* Codex Dark palette — applied when Codex Theme is active */
+:is(html[data-ag-preset][data-ag-theme-mode="dark"] body, html[data-ag-preset].dark body, html[data-ag-preset] body.dark, html[data-ag-preset] body.theme-dark, html[data-ag-preset] body[data-agy-theme].dark) :is(#ag-settings-nav-wrap, #ag-settings-pane, #ag-accounts-pane, #ag-usage-popover, #ag-settings-model-menu, #ag-settings-effort-menu) {
   --ag-s-bg: var(--background, #181818);
   --ag-s-sidebar: var(--sidebar, #232323);
   --ag-s-selected: var(--sidebar-secondary, #353535);
@@ -236,17 +238,17 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
 
 #ag-settings-pane .ag-s-header {
   width: 100%;
-  max-width: 640px;
+  max-width: 660px;
   margin: 0 auto 14px auto;
   padding-right: 0;
 }
 
 #ag-settings-pane .ag-s-nav-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 3px;
   width: 100%;
-  max-width: 640px;
+  max-width: 660px;
   margin: 0 auto 16px auto;
   padding: 3px;
   border-radius: 10px;
@@ -258,15 +260,15 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  padding: 6px 10px;
+  padding: 6px 6px;
   border: none;
   border-radius: 7px;
   background: transparent;
   color: var(--ag-s-fg-3) !important;
   font-family: var(--ag-s-font) !important;
-  font-size: 12.5px !important;
+  font-size: 12px !important;
   line-height: 18px !important;
   font-weight: 500;
   white-space: nowrap;
@@ -437,7 +439,7 @@ html[data-ag-preset]:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)) :is
   flex-direction: column;
   gap: 20px;
   width: 100%;
-  max-width: 640px;
+  max-width: 660px;
   margin: 0 auto;
 }
 

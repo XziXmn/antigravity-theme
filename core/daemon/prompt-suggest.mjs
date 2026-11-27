@@ -815,9 +815,104 @@ export function createPromptSuggestionEngine({
     }
   }
 
+  async function runUtilityPrompt(promptText) {
+    const cleanPrompt = String(promptText || '').trim();
+    if (!cleanPrompt || runOnce) return '';
+    // Never reuse the persistent promptSuggestions worker (it carries PROMPT_SUGGEST_SYSTEM_INSTRUCTION).
+    const bin = getAgyBin();
+    if (!bin) return '';
+    const model = getTargetModel();
+    const effortFlag = deriveEffortFromModelId(model);
+    const isWin = process.platform === 'win32';
+    const extraPath = isWin ? '' : `${path.join(os.homedir(), '.local', 'bin')}:/opt/homebrew/bin:/usr/local/bin:`;
+    const useShell = isWin && /\.(cmd|bat)$/i.test(bin);
+    const env = { ...process.env, PATH: extraPath ? `${extraPath}${process.env.PATH || ''}` : process.env.PATH };
+
+    try {
+      const { stdout } = await execFileImpl(
+        bin,
+        ['--print', '--output-format', 'text', '--model', model, '--effort', 'low', '--disable-slash-commands', cleanPrompt],
+        {
+          cwd: os.tmpdir(),
+          timeout: 35000,
+          maxBuffer: 256 * 1024,
+          shell: useShell,
+          windowsHide: true,
+          env
+        }
+      );
+      const textOut = String(stdout || '').trim();
+      if (textOut) return textOut;
+    } catch {}
+
+    return await new Promise((resolve) => {
+      let settled = false;
+      const chunks = [];
+      let child = null;
+      const done = (val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (child) {
+          try { child.stdin?.end?.(); } catch {}
+          try { child.kill('SIGTERM'); } catch {}
+        }
+        resolve(String(val || '').trim());
+      };
+      const timer = setTimeout(() => done(chunks.join('')), 35000);
+      try {
+        child = spawnImpl(
+          bin,
+          ['--model', model, '--effort', effortFlag, '--disable-slash-commands', '--input-format', 'stream-json', '--output-format', 'stream-json'],
+          {
+            cwd: os.tmpdir(),
+            stdio: ['pipe', 'pipe', 'pipe'],
+            shell: useShell,
+            windowsHide: true,
+            env
+          }
+        );
+      } catch {
+        done('');
+        return;
+      }
+      let sent = false;
+      let buf = '';
+      if (child.stderr && typeof child.stderr.resume === 'function') child.stderr.resume();
+      child.stdout.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+          if (evt.event === 'init' && !sent) {
+            sent = true;
+            try {
+              child.stdin.write(JSON.stringify({ event: 'user', message: { content: cleanPrompt } }) + '\n');
+            } catch {
+              done('');
+            }
+          } else if (evt.event === 'step_update') {
+            const su = evt.step_update;
+            if (su?.step_type === 'agent_response' && su.text_delta) {
+              chunks.push(String(su.text_delta));
+            }
+          } else if (evt.event === 'result') {
+            done((evt.result && evt.result.response) || chunks.join(''));
+          }
+        }
+      });
+      child.on('error', () => done(''));
+      child.on('exit', () => done(chunks.join('')));
+    });
+  }
+
   return {
     syncState,
     suggest,
+    runUtilityPrompt,
     stop,
     listModels,
     getStatus: () => ({

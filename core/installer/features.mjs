@@ -23,10 +23,16 @@ export const BASE_SPARSE_PATHS = Object.freeze([
   '/core/daemon/ls-client.mjs',
   '/core/daemon/title-updater.mjs',
   '/core/daemon/flow-watchdog.mjs',
+  '/core/daemon/credential-vault.mjs',
+  '/core/daemon/account-oauth.mjs',
+  '/core/daemon/accounts.mjs',
+  '/core/daemon/usage-analytics.mjs',
   '/core/flow/subagent-routing.mjs',
   '/core/styles/45-settings-ui.css',
+  '/core/styles/49-accounts-dashboard.css',
   '/core/runtime/00-head.js',
   '/core/runtime/75-settings-ui.js',
+  '/core/runtime/79-accounts-dashboard.js',
   '/core/runtime/90-tail.js'
 ]);
 

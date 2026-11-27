@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import zlib from 'node:zlib';
-import { createFlowProxyServer } from '../core/flow/proxy.mjs';
+import { createFlowProxyServer, detectSubagentRequest } from '../core/flow/proxy.mjs';
 import { createFlowSessionStore } from '../core/flow/sessions.mjs';
 import { buildGeminiSse, extractSseText } from '../core/flow/purify.mjs';
 
@@ -568,5 +568,195 @@ test('flow proxy force-reinjects active session prompt into retry turn tail rega
   } finally {
     await closeServer(proxyServer);
     await closeServer(mockUpstream);
+  }
+});
+
+test('flow proxy resolves trajectory_id to cascade_id, extracts promptTokenCount from gzip SSE, auto-compacts in default mode, and applies virtual compaction on next turn', async () => {
+  const captured = [];
+  const cascadeId = '88888888-8888-4888-8888-888888888888';
+  const trajectoryId = '99999999-9999-4999-8999-999999999999';
+
+  const mockUpstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      captured.push(parsed);
+      const isSummaryCall = String(parsed?.requestId || '').startsWith('ag-codex-compact-');
+      if (isSummaryCall) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(
+          buildGeminiSse(
+            '## 当前目标与用户约束\n已完成前序阶段排查与构建。\n## 已验证事实与完成进度\n已验证 core/flow/compactor.mjs 与 core/flow/proxy.mjs 链路正常。',
+            { finishReason: 'STOP' }
+          )
+        );
+        return;
+      }
+      const ssePayload = buildGeminiSse('已确认收到。', {
+        finishReason: 'STOP',
+        usageMetadata: { promptTokenCount: 430000, candidatesTokenCount: 32 }
+      });
+      const gz = zlib.gzipSync(Buffer.from(ssePayload, 'utf8'));
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip' });
+      res.end(gz);
+    });
+  });
+
+  const upPort = await listenServer(mockUpstream);
+  const store = createFlowSessionStore({ getDefaultMode: () => 'default' });
+  const compactEvents = [];
+  const proxyApi = createFlowProxyServer({
+    getConfig: () => ({
+      upstream: `http://127.0.0.1:${upPort}`,
+      defaultMode: 'default',
+      compactEnabled: true,
+      compactThresholdPct: 80,
+      compactKeepTailTokens: 200
+    }),
+    getActiveMainSessions: () => [cascadeId],
+    resolveCascadeId: (id) => (id === trajectoryId ? cascadeId : id),
+    getContextWindow: (cid) => (cid === cascadeId ? 512000 : 0),
+    sessionStore: store,
+    onEvent: (ev) => {
+      if (ev?.type === 'compact') compactEvents.push(ev);
+    }
+  });
+  const proxyPort = await listenServer(proxyApi.server);
+
+  try {
+    const big = 'Detailed context '.repeat(350);
+    const contents = [
+      { role: 'user', parts: [{ text: 'U0 ' + big }] },
+      { role: 'model', parts: [{ text: 'M0 ' + big }] },
+      { role: 'user', parts: [{ text: 'U1 ' + big }] },
+      { role: 'model', parts: [{ text: 'M1 ' + big }] },
+      { role: 'user', parts: [{ text: 'U2 intermediate question' }] },
+      { role: 'model', parts: [{ text: 'M2 intermediate reply' }] },
+      { role: 'user', parts: [{ text: 'U3 latest question' }] }
+    ];
+
+    const r1 = await httpPost(
+      proxyPort,
+      '/v1internal:streamGenerateContent?alt=sse',
+      {
+        model: 'gemini-4-hydrogen-medium',
+        request: {
+          labels: { trajectory_id: trajectoryId },
+          contents
+        }
+      },
+      { authorization: 'Bearer test-token' }
+    );
+    assert.equal(r1.status, 200);
+
+    // Wait briefly for background async compaction to complete
+    for (let i = 0; i < 40; i += 1) {
+      if (proxyApi.getCompactionStatus(cascadeId).count >= 1) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const st = proxyApi.getCompactionStatus(cascadeId);
+    assert.equal(st.active, true, 'auto compaction should trigger and persist under resolved cascadeId');
+    assert.equal(st.count, 1);
+    assert.equal(compactEvents.length, 1);
+
+    // Next turn from IDE should have virtual compaction applied
+    captured.length = 0;
+    const nextContents = [
+      ...contents,
+      { role: 'model', parts: [{ text: '已确认收到。' }] },
+      { role: 'user', parts: [{ text: 'U3 continue' }] }
+    ];
+    const r2 = await httpPost(
+      proxyPort,
+      '/v1internal:streamGenerateContent?alt=sse',
+      {
+        model: 'gemini-4-hydrogen-medium',
+        request: {
+          labels: { trajectory_id: trajectoryId },
+          contents: nextContents
+        }
+      },
+      { authorization: 'Bearer test-token' }
+    );
+    assert.equal(r2.status, 200);
+    assert.equal(captured.length, 1);
+    const outboundContents = captured[0].request.contents;
+    assert.ok(outboundContents.length < nextContents.length, 'virtual compaction should shrink outbound contents');
+    assert.ok(
+      outboundContents[0].parts[0].text.includes('[CODEX_VIRTUAL_COMPACTION_V1]'),
+      'outbound compacted history should carry CODEX_VIRTUAL_COMPACTION_V1 handoff'
+    );
+  } finally {
+    await closeServer(proxyApi.server);
+    await closeServer(mockUpstream);
+  }
+});
+
+test('detectSubagentRequest ignores built-in <subagents> tool docs on active main sessions, and pipePassThrough hardens timeouts & retries transient socket reset', async () => {
+  const mainCid = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const mainSysPrompt = [
+    'You are Antigravity.',
+    '<subagents>',
+    'Available subagents:',
+    '- research: Research subagent with read-only tools.',
+    '- browser: Browser subagent that operates a webview.',
+    '</subagents>'
+  ].join('\n');
+  const resMain = detectSubagentRequest(
+    {
+      model: 'gemini-4-hydrogen-medium',
+      request: {
+        labels: { trajectory_id: 'other-traj' },
+        systemInstruction: { parts: [{ text: mainSysPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }]
+      }
+    },
+    mainCid,
+    [mainCid],
+    false
+  );
+  assert.equal(resMain.isSubagent, false, 'active main session with <subagents> docs must NOT be misclassified as subagent');
+
+  // Verify server timeout hardening + transient ECONNRESET auto-retry before headers
+  let attempts = 0;
+  const flakyUpstream = http.createServer((req, res) => {
+    attempts += 1;
+    if (attempts === 1) {
+      req.socket.destroy();
+      return;
+    }
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(buildGeminiSse('重连后成功返回。', { finishReason: 'STOP' }));
+    });
+  });
+  const upPort = await listenServer(flakyUpstream);
+  const store = createFlowSessionStore({ getDefaultMode: () => 'default' });
+  const proxyApi = createFlowProxyServer({
+    getConfig: () => ({ upstream: `http://127.0.0.1:${upPort}`, defaultMode: 'default' }),
+    getActiveMainSessions: () => [mainCid],
+    sessionStore: store
+  });
+  assert.equal(proxyApi.server.requestTimeout, 0);
+  assert.ok(proxyApi.server.keepAliveTimeout >= 65000);
+  const proxyPort = await listenServer(proxyApi.server);
+  try {
+    const r = await httpPost(proxyPort, '/v1internal:streamGenerateContent?alt=sse', {
+      model: 'gemini-4-hydrogen-medium',
+      request: {
+        labels: { trajectory_id: mainCid },
+        systemInstruction: { parts: [{ text: mainSysPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: '测试断连自动重试' }] }]
+      }
+    });
+    assert.equal(r.status, 200);
+    assert.equal(attempts, 2, 'pipePassThrough should silently retry once on pre-header socket reset');
+    assert.match(extractSseText(r.body).text, /重连后成功返回/);
+  } finally {
+    await closeServer(proxyApi.server);
+    await closeServer(flakyUpstream);
   }
 });

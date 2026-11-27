@@ -41,7 +41,7 @@ export function cleanGeneratedTitle(rawText) {
     .replace(/^["'“”‘’「」『』《》【】\[\]`*#\-•\s]+|["'“”‘’「」『』《》【】\[\]`*#\-•\s.。!！?？]+$/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!cleaned || cleaned.length < 2) return '';
+  if (!cleaned || cleaned.length < 2 || /^(?:none|null|n\/a|无|暂无)$/i.test(cleaned)) return '';
   return cleaned.slice(0, 36);
 }
 
@@ -93,12 +93,12 @@ export function createAutoTitleUpdater({
   nowFn = () => Date.now(),
   log = () => {}
 } = {}) {
-  const states = new Map(); // cid -> { turnsSinceUpdate, lastUpdatedAt, inFlight, snippets: string[], lastTitle }
+  const states = new Map(); // cid -> { turnsSinceUpdate, lastUpdatedAt, inFlight, snippets: string[], lastTitle, lastTurnCount }
 
   function getOrCreate(cid) {
     let st = states.get(cid);
     if (!st) {
-      st = { turnsSinceUpdate: 0, lastUpdatedAt: 0, inFlight: false, snippets: [], lastTitle: '' };
+      st = { turnsSinceUpdate: 0, lastUpdatedAt: 0, inFlight: false, snippets: [], lastTitle: '', lastTurnCount: -1 };
       states.set(cid, st);
       if (states.size > 40) {
         const oldest = states.keys().next().value;
@@ -110,12 +110,33 @@ export function createAutoTitleUpdater({
 
   function recordSnippet(cid, text) {
     const clean = String(text || '').replace(/\s+/g, ' ').trim();
-    if (!cid || clean.length < 4) return;
+    if (!cid || clean.length < 2) return;
     const st = getOrCreate(cid);
     const clip = clean.slice(0, 220);
-    if (st.snippets[st.snippets.length - 1] !== clip) {
+    if (!st.snippets.includes(clip)) {
       st.snippets.push(clip);
       if (st.snippets.length > 6) st.snippets.shift();
+    }
+  }
+
+  function observeTurnCount({ cascadeId, turnCount = 0, snippets = [] } = {}) {
+    const cid = String(cascadeId || '').trim();
+    if (!cid) return;
+    const st = getOrCreate(cid);
+    if (Array.isArray(snippets)) {
+      for (const s of snippets) recordSnippet(cid, s);
+    }
+    const n = Number(turnCount) || 0;
+    if (st.lastTurnCount < 0) {
+      // First observation of this conversation in this daemon lifetime: initialize baseline without spurious bump
+      st.lastTurnCount = n;
+      return;
+    }
+    if (n > st.lastTurnCount) {
+      const delta = n - st.lastTurnCount;
+      st.lastTurnCount = n;
+      st.turnsSinceUpdate += delta;
+      void maybeRefreshTitle(cid, { force: false });
     }
   }
 
@@ -127,7 +148,8 @@ export function createAutoTitleUpdater({
     if (!force && !atCfg.enabled) return { ok: false, skipped: true };
 
     const st = getOrCreate(cleanCid);
-    if (st.inFlight || st.snippets.length === 0) return { ok: false, skipped: true };
+    if (st.inFlight) return { ok: false, skipped: true, error: '正在生成标题，请稍候' };
+    if (st.snippets.length === 0) return { ok: false, skipped: true, error: '当前会话暂无可总结内容' };
 
     const now = nowFn();
     const minIntervalMs = atCfg.minIntervalMin * 60 * 1000;
@@ -152,7 +174,7 @@ export function createAutoTitleUpdater({
       });
       const raw = await generateTitle(prompt);
       const nextTitle = cleanGeneratedTitle(raw);
-      if (!nextTitle) return { ok: false, error: 'empty title' };
+      if (!nextTitle) return { ok: false, error: '标题生成超时或为空，请稍后重试' };
       if (nextTitle === currentTitle) {
         st.turnsSinceUpdate = 0;
         st.lastUpdatedAt = nowFn();
@@ -186,6 +208,7 @@ export function createAutoTitleUpdater({
 
   return {
     observeTurn,
+    observeTurnCount,
     recordSnippet,
     maybeRefreshTitle,
     getState: (cid) => (states.has(cid) ? { ...states.get(cid) } : null)
