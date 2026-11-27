@@ -136,7 +136,8 @@ const LOCAL_SUPPLEMENTS = {
     'Select Sidebar Item 7': '选择侧边栏第 7 项',
     'Select Sidebar Item 8': '选择侧边栏第 8 项',
     'Select Sidebar Item 9': '选择侧边栏第 9 项',
-    'Paste': '粘贴'
+    'Paste': '粘贴',
+    'Leaving Soon': '即将下线'
   },
   'zh-SG': {
     'Applies to messages sent after this turn': '对本轮之后发送的消息生效',
@@ -169,7 +170,8 @@ const LOCAL_SUPPLEMENTS = {
     'Select Sidebar Item 7': '选择侧边栏第 7 项',
     'Select Sidebar Item 8': '选择侧边栏第 8 项',
     'Select Sidebar Item 9': '选择侧边栏第 9 项',
-    'Paste': '粘贴'
+    'Paste': '粘贴',
+    'Leaving Soon': '即将下线'
   },
   'zh-TW': {
     'Applies to messages sent after this turn': '對本輪之後發送的訊息生效',
@@ -202,7 +204,8 @@ const LOCAL_SUPPLEMENTS = {
     'Select Sidebar Item 7': '選取側邊欄第 7 項',
     'Select Sidebar Item 8': '選取側邊欄第 8 項',
     'Select Sidebar Item 9': '選取側邊欄第 9 項',
-    'Paste': '貼上'
+    'Paste': '貼上',
+    'Leaving Soon': '即將下線'
   }
 };
 

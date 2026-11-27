@@ -433,12 +433,12 @@ test('60-i18n-engine handles Antigravity 2.35.1 sentence-case labels, Thinking f
   vm.createContext(sandbox);
   vm.runInContext(`const __AG_BOOT_PAYLOAD__ = globalThis.__AG_BOOT_PAYLOAD__;\n${code}`, sandbox);
 
-  assert.equal(textNodes[0].nodeValue, '防止电脑休眠');
-  assert.equal(textNodes[1].nodeValue, '保持在系统菜单栏');
+  assert.equal(textNodes[0].nodeValue, '防止系统休眠');
+  assert.equal(textNodes[1].nodeValue, '保留在菜单栏');
   assert.equal(textNodes[2].nodeValue, '启用智能体通知');
-  assert.equal(textNodes[3].nodeValue, '允许超额使用 AI 积分');
-  assert.equal(textNodes[4].nodeValue, '默认打开链接方式');
-  assert.equal(textNodes[5].nodeValue, '删除所有远程智能体数据');
+  assert.equal(textNodes[3].nodeValue, '允许使用超额 AI 积分');
+  assert.equal(textNodes[4].nodeValue, '链接默认打开位置');
+  assert.equal(textNodes[5].nodeValue, '删除全部远程智能体数据');
   assert.equal(textNodes[6].nodeValue, '当前电脑');
   assert.equal(textNodes[7].nodeValue, '正在思考 3s');
   assert.equal(textNodes[8].nodeValue, '当前套餐：Google AI Ultra');
@@ -454,7 +454,7 @@ test('60-i18n-engine handles Antigravity 2.35.1 sentence-case labels, Thinking f
   );
   assert.equal(
     attrEls[1].getAttribute('aria-label'),
-    '权限模式：全自动（智能体运行期间无法更改权限）'
+    '权限模式：全自动（智能体运行期间无法修改权限）'
   );
   assert.equal(attrEls[2].getAttribute('placeholder'), '搜索快捷键...');
   assert.equal(attrEls[3].getAttribute('aria-label'), '智能体运行位置，当前：本机');

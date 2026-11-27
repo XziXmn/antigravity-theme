@@ -754,6 +754,28 @@
 
     function resolveContextualDictTranslation(trimmed, contextEl, baseVal) {
       if (!contextEl || !contextEl.closest) return baseVal;
+      if (baseVal !== undefined && !/\s/.test(trimmed)) {
+        if (
+          contextEl.closest(
+            '[data-testid="branch-pill-trigger"], [data-testid="project-branch-picker"], [data-testid="project-selector-trigger"], [data-testid="workspace-name"], [data-testid="sidebar-project-title"], a[data-testid="breadcrumb-segment"][href*="project="]'
+          )
+        ) {
+          return null;
+        }
+        if (
+          trimmed !== 'Standalone' &&
+          trimmed !== 'Archived' &&
+          contextEl.closest('[data-testid="project-header"]:not([data-project-icon="archived"])')
+        ) {
+          return null;
+        }
+      }
+      if (trimmed === 'Pin' && contextEl.closest('[data-testid="conversation-pin-menu-item"]')) {
+        return IS_TW ? '釘選' : '置顶';
+      }
+      if (trimmed === 'Unpin' && contextEl.closest('[data-testid="conversation-pin-menu-item"]')) {
+        return IS_TW ? '取消釘選' : '取消置顶';
+      }
       if (trimmed === 'Plan' && (baseVal === '计划' || baseVal === '計畫') && contextEl.closest('[role="dialog"]')) {
         return L.ctxPlanDialog;
       }

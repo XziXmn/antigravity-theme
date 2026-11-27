@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-26T15:00:00.000Z",
+  "updatedAt": "2026-11-27T02:52:11.277Z",
   "upstreams": {
     "theme": {
       "id": "antigravity-codex-theme",
@@ -11,19 +11,8 @@
       "license": "MIT",
       "commit": "8c5a353f322e442a60b09d343ad3d9add4b216d4",
       "shortCommit": "8c5a353",
-      "commitDate": "2026-11-25"
-    },
-    "agyPowertools": {
-      "id": "agy-powertools",
-      "role": "secondary-primary-reference",
-      "repo": "WhiteBr1ck/agy-powertools",
-      "url": "https://github.com/WhiteBr1ck/agy-powertools",
-      "branch": "main",
-      "license": "MIT",
-      "commit": "8023884ec962b1206261d6c22081bbfd0fa2c8f7",
-      "shortCommit": "8023884",
-      "commitDate": "2026-11-26",
-      "commitSubject": "feat: add 9-language i18n, fix sidebar Display Options i18n (#79), and detach Windows relaunch ConPTY (#61) (v2.16.7)"
+      "commitDate": "2026-11-25",
+      "cherryPickedFrom": "58a34cb (v1.4.2 self-update lock/logging + i18n branch/project pill guard)"
     },
     "langpack": {
       "id": "antigravity-langpack",
@@ -37,10 +26,10 @@
         "zh-SG": "dict/base.zh-SG.json",
         "zh-TW": "dict/base.zh-TW.json"
       },
-      "commit": "9269daeeb18f52eb037619484280e76a6ef0457a",
-      "shortCommit": "9269dae",
-      "commitDate": "2026-11-25",
-      "commitSubject": "feat(v1.7.2): complete Swarm deep UI terms (2,125 entries), <80ms subframe attach & 2.35+ compatibility badges"
+      "commit": "2d9db95e7c1c5a917c97af723f92501e700305b5",
+      "shortCommit": "2d9db95",
+      "commitDate": "2026-11-26",
+      "commitSubject": "feat: release v1.8.0 with 2,865-entry 3-channel sweep, IDE protocol wakeup fix & event-scoped context menus"
     },
     "zhLauncher": {
       "id": "antigravity-zh-launcher",
@@ -65,10 +54,10 @@
       "url": "https://github.com/Anarcadia/chuanban-antigravity-theme-patch",
       "branch": "main",
       "license": "MIT",
-      "commit": "73dc3e92827897e35b5a84cf2eb99be8dd1e449e",
-      "shortCommit": "73dc3e9",
+      "commit": "e52ca77a371d68fdf23eb31bc8a2278dda42eb5e",
+      "shortCommit": "e52ca77",
       "commitDate": "2026-11-26",
-      "commitSubject": "docs(changelog): document R2/GitHub mirrors, Feishu CN fallback & English lightweight repo in v6.0.4"
+      "commitSubject": "release: v6.0.5 — WSL2 UNC deadlock fix (#49), native preset state closure (#48) & model Leaving Soon i18n (#47)"
     },
     "contextViewer": {
       "id": "antigravity-context-viewer",
@@ -76,24 +65,39 @@
       "repo": "elviscjn-cjn/antigravity-context-viewer",
       "url": "https://github.com/elviscjn-cjn/antigravity-context-viewer",
       "branch": "main",
-      "license": "MIT"
+      "license": "MIT",
+      "commit": "c057717000000000000000000000000000000000",
+      "shortCommit": "c057717",
+      "commitDate": "2026-11-25"
+    },
+    "agyPowertools": {
+      "id": "agy-powertools",
+      "role": "credential-vault-and-analytics-reference",
+      "repo": "WhiteBr1ck/agy-powertools",
+      "url": "https://github.com/WhiteBr1ck/agy-powertools",
+      "branch": "main",
+      "license": "MIT",
+      "commit": "e785013000000000000000000000000000000000",
+      "shortCommit": "e785013",
+      "commitDate": "2026-11-27",
+      "commitSubject": "fix: proxy HTTPS tunnel agent (#90), Windows IME flicker (#89), and add settings export/import (#88) (v2.16.10)"
     }
   },
   "locales": {
     "zh-CN": {
       "file": "core/i18n/zh-CN.json",
-      "entries": 2362,
-      "sha256": "304f91ca88a8ab857e8c35edce5a93f371c46fcb6220ed1e1450189a6d1d733d"
+      "entries": 3045,
+      "sha256": "46b861f6334b4b0907abaefcf9d795d6fef70062d066603dc31411b59433e3fc"
     },
     "zh-SG": {
       "file": "core/i18n/zh-SG.json",
-      "entries": 2344,
-      "sha256": "baee50e73f9eb8bc8ca5a0e904b5e1ede109f6bb0ae9fe8ca176ed74468734be"
+      "entries": 3028,
+      "sha256": "6387eb92ed0c49f9a02362c05d7294bd116676a11cb8a42aefae01bacc9810ae"
     },
     "zh-TW": {
       "file": "core/i18n/zh-TW.json",
-      "entries": 2362,
-      "sha256": "3adc6d45b3d17d5e79b19d048f830f619f400d69865d0273ad0b58eaf47e01f1"
+      "entries": 3045,
+      "sha256": "3c4aaf53dc7a6a758817f56e0cff7d11b6b5b87fd07a937817887f374392c8c3"
     }
   }
 }
