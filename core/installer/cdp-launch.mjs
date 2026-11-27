@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   NON_HOST_CMD_RE,
   isPidAlive,
@@ -12,10 +13,26 @@ import {
   sleepSync,
   stripUtf8Bom
 } from '../shared.mjs';
+import { validateRelaunchJob } from './relaunch-worker.mjs';
 
 export const CDP_RELAUNCH_GUARD_FILE = path.join(os.tmpdir(), 'ag-codex-cdp-relaunch-guard.json');
 const MAC_LAUNCHER_BUNDLE_PREFIX = 'com.antigravity.codex-theme.launcher';
 const LINUX_DESKTOP_MARKER = '# X-Antigravity-Codex-Theme=1';
+
+function readPackageVersion() {
+  const roots = [
+    new URL('../../package.json', import.meta.url),
+    new URL('../manifest.json', import.meta.url)
+  ];
+  for (const url of roots) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(url, 'utf8'));
+      const ver = typeof parsed?.version === 'string' ? parsed.version.trim() : '';
+      if (ver) return ver;
+    } catch {}
+  }
+  return '1.4.1';
+}
 
 export function readHostVersionAndProcesses(channel = 'auto') {
   const home = os.homedir();
@@ -271,7 +288,7 @@ export function ensureCdpLaunchers(channel = 'auto', options = {}) {
           '  <key>CFBundlePackageType</key>',
           '  <string>APPL</string>',
           '  <key>CFBundleShortVersionString</key>',
-          '  <string>1.3.5</string>',
+          `  <string>${readPackageVersion()}</string>`,
           '  <key>CFBundleVersion</key>',
           '  <string>110</string>',
           ...(iconBase ? ['  <key>CFBundleIconFile</key>', `  <string>${iconBase}</string>`] : []),
@@ -510,10 +527,6 @@ export function hasRecentActiveConversationWal(channel = 'auto', windowSec = 15)
   return activeFiles;
 }
 
-function psSingleQuote(value) {
-  return `'${String(value || '').replace(/'/g, "''")}'`;
-}
-
 export function scheduleWindowsDetachedRelaunch({
   targetExe,
   onboardingSync = null,
@@ -524,137 +537,49 @@ export function scheduleWindowsDetachedRelaunch({
   }
   const workDir = dataDir || path.join(os.tmpdir(), 'ag-codex-relaunch');
   fs.mkdirSync(workDir, { recursive: true });
-  const scriptPath = path.join(workDir, 'relaunch-antigravity.ps1');
-  const lnkPath = path.join(workDir, 'relaunch-antigravity.lnk');
-  const makeLnkPath = path.join(workDir, 'relaunch-make-lnk.ps1');
+
+  // Clean up any legacy shortcut / PowerShell artifacts from prior versions
+  for (const legacyName of ['relaunch-antigravity.lnk', 'relaunch-antigravity.ps1', 'relaunch-make-lnk.ps1']) {
+    try {
+      fs.rmSync(path.join(workDir, legacyName), { force: true });
+    } catch {}
+  }
+
+  const workerPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'relaunch-worker.mjs');
+  if (!fs.existsSync(workerPath)) {
+    return { scheduled: false, error: 'Missing relaunch-worker.mjs' };
+  }
+
+  const jobPath = path.join(workDir, `relaunch-job-${Date.now()}-${process.pid}.json`);
   const logPath = path.join(workDir, 'relaunch-antigravity.log');
+  const job = {
+    format: 1,
+    requestedAt: Date.now(),
+    targetExe,
+    onboardingSync: onboardingSync || null,
+    logPath
+  };
 
-  const appDataDir = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-  const storagePath = path.join(appDataDir, 'Antigravity', 'app_storage.json');
-  const cleanEmail = onboardingSync && typeof onboardingSync.email === 'string' ? onboardingSync.email.trim().toLowerCase() : '';
-  const cleanTos = typeof onboardingSync?.isGcpTos === 'boolean' ? onboardingSync.isGcpTos : null;
-
-  const onboardingLines = cleanEmail
-    ? [
-        'try {',
-        `  $storagePath = ${psSingleQuote(storagePath)}`,
-        '  if (Test-Path -LiteralPath $storagePath) {',
-        '    $rawStorage = Get-Content -LiteralPath $storagePath -Raw -Encoding UTF8',
-        '    $storageObj = $rawStorage | ConvertFrom-Json',
-        '    if ($storageObj -is [System.Management.Automation.PSCustomObject]) {',
-        `      $storageObj | Add-Member -NotePropertyName 'agy.onboarding.lastLoginUsername' -NotePropertyValue ${psSingleQuote(cleanEmail)} -Force`,
-        ...(cleanTos !== null
-          ? [`      $storageObj | Add-Member -NotePropertyName 'agy.onboarding.lastLoginIsGcpTos' -NotePropertyValue ${psSingleQuote(String(cleanTos))} -Force`]
-          : []),
-        "      $tmpStorage = $storagePath + '.ag.tmp'",
-        '      $jsonOut = $storageObj | ConvertTo-Json -Depth 100',
-        '      [System.IO.File]::WriteAllText($tmpStorage, $jsonOut, [System.Text.UTF8Encoding]::new($false))',
-        '      Move-Item -LiteralPath $tmpStorage -Destination $storagePath -Force',
-        "      Write-AgLog 'synced onboarding app_storage'",
-        '    }',
-        '  }',
-        "} catch { Write-AgLog ('onboarding err: ' + $_.Exception.Message) }"
-      ]
-    : [];
-
-  const body = [
-    'param([switch]$LaunchOnly)',
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    'if ($LaunchOnly) {',
-    '  $t = $env:AG_HOP_TARGET; $a = $env:AG_HOP_ARGS; $d = $env:AG_HOP_DIR',
-    '  Remove-Item Env:AG_HOP_TARGET,Env:AG_HOP_ARGS,Env:AG_HOP_DIR -ErrorAction SilentlyContinue',
-    '  if ($t) {',
-    '    if ($a) { Start-Process -FilePath $t -ArgumentList $a -WorkingDirectory $d }',
-    '    else { Start-Process -FilePath $t -WorkingDirectory $d }',
-    '  }',
-    '  exit 0',
-    '}',
-    `$logPath = ${psSingleQuote(logPath)}`,
-    `$lnkPath = ${psSingleQuote(lnkPath)}`,
-    "function Write-AgLog([string]$m) { try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format 'HH:mm:ss.fff') + ' ' + $m) -Encoding UTF8 } catch {} }",
-    "Write-AgLog ('relaunch started pid=' + $PID)",
-    'Start-Sleep -Milliseconds 300',
-    `$target = ${psSingleQuote(targetExe)}`,
-    '$targetDir = Split-Path -Parent $target',
-    'function Get-AgProcs {',
-    '  @(Get-CimInstance Win32_Process -Filter "Name=\'Antigravity.exe\'" | Where-Object {',
-    '    -not $_.ExecutablePath -or $_.ExecutablePath.Equals($target, [System.StringComparison]::OrdinalIgnoreCase)',
-    '  })',
-    '}',
-    "foreach ($p in @(Get-Process -Name 'Antigravity')) { if ($p.MainWindowHandle -ne 0) { [void]$p.CloseMainWindow() } }",
-    '$deadline = (Get-Date).AddSeconds(3)',
-    'while ((Get-Date) -lt $deadline) { if ((Get-AgProcs).Count -eq 0) { break }; Start-Sleep -Milliseconds 250 }',
-    'foreach ($p in (Get-AgProcs)) { Stop-Process -Id ([int]$p.ProcessId) -Force }',
-    '$waitExit = (Get-Date).AddSeconds(6)',
-    'while ((Get-Date) -lt $waitExit) { if ((Get-AgProcs).Count -eq 0) { break }; Start-Sleep -Milliseconds 250 }',
-    'Start-Sleep -Milliseconds 400',
-    ...onboardingLines,
-    'Remove-Item Env:ELECTRON_RUN_AS_NODE,Env:NODE_OPTIONS,Env:ANTIGRAVITY_LS_ADDRESS,Env:ANTIGRAVITY_CSRF_TOKEN -ErrorAction SilentlyContinue',
-    "$argLine = '--remote-debugging-port=0'",
-    'function Start-AgDetached([string]$filePath, [string]$arguments, [string]$wDir) {',
-    '  $psi = New-Object System.Diagnostics.ProcessStartInfo',
-    '  $psi.FileName = $filePath',
-    '  $psi.Arguments = $arguments',
-    '  $psi.WorkingDirectory = $wDir',
-    '  $psi.UseShellExecute = $false',
-    '  $psi.CreateNoWindow = $true',
-    '  return [System.Diagnostics.Process]::Start($psi)',
-    '}',
-    "$hopPs = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
-    "if (-not (Test-Path -LiteralPath $hopPs)) { $hopPs = 'powershell.exe' }",
-    '$env:AG_HOP_TARGET = $target; $env:AG_HOP_ARGS = $argLine; $env:AG_HOP_DIR = $targetDir',
-    'try {',
-    '  $hop = Start-AgDetached $hopPs (\'-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "\' + $PSCommandPath + \'" -LaunchOnly\') $targetDir',
-    '  if ($hop) { [void]$hop.WaitForExit(5000) }',
-    "} catch { Write-AgLog ('LaunchOnly err: ' + $_.Exception.Message) }",
-    'Remove-Item Env:AG_HOP_TARGET,Env:AG_HOP_ARGS,Env:AG_HOP_DIR -ErrorAction SilentlyContinue',
-    'Start-Sleep -Milliseconds 1200',
-    'if ((Get-AgProcs).Count -eq 0) {',
-    "  $cmdExe = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }",
-    '  $shim = Start-AgDetached $cmdExe (\'/d /c start "" /D "\' + $targetDir + \'" "\' + $target + \'" \' + $argLine + \' <NUL >NUL 2>&1\') $targetDir',
-    '  if ($shim) { [void]$shim.WaitForExit(3000) }',
-    '}',
-    "Write-AgLog ('done ag_procs=' + (Get-AgProcs).Count)",
-    'Remove-Item -LiteralPath $lnkPath -Force',
-    'Remove-Item -LiteralPath $PSCommandPath -Force'
-  ].join('\r\n');
-  fs.writeFileSync(scriptPath, '\uFEFF' + body + '\r\n', 'utf8');
-
-  const psExePath =
-    process.env.SystemRoot && fs.existsSync(path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
-      ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-      : 'powershell.exe';
-  const explorerExePath =
-    process.env.SystemRoot && fs.existsSync(path.join(process.env.SystemRoot, 'explorer.exe'))
-      ? path.join(process.env.SystemRoot, 'explorer.exe')
-      : 'explorer.exe';
-
-  const makeLnkBody = [
-    "$ErrorActionPreference = 'Stop'",
-    '$ws = New-Object -ComObject WScript.Shell',
-    '$s = $ws.CreateShortcut($env:AG_RELAUNCH_LNK)',
-    '$s.TargetPath = $env:AG_RELAUNCH_PS',
-    '$s.Arguments = \'-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "\' + $env:AG_RELAUNCH_SCRIPT + \'"\'',
-    '$s.WorkingDirectory = Split-Path -Parent $env:AG_RELAUNCH_SCRIPT',
-    '$s.WindowStyle = 7',
-    '$s.Save()'
-  ].join('\r\n');
-  fs.writeFileSync(makeLnkPath, '\uFEFF' + makeLnkBody + '\r\n', 'utf8');
+  const check = validateRelaunchJob(job);
+  if (!check.valid) {
+    return { scheduled: false, error: check.reason || 'Invalid relaunch job' };
+  }
 
   try {
-    const mk = spawnSync(psExePath, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', makeLnkPath], {
-      env: { ...process.env, AG_RELAUNCH_LNK: lnkPath, AG_RELAUNCH_PS: psExePath, AG_RELAUNCH_SCRIPT: scriptPath },
-      windowsHide: true,
-      timeout: 6000
+    fs.writeFileSync(jobPath, JSON.stringify(job, null, 2) + '\n', 'utf8');
+    const launcher = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', workerPath, jobPath], {
+      cwd: workDir,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
     });
-    if (mk.status !== 0 || !fs.existsSync(lnkPath)) {
-      return { scheduled: false, error: 'Failed to create relaunch shortcut' };
-    }
-    const launcher = spawn(explorerExePath, [lnkPath], { detached: true, stdio: 'ignore', windowsHide: true });
     launcher.unref();
     return { scheduled: true };
-  } finally {
-    try { fs.rmSync(makeLnkPath, { force: true }); } catch {}
+  } catch (err) {
+    try {
+      fs.rmSync(jobPath, { force: true });
+    } catch {}
+    return { scheduled: false, error: err?.message || String(err || 'Failed to spawn relaunch worker') };
   }
 }
 
@@ -764,12 +689,11 @@ export async function relaunchAntigravityWithCdp({
       spawnSync('osascript', ['-e', `tell application "${p.appPath}" to quit`], { stdio: 'ignore', timeout: 3000 });
       for (let i = 0; i < 25 && isPidAlive(p.pid); i++) sleepSync(100);
     } else if (process.platform === 'win32') {
-      const stopPs = `$gp = Get-Process -Id ${p.pid} -ErrorAction SilentlyContinue; if ($gp) { [void]$gp.CloseMainWindow(); if (-not $gp.WaitForExit(1800)) { Stop-Process -Id ${p.pid} -Force -ErrorAction SilentlyContinue } }`;
-      spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', stopPs], {
-        windowsHide: true,
-        stdio: 'ignore',
-        timeout: 5000
-      });
+      spawnSync('taskkill', ['/PID', String(p.pid)], { windowsHide: true, stdio: 'ignore', timeout: 3000 });
+      for (let i = 0; i < 18 && isPidAlive(p.pid); i++) sleepSync(100);
+      if (isPidAlive(p.pid)) {
+        spawnSync('taskkill', ['/F', '/PID', String(p.pid), '/T'], { windowsHide: true, stdio: 'ignore', timeout: 4000 });
+      }
     }
     if (isPidAlive(p.pid)) {
       try {

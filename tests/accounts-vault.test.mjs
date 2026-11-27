@@ -23,6 +23,7 @@ import {
   buildVaultCredentialJson
 } from '../core/daemon/account-oauth.mjs';
 import { createAccountsManager } from '../core/daemon/accounts.mjs';
+import { validateRelaunchJob, syncOnboardingStorageFile } from '../core/installer/relaunch-worker.mjs';
 import { createLanguageServerClient } from '../core/daemon/ls-client.mjs';
 
 test('credential-vault extracts email from nested token JSON and computes stable short hash', () => {
@@ -812,4 +813,68 @@ test('ls-client invalidates quota cache when hub PID/port changes and falls back
   assert.equal(q2.ok, true);
   assert.equal(q2.accountEmail, 'new@test.com');
   assert.equal(q2.groups[0].fiveHour.remainingPct, 85);
+});
+
+test('pure-Node relaunch-worker validates allowlisted binaries, atomically syncs app_storage, and removes legacy .lnk/toggle_disable', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relaunch-worker-test-'));
+  try {
+    const validExe = path.join(tmpDir, 'Antigravity.exe');
+    const badExe = path.join(tmpDir, 'cmd.exe');
+    fs.writeFileSync(validExe, '', 'utf8');
+    fs.writeFileSync(badExe, '', 'utf8');
+
+    assert.equal(validateRelaunchJob({ targetExe: validExe }).valid, true);
+    assert.equal(validateRelaunchJob({ targetExe: badExe }).valid, false);
+    assert.equal(validateRelaunchJob({ targetExe: path.join(tmpDir, 'missing', 'Antigravity.exe') }).valid, false);
+
+    const storagePath = path.join(tmpDir, 'app_storage.json');
+    fs.writeFileSync(storagePath, JSON.stringify({ existingKey: 42 }) + '\n', 'utf8');
+    const syncRes = syncOnboardingStorageFile({ email: 'Alex@Example.com', isGcpTos: true }, storagePath);
+    assert.equal(syncRes.ok, true);
+    const updated = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
+    assert.equal(updated.existingKey, 42);
+    assert.equal(updated['agy.onboarding.lastLoginUsername'], 'alex@example.com');
+    assert.equal(updated['agy.onboarding.lastLoginIsGcpTos'], 'true');
+
+    const cdpLaunchSrc = fs.readFileSync(path.resolve('core/installer/cdp-launch.mjs'), 'utf8');
+    assert.equal(cdpLaunchSrc.includes('relaunch-worker.mjs'), true);
+    assert.equal(cdpLaunchSrc.includes('AG_RELAUNCH_LNK'), false);
+
+    const accountsUiSrc = fs.readFileSync(path.resolve('core/runtime/79-accounts-dashboard.js'), 'utf8');
+    assert.equal(accountsUiSrc.includes('data-acc-act="toggle_disable"'), false);
+    assert.equal(accountsUiSrc.includes('ag_topbar_usage_metric'), true);
+    assert.equal(accountsUiSrc.includes('ag_usage_pop_prefs'), true);
+
+    const settingsUiSrc = fs.readFileSync(path.resolve('core/runtime/75-settings-ui.js'), 'utf8');
+    assert.equal(settingsUiSrc.includes('syncUiPrefsToRuntime'), true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('topbarUsageMetric persists across bundle controller restarts via user/config.json', async () => {
+  const { createBundleController, USER_DIR } = await import('../core/daemon/paths.mjs');
+  const cfgPath = path.join(USER_DIR, 'config.json');
+  const origExists = fs.existsSync(cfgPath);
+  const origRaw = origExists ? fs.readFileSync(cfgPath, 'utf8') : null;
+  try {
+    const ctrl1 = createBundleController({ hasSqlite: false, cliChannel: 'stable' });
+    ctrl1.rebuildBundleIfNeeded(true);
+    const up = ctrl1.updateUserConfig({ topbarUsageMetric: 'todayTokens' });
+    assert.equal(up.ok, true);
+    assert.equal(up.config.topbarUsageMetric, 'todayTokens');
+
+    // Simulate full daemon restart with a fresh controller reading the same userDir
+    const ctrl2 = createBundleController({ hasSqlite: false, cliChannel: 'stable' });
+    ctrl2.rebuildBundleIfNeeded(true);
+    const state2 = ctrl2.getState();
+    assert.equal(state2.activeConfig.topbarUsageMetric, 'todayTokens');
+    assert.equal(state2.cachedInjectScript.includes('"topbarUsageMetric":"todayTokens"'), true);
+  } finally {
+    if (origExists && origRaw !== null) {
+      fs.writeFileSync(cfgPath, origRaw, 'utf8');
+    } else if (fs.existsSync(cfgPath)) {
+      fs.rmSync(cfgPath, { force: true });
+    }
+  }
 });

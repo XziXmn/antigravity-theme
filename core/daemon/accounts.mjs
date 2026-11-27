@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeCredEmail, syncDesktopAndCliCredentials, clearDesktopOAuthState } from './credential-vault.mjs';
 import { parseOAuthTokenPayload, startLoopbackOAuthFlow } from './account-oauth.mjs';
+import { syncOnboardingStorageFile } from '../installer/relaunch-worker.mjs';
 
 const MAX_TIMELINE_ENTRIES = 512;
 const MAX_QUOTA_SAMPLES = 4000;
@@ -476,6 +477,8 @@ export function createAccountsManager({
       }
     } else if (relaunch) {
       manualRestartRequired = true;
+    } else if (onboardingSync) {
+      syncOnboardingStorageFile(onboardingSync);
     }
 
     return {

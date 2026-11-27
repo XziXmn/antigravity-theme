@@ -1,6 +1,6 @@
 {
   "name": "antigravity-codex-theme",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "minNodeVersion": "22.13.0",
   "fullMetricsNodeVersion": "22.13.0",
   "files": {
@@ -13,8 +13,8 @@
       "bytes": 17378
     },
     "daemon/accounts.mjs": {
-      "sha256": "76470f39fd2c15d878b669f7eb5b85bf5748a4c1101cce4fc8b308d10b9adcdc",
-      "bytes": 28121
+      "sha256": "3120d1dee1742046ea182a60a85d615176b7afabfe9aa5c6ed9211aeb13ecf66",
+      "bytes": 28281
     },
     "daemon/cdp-bridge.mjs": {
       "sha256": "da146ba991611c5764b128058354d9e9c96ee5578f7ee06424ed79b88dc81b16",
@@ -49,8 +49,8 @@
       "bytes": 2123
     },
     "daemon/paths.mjs": {
-      "sha256": "13e76c11e79c66f9d4a34c2b0b820f63dfeb64ecb169e2bc9edf3ca4c1cfc4c5",
-      "bytes": 30107
+      "sha256": "0c8f3a1ec5b34025740f70ad1c15513af04bf08f94c0ca38556e67d3d7b188d2",
+      "bytes": 30482
     },
     "daemon/prompt-suggest.mjs": {
       "sha256": "bbce7e0d912de2fdaedc374520efffe721b5d8173213b345661c17893ba365a1",
@@ -141,8 +141,8 @@
       "bytes": 217691
     },
     "installer/cdp-launch.mjs": {
-      "sha256": "86fc738fc13fcbd8f9b7b031959a6bbd82ee091d3074c1ea2bc4610091d1d10e",
-      "bytes": 37436
+      "sha256": "ae058e2ea38ccefbb9b05727b02c0b7fb76137b87f2b5fdc4aaf11dbcd7ce959",
+      "bytes": 31901
     },
     "installer/env.mjs": {
       "sha256": "0b9394917e972869bce0911340f30242227987850e7e4b5658f306fe123536e2",
@@ -156,12 +156,16 @@
       "sha256": "4001613efc367581f47aa39e7080f39466810a38aff58c373eb654e54da5a651",
       "bytes": 5745
     },
+    "installer/relaunch-worker.mjs": {
+      "sha256": "1446f113b38a6c1a5f76cded906b7516897e5f3c2885239a14b63aa6ab5b58d5",
+      "bytes": 6746
+    },
     "installer/service.mjs": {
       "sha256": "5433f33bce24cfdef5e1073387a8affbd084e5fc4709f1c21c1e698a47027e96",
       "bytes": 20363
     },
     "runtime/00-head.js": {
-      "sha256": "d72ce7af5b0282d5f5c7cfdde067419e0c12644dbb37c06fb058c92a3372ab64",
+      "sha256": "4c247a834962f2c273a49ee31bbe11c52cfe4ac0dd92b8c0fa89f8f761a29743",
       "bytes": 13751
     },
     "runtime/10-guards.js": {
@@ -193,16 +197,16 @@
       "bytes": 13183
     },
     "runtime/75-settings-ui.js": {
-      "sha256": "b9bcf7686e36979b654ed5cabbbe3ee667bee32137a919ea308d97c1c1fa8c13",
-      "bytes": 187605
+      "sha256": "139402081706f911f29cfefa2833386ecfe28448592156de35dee74c7c207340",
+      "bytes": 188582
     },
     "runtime/78-flow-mode-picker.js": {
       "sha256": "d2f21b6e3c2fa4fe53d532cb8b528d338b60de2cea6a5219a15d84149fef6de7",
       "bytes": 30720
     },
     "runtime/79-accounts-dashboard.js": {
-      "sha256": "3490776993dcdc407a8c3db4421d42a4305f8685dceed8f6a84884729fe450d2",
-      "bytes": 115314
+      "sha256": "ffbf5ceebdbcfe8e578950239a40861f03745f3101baae52abb1d6d5da44efec",
+      "bytes": 116515
     },
     "runtime/90-tail.js": {
       "sha256": "c40e9777bb0b24b8a70f933414c8c1fe6813dba3370242241295321b99fdefc9",
@@ -241,7 +245,7 @@
       "bytes": 5463
     },
     "styles/49-accounts-dashboard.css": {
-      "sha256": "fb1fd0b18db8fe935d5cc19a2cca7725efe819fde73030607add23a1ab760fd3",
+      "sha256": "5dd3bd03dc26fe8a8a1ff03bd4997c6f0cc6c3bf448b89c1f82f41e69d54dca1",
       "bytes": 47651
     },
     "upstreams.json": {

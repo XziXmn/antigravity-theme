@@ -34,6 +34,23 @@
     localStorage.removeItem('ag_usage_aux_width');
   } catch {}
 
+  const VALID_POP_RANGES = ['today', 'week', 'month', 'year', 'all'];
+  const VALID_HEAT_MODES = ['daily', 'weekly', 'cumulative'];
+  const VALID_HEAT_METRICS = ['tokens', 'cost', 'requests', 'quota'];
+  const VALID_TOPBAR_MODES = ['quota', 'sessionTokens', 'todayTokens', 'monthTokens', 'monthCost', 'icon'];
+
+  function loadUsagePopPrefs() {
+    try {
+      const raw = localStorage.getItem('ag_usage_pop_prefs');
+      if (!raw) return {};
+      const p = JSON.parse(raw);
+      return p && typeof p === 'object' ? p : {};
+    } catch {
+      return {};
+    }
+  }
+  const savedPopPrefs = loadUsagePopPrefs();
+
   const ui = {
     popoverOpen: false,
     popTrendTab: 'models', // 'models' | 'accounts'
@@ -52,14 +69,27 @@
     banner: null,
     overview: null,
     analytics: null,
-    range: 'month',
+    range: VALID_POP_RANGES.includes(savedPopPrefs.range) ? savedPopPrefs.range : 'month',
     accountFilter: '__current__', // default: active account; user can switch to 'all' or specific email
     acctMenuOpen: false,
-    heatDisplayMode: 'daily', // ZCode 3 modes: 'daily' | 'weekly' | 'cumulative'
-    heatMetric: 'tokens', // 'tokens' | 'cost' | 'requests' | 'quota'
+    heatDisplayMode: VALID_HEAT_MODES.includes(savedPopPrefs.heatDisplayMode) ? savedPopPrefs.heatDisplayMode : 'daily',
+    heatMetric: VALID_HEAT_METRICS.includes(savedPopPrefs.heatMetric) ? savedPopPrefs.heatMetric : 'tokens',
     heatSpanDays: 182,
     selectedHeatKey: ''
   };
+
+  function saveUsagePopPrefs() {
+    try {
+      localStorage.setItem(
+        'ag_usage_pop_prefs',
+        JSON.stringify({
+          range: ui.range,
+          heatDisplayMode: ui.heatDisplayMode,
+          heatMetric: ui.heatMetric
+        })
+      );
+    } catch {}
+  }
 
   function getLoc() {
     const loc = String(window.__ag_settings_locale || boot.i18nLocale || 'zh-CN').trim();
@@ -1407,15 +1437,12 @@
                 '</div>'
               : '';
 
-            const slot1Html =
-              !a.isActive && !a.disabled
-                ? '<button type="button" class="ag-s-hdr-link is-primary" data-acc-act="switch" data-acc-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>' + esc(s.switchBtn) + '</button>'
-                : a.isActive
-                ? '<span class="ag-acc-slot-active">' + esc(s.activeBadge) + '</span>'
-                : '<span class="ag-acc-pill" style="justify-content:center;height:27px">' + esc(s.disabledBadge) + '</span>';
+            const slot1Html = !a.isActive
+              ? '<button type="button" class="ag-s-hdr-link is-primary" data-acc-act="switch" data-acc-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>' + esc(s.switchBtn) + '</button>'
+              : '<span class="ag-acc-slot-active">' + esc(s.activeBadge) + '</span>';
 
             return (
-              '<div class="ag-s-row" style="' + (a.disabled ? 'opacity:0.58' : '') + '">' +
+              '<div class="ag-s-row">' +
               '<div class="ag-acc-head-row">' +
               '<div class="ag-acc-ident">' +
               '<span class="ag-acc-dot' + (a.isActive ? ' is-active' : '') + '"></span>' +
@@ -1425,7 +1452,6 @@
               '<div class="ag-acc-actions-grid">' +
               slot1Html +
               '<button type="button" class="ag-s-hdr-link" data-acc-act="refresh_one" data-acc-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>' + esc(s.refreshBtn) + '</button>' +
-              '<button type="button" class="ag-s-hdr-link" data-acc-act="toggle_disable" data-acc-id="' + esc(a.id) + '" data-next-dis="' + (a.disabled ? '0' : '1') + '">' + esc(a.disabled ? s.enableBtn : s.disableBtn) + '</button>' +
               '<button type="button" class="ag-s-hdr-link is-danger" data-acc-act="remove" data-acc-id="' + esc(a.id) + '">' + esc(s.removeBtn) + '</button>' +
               '</div>' +
               '</div>' +
@@ -1544,10 +1570,18 @@
     if (resizer) resizer.remove();
   }
 
+  let topbarWarmRetryCount = 0;
   function ensureTopbarMetricsWarm() {
     if (topbarMetricsFetching || disposed) return;
     if (topbarMetricsCache && Date.now() - topbarMetricsCache.at < 25000) return;
-    if (typeof window.__agUsageAnalytics !== 'function') return;
+    if (typeof window.__agUsageAnalytics !== 'function') {
+      if (topbarWarmRetryCount < 6) {
+        topbarWarmRetryCount++;
+        setTimeout(() => ensureTopbarMetricsWarm(), 400);
+      }
+      return;
+    }
+    topbarWarmRetryCount = 0;
     topbarMetricsFetching = true;
     void callAnalytics({
       range: 'month',
@@ -1571,8 +1605,12 @@
 
   function getTopbarDisplayMode() {
     const prefs = window.__ag_ui_prefs && typeof window.__ag_ui_prefs === 'object' ? window.__ag_ui_prefs : null;
-    const raw = (prefs && prefs.topbarUsageMetric) || boot.userConfig?.topbarUsageMetric || boot.topbarUsageMetric || 'quota';
-    return ['quota', 'sessionTokens', 'todayTokens', 'monthTokens', 'monthCost', 'icon'].includes(raw) ? raw : 'quota';
+    let lsVal = '';
+    try {
+      lsVal = localStorage.getItem('ag_topbar_usage_metric') || '';
+    } catch {}
+    const raw = (prefs && prefs.topbarUsageMetric) || boot.userConfig?.topbarUsageMetric || boot.topbarUsageMetric || lsVal || 'quota';
+    return VALID_TOPBAR_MODES.includes(raw) ? raw : 'quota';
   }
 
   function refreshTopbarBadge() {
@@ -1987,6 +2025,7 @@
         if (rangeBtn) {
           ui.range = rangeBtn.getAttribute('data-ana-range') || 'month';
           ui.reqPageSize = 100;
+          saveUsagePopPrefs();
           void refreshAnalytics(false);
           return;
         }
@@ -2001,12 +2040,14 @@
         if (hModeBtn) {
           ui.heatDisplayMode = hModeBtn.getAttribute('data-heat-mode') || 'daily';
           ui.selectedHeatKey = '';
+          saveUsagePopPrefs();
           renderUsagePopover();
           return;
         }
         const hmBtn = ev.target?.closest?.('[data-heat-metric]');
         if (hmBtn) {
           ui.heatMetric = hmBtn.getAttribute('data-heat-metric') || 'tokens';
+          saveUsagePopPrefs();
           renderUsagePopover();
           return;
         }
@@ -2140,17 +2181,15 @@
           : null;
       renderPane();
 
+      const wantRelaunch = ui.overview?.autoSwitch?.autoRelaunch !== false;
       let res = null;
       if (act === 'capture') res = await callAccounts('capture_current');
       else if (act === 'oauth_add') res = await callAccounts('start_oauth_add');
-      else if (act === 'native_add') res = await callAccounts('prepare_native_add', { relaunch: true });
+      else if (act === 'native_add') res = await callAccounts('prepare_native_add', { relaunch: wantRelaunch });
       else if (act === 'refresh_all') res = await callAccounts('refresh_quota', { accountId: 'all' });
       else if (act === 'refresh_one') res = await callAccounts('refresh_quota', { accountId: id });
-      else if (act === 'switch') res = await callAccounts('switch_account', { accountId: id, relaunch: true });
-      else if (act === 'toggle_disable') {
-        const nextDis = actBtn.getAttribute('data-next-dis') === '1';
-        res = await callAccounts('update_meta', { accountId: id, disabled: nextDis });
-      } else if (act === 'remove') {
+      else if (act === 'switch') res = await callAccounts('switch_account', { accountId: id, relaunch: wantRelaunch });
+      else if (act === 'remove') {
         res = await callAccounts('remove_account', { accountId: id });
       }
 
@@ -2160,8 +2199,10 @@
         if ((act === 'capture' || act === 'oauth_add') && res.account?.email) {
           ui.banner = { error: false, text: `${s.okCaptured}: ${maskEmail(res.account.email, Boolean(ui.overview?.privacyMask))}` };
         } else if (act === 'switch') {
-          if (res.manualRestartRequired) {
-            ui.banner = { error: true, text: '已切好凭据，但自动重启未成功（' + (res.relaunchError || '请手动重启 Antigravity') + '），重启客户端后生效。' };
+          if (!wantRelaunch) {
+            ui.banner = { error: false, text: '已切换目标账号凭据，请手动重启 Antigravity 使新账号生效。' };
+          } else if (res.manualRestartRequired) {
+            ui.banner = { error: true, text: '已切好凭据，但自动重启未成功（' + (res.relaunchError || '请手动重启 Antigravity') + '），请手动重启 Antigravity 后生效。' };
           } else {
             ui.banner = { error: false, text: '已切换目标账号凭据，正在平滑重启 Antigravity 使其生效…' };
           }
@@ -2503,6 +2544,10 @@
     if (document.body) observer.observe(document.body, { childList: true, subtree: true });
   } catch {}
   syncSettingsDialog();
+  const initTopbarMode = getTopbarDisplayMode();
+  if (initTopbarMode === 'todayTokens' || initTopbarMode === 'monthTokens' || initTopbarMode === 'monthCost') {
+    ensureTopbarMetricsWarm();
+  }
   if (typeof window.__agAccountsAction === 'function' && !ui.overview && !ui.loadingAccounts) {
     void refreshOverview();
   }

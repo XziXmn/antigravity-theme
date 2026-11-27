@@ -102,7 +102,19 @@ export const I18N_DIR = path.join(CORE_DIR, 'i18n');
 export const STYLES_DIR = path.join(CORE_DIR, 'styles');
 export const RUNTIME_DIR = path.join(CORE_DIR, 'runtime');
 export const USER_DIR = path.join(ROOT_DIR, 'user');
-export const BASE_VERSION = '1.3.5';
+
+function readBaseVersion() {
+  for (const candidate of [path.join(ROOT_DIR, 'package.json'), path.join(CORE_DIR, 'manifest.json')]) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      const ver = typeof parsed?.version === 'string' ? parsed.version.trim() : '';
+      if (ver) return ver;
+    } catch {}
+  }
+  return '1.4.1';
+}
+
+export const BASE_VERSION = readBaseVersion();
 
 export const SUPPORTED_I18N_LOCALES = Object.freeze(['zh-CN', 'zh-SG', 'zh-TW', 'en']);
 export const AI_LANG_RULE_FILENAME = '99_antigravity_codex_lang.md';

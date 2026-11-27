@@ -8,6 +8,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { verifyCoreIntegrity } from '../core/installer/manifest.mjs';
+import { BASE_VERSION } from '../core/daemon/paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -158,4 +159,11 @@ test('Repository contains zero upstream branding, removed warm presets, or Drive
   assert.ok(!readme.includes('<your-username>'));
   assert.ok(!readme.includes('状态灯'));
   assert.ok(!readme.includes('琥珀'));
+});
+
+test('BASE_VERSION, package.json, and core/manifest.json versions stay strictly aligned', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'core', 'manifest.json'), 'utf8'));
+  assert.equal(BASE_VERSION, pkg.version);
+  assert.equal(manifest.version, pkg.version);
 });

@@ -293,6 +293,37 @@
       let autoTitleStatusMsg = '';
       let autoTitleBusy = false;
 
+      const VALID_TOPBAR_METRICS = ['quota', 'sessionTokens', 'todayTokens', 'monthTokens', 'monthCost', 'icon'];
+      function readStoredTopbarMetric() {
+        try {
+          const v = localStorage.getItem('ag_topbar_usage_metric');
+          return VALID_TOPBAR_METRICS.includes(v) ? v : '';
+        } catch {
+          return '';
+        }
+      }
+      function syncUiPrefsToRuntime(cfgObj, { refreshTopbar = false } = {}) {
+        if (!cfgObj || typeof cfgObj !== 'object') return;
+        const metric = VALID_TOPBAR_METRICS.includes(cfgObj.topbarUsageMetric)
+          ? cfgObj.topbarUsageMetric
+          : readStoredTopbarMetric() || 'quota';
+        window.__ag_ui_prefs = Object.assign({}, window.__ag_ui_prefs || {}, {
+          compactTypography: cfgObj.compactTypography !== false,
+          topbarUsageMetric: metric,
+          overviewQuota: cfgObj.overviewQuota !== false,
+          overviewProgress: cfgObj.overviewProgress !== false,
+          showClaudeQuota: Boolean(cfgObj.showClaudeQuota),
+          flow: cfgObj.flow
+        });
+        boot.userConfig = Object.assign({}, boot.userConfig || {}, window.__ag_ui_prefs);
+        try {
+          localStorage.setItem('ag_topbar_usage_metric', metric);
+        } catch {}
+        if (refreshTopbar && typeof window.__ag_refresh_topbar_usage === 'function') {
+          try { window.__ag_refresh_topbar_usage(); } catch {}
+        }
+      }
+
       const uiState = {
         config: {
           i18nLocale: bootUserCfg.i18nLocale || boot.i18nLocale || (MODULES.i18n ? 'zh-CN' : 'en'),
@@ -318,7 +349,7 @@
           telemetryLayout: bootUserCfg.telemetryLayout || boot.telemetryLayout || 'compact',
           telemetryCacheMode: bootUserCfg.telemetryCacheMode || boot.telemetryCacheMode || 'session',
           compactTypography: bootUserCfg.compactTypography !== false && boot.compactTypography !== false,
-          topbarUsageMetric: bootUserCfg.topbarUsageMetric || boot.topbarUsageMetric || 'quota',
+          topbarUsageMetric: bootUserCfg.topbarUsageMetric || boot.topbarUsageMetric || readStoredTopbarMetric() || 'quota',
           overviewQuota: bootUserCfg.overviewQuota !== false && boot.overviewQuota !== false,
           overviewProgress: bootUserCfg.overviewProgress !== false && boot.overviewProgress !== false,
           showClaudeQuota: Boolean(bootUserCfg.showClaudeQuota ?? boot.showClaudeQuota),
@@ -351,6 +382,7 @@
           error: ''
         }
       };
+      syncUiPrefsToRuntime(uiState.config, { refreshTopbar: false });
 
       function getShortVersionTag() {
         const m = String(PATCH_VERSION || '').match(/^(\d+\.\d+(?:\.\d+)?)/);
@@ -1125,6 +1157,7 @@
           if (typeof promptDrafts.global !== 'string') {
             setDraftForTab('global', nextSp.text);
           }
+          syncUiPrefsToRuntime(uiState.config, { refreshTopbar: true });
         }
         if (res.flowStatus && typeof res.flowStatus === 'object') {
           uiState.flowStatus = res.flowStatus;
@@ -1293,20 +1326,9 @@
         if (typeof patch.overviewQuota === 'boolean') uiState.config.overviewQuota = patch.overviewQuota;
         if (typeof patch.overviewProgress === 'boolean') uiState.config.overviewProgress = patch.overviewProgress;
         if (typeof patch.showClaudeQuota === 'boolean') uiState.config.showClaudeQuota = patch.showClaudeQuota;
-        window.__ag_ui_prefs = Object.assign({}, window.__ag_ui_prefs || {}, {
-          compactTypography: uiState.config.compactTypography,
-          topbarUsageMetric: uiState.config.topbarUsageMetric || 'quota',
-          overviewQuota: uiState.config.overviewQuota,
-          overviewProgress: uiState.config.overviewProgress,
-          showClaudeQuota: Boolean(uiState.config.showClaudeQuota),
-          flow: uiState.config.flow
-        });
-        boot.userConfig = Object.assign({}, boot.userConfig || {}, window.__ag_ui_prefs);
+        syncUiPrefsToRuntime(uiState.config, { refreshTopbar: true });
         if (typeof window.__ag_sync_overview_extensions === 'function') {
           try { window.__ag_sync_overview_extensions(); } catch {}
-        }
-        if (typeof window.__ag_refresh_topbar_usage === 'function') {
-          try { window.__ag_refresh_topbar_usage(); } catch {}
         }
         if (typeof window.__ag_sync_preset_fn === 'function') {
           try { window.__ag_sync_preset_fn(); } catch {}

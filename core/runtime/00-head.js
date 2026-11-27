@@ -12,7 +12,7 @@
   if (window.top !== window && !IS_SWARM_PLUGIN_FRAME) return;
   if (!boot || typeof boot !== 'object') return;
 
-  const PATCH_VERSION = boot.version || '1.3.5';
+  const PATCH_VERSION = boot.version || '1.4.1';
   const ENABLED = boot.enabled !== false;
   const I18N_LOCALE = boot.i18nLocale || 'zh-CN';
   const CSS_TEXT = boot.cssText || '';

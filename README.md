@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/static/v1?label=Antigravity&message=2.35%2B&color=2B7FFF&labelColor=363636" alt="Antigravity 2.35+">
   <img src="https://img.shields.io/static/v1?label=Node.js&message=%3E%3D%2022.13.0&color=339933&labelColor=363636&logo=nodedotjs&logoColor=white" alt="Node.js >= 22.13.0">
   <img src="https://img.shields.io/static/v1?label=platform&message=macOS%20%C2%B7%20Windows%20%C2%B7%20Linux&color=4B5563&labelColor=363636" alt="macOS · Windows · Linux">
-  <img src="https://img.shields.io/static/v1?label=version&message=v1.4.0&color=2B7FFF&labelColor=363636" alt="version v1.4.0">
+  <img src="https://img.shields.io/static/v1?label=version&message=v1.4.1&color=2B7FFF&labelColor=363636" alt="version v1.4.1">
   <a href="LICENSE"><img src="https://img.shields.io/static/v1?label=license&message=GPL--3.0&color=10B981&labelColor=363636" alt="GPL-3.0 License"></a>
 </p>
 
@@ -154,7 +154,7 @@ node install.mjs install --only theme,i18n,metrics
 | `node install.mjs sync-i18n` / `npm run sync-i18n` | 同步上游中文词库与 `core/upstreams.json` |
 | `node install.mjs rollback` | 回滚至上一份备份的 `core/` 版本 |
 | `node install.mjs uninstall` | 停止服务、清理自启项与代理配置，恢复原生英文界面与样式 |
-| `node install.mjs build-manifest && npm run check && npm test` | 重建 `61` 个核心文件清单、校验全量语法并运行 `node:test` 单元测试 |
+| `node install.mjs build-manifest && npm run check && npm test` | 重建 `62` 个核心文件清单、校验全量语法并运行 `node:test` 单元测试 |
 
 </details>
 
@@ -163,7 +163,7 @@ node install.mjs install --only theme,i18n,metrics
 ## 自定义与运维
 
 - **日常可视化配置**：直接在 Antigravity **设置 → 增强设置** 中切换主题、顶栏指标模式、Flow 滑动压缩阈值、多账号自动切换与系统提示词/Hooks，保存后实时写入 `~/.gemini/antigravity/codex-theme/user/config.json`，升级插件时不会覆盖 `user/`。
-- **源码定制与构建**：核心模块共 `61` 个文件（`core/daemon/`、`core/flow/`、`core/runtime/`、`core/styles/`、`core/installer/`、`core/i18n/`），修改后执行以下命令构建清单、校验测试并部署：
+- **源码定制与构建**：核心模块共 `62` 个文件（`core/daemon/`、`core/flow/`、`core/runtime/`、`core/styles/`、`core/installer/`、`core/i18n/`），修改后执行以下命令构建清单、校验测试并部署：
 
 ```bash
 node install.mjs build-manifest && npm run check && npm test && node install.mjs install
