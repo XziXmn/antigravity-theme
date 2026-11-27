@@ -31,7 +31,7 @@ function readPackageVersion() {
       if (ver) return ver;
     } catch {}
   }
-  return '1.4.1';
+  return '1.4.2';
 }
 
 export function readHostVersionAndProcesses(channel = 'auto') {

@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/static/v1?label=Antigravity&message=2.35%2B&color=2B7FFF&labelColor=363636" alt="Antigravity 2.35+">
   <img src="https://img.shields.io/static/v1?label=Node.js&message=%3E%3D%2022.13.0&color=339933&labelColor=363636&logo=nodedotjs&logoColor=white" alt="Node.js >= 22.13.0">
   <img src="https://img.shields.io/static/v1?label=platform&message=macOS%20%C2%B7%20Windows%20%C2%B7%20Linux&color=4B5563&labelColor=363636" alt="macOS · Windows · Linux">
-  <img src="https://img.shields.io/static/v1?label=version&message=v1.4.1&color=2B7FFF&labelColor=363636" alt="version v1.4.1">
+  <img src="https://img.shields.io/static/v1?label=version&message=v1.4.2&color=2B7FFF&labelColor=363636" alt="version v1.4.2">
   <a href="LICENSE"><img src="https://img.shields.io/static/v1?label=license&message=GPL--3.0&color=10B981&labelColor=363636" alt="GPL-3.0 License"></a>
 </p>
 
