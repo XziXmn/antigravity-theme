@@ -84,6 +84,7 @@
     navigatorOnline = true,
     hasConversation = true,
     curModel = '',
+    flowRecovery = null,
     limits = WAIT_DEFAULTS
   } = {}) {
     const cfg = Object.assign({}, WAIT_DEFAULTS, limits || {});
@@ -142,7 +143,7 @@
     const liveRetrying = Boolean(
       isExecuting &&
         hasProvider &&
-        (hasLiveRetrySignal || Boolean(loadingRetryMatch) || isLiveNonCancelErr)
+        (hasLiveRetrySignal || Boolean(loadingRetryMatch))
     );
     const isRetrying = Boolean(isExecuting && !liveDefinitelyStopped && (stRetrying || liveRetrying));
 
@@ -182,10 +183,34 @@
     const isModelWaiting = Boolean(isExecuting && waitDurSec >= cfg.SLOW_WAIT_SEC);
     const hardErrMsg = offlineProblem || unconnProblem || apiErrMsg;
 
+    const flowRecActive = Boolean(flowRecovery && flowRecovery.active && (!flowRecovery.expiresAt || flowRecovery.expiresAt > now));
+    const flowRecDone = Boolean(!flowRecActive && flowRecovery && flowRecovery.doneText && (!flowRecovery.expiresAt || flowRecovery.expiresAt > now));
+    const formatFlowRecChip = (fr) => {
+      if (!fr) return '';
+      const stg = String(fr.stage || '');
+      const rsn = String(fr.reason || '');
+      if (stg === 'staging') {
+        if (rsn === 'refusal') return '拒答 · 软重试中';
+        if (rsn === 'filter') return '拦截 · 软重试中';
+        if (rsn === 'empty') return '空响应 · 重试中';
+        return '软重试中';
+      }
+      if (stg === 'soft-retry') {
+        const step = fr.attempt && fr.maxAttempts ? ' ' + fr.attempt + '/' + fr.maxAttempts : '';
+        return (rsn === 'refusal' ? '拒答软重试' : '软重试中') + step;
+      }
+      if (stg === 'continue') {
+        const step = fr.attempt && fr.maxAttempts ? ' ' + fr.attempt + '/' + fr.maxAttempts : '';
+        return '自动续写中' + step;
+      }
+      if (stg === 'remap') return '切换备用模型重试';
+      return '软重试中';
+    };
+
     let visualState = 'idle';
     if (hardErrMsg) {
       visualState = 'error';
-    } else if (unconnSlow || isRetrying || isModelWaiting) {
+    } else if (flowRecActive || unconnSlow || isRetrying || isModelWaiting) {
       visualState = 'slow';
     } else if (isExecuting) {
       visualState = 'running';
@@ -216,7 +241,12 @@
       noteHtml = '<strong>执行异常</strong><span>' + escapeStatusHtml(errDetail) + '</span>';
     } else if (visualState === 'slow') {
       chipClass = 'is-slow';
-      if (unconnSlow) {
+      if (flowRecActive) {
+        chipText = formatFlowRecChip(flowRecovery);
+        dotTitle = '会话状态：后台恢复中 · ' + chipText;
+        noteClass = 'is-visible';
+        noteHtml = '<strong>后台恢复</strong><span>' + escapeStatusHtml(chipText) + '</span>';
+      } else if (unconnSlow) {
         chipText = '重连中 · ' + fmtWaitDuration(unconnDurSec);
         dotTitle = '会话状态：等待或重试 · 正在建立会话流连接（已等待 ' + fmtWaitDuration(unconnDurSec) + '）';
         noteClass = 'is-visible';
@@ -287,6 +317,10 @@
         chipText = '新步执行中...';
         dotTitle = '会话状态：执行中 · 模型推理与输出中';
       }
+    } else if (flowRecDone) {
+      chipClass = 'is-recovered';
+      chipText = String(flowRecovery.doneText);
+      dotTitle = '会话状态：就绪 · ' + chipText;
     } else {
       chipText = '';
       dotTitle = '会话状态：就绪';

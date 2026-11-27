@@ -23,6 +23,7 @@ import {
   createFlowCompactor
 } from '../core/flow/compactor.mjs';
 import { createMetricsReader } from '../core/daemon/sqlite-metrics.mjs';
+import { buildInlineTelemetryHtml, buildMetricsTooltipHtml } from '../core/daemon/telemetry-renderer.mjs';
 import { detectSubagentRequest } from '../core/flow/proxy.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -563,4 +564,183 @@ test('telemetry-ui persists compact fx by cid with deferredReveal and picker syn
   assert.match(telemetrySrc, /deferredReveal/);
   assert.match(telemetrySrc, /window\.__ag_sync_flow_compact_status/);
   assert.match(pickerSrc, /window\.__ag_sync_flow_compact_status\(/);
+});
+
+test('multi-round incremental compaction stores global splitIdx and keeps applyToPayload working', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-compactor-multi-'));
+  try {
+    const cid = '44444444-5555-4666-8777-888888888888';
+    const compactor = createFlowCompactor({ compactionDir: tmpDir });
+    const turns = [];
+    for (let i = 0; i < 8; i += 1) {
+      turns.push(makeTurn('user', `Round1 User ${i}: ${'A'.repeat(2400)}`));
+      turns.push(makeTurn('model', `Round1 Model ${i}: ${'B'.repeat(2400)}`));
+    }
+    compactor.captureTurnPayload(cid, { model: 'gemini-4-neon-high', request: { contents: turns } }, { model: 'gemini-4-neon-high' });
+
+    const mockUpstream = async () => ({
+      status: 200,
+      body: 'data: {"candidates":[{"content":{"parts":[{"text":"## Summary\\nMulti-round incremental compaction summary with full engineering context preserved."}]}}]}\n\n'
+    });
+
+    const r1 = await compactor.runCompaction(cid, {
+      upstream: 'https://example.invalid',
+      authHeaders: { authorization: 'Bearer test' },
+      keepTailTokens: 6000,
+      reason: 'auto',
+      sendUpstream: mockUpstream
+    });
+    assert.equal(r1.ok, true);
+
+    // Append more turns so round 2 compacts the already-compacted effective history
+    const turns2 = [...turns];
+    for (let i = 8; i < 16; i += 1) {
+      turns2.push(makeTurn('user', `Round2 User ${i}: ${'C'.repeat(2400)}`));
+      turns2.push(makeTurn('model', `Round2 Model ${i}: ${'D'.repeat(2400)}`));
+    }
+    compactor.captureTurnPayload(cid, { model: 'gemini-4-neon-high', request: { contents: turns2 } }, { model: 'gemini-4-neon-high' });
+
+    const r2 = await compactor.runCompaction(cid, {
+      upstream: 'https://example.invalid',
+      authHeaders: { authorization: 'Bearer test' },
+      keepTailTokens: 6000,
+      reason: 'auto',
+      sendUpstream: mockUpstream
+    });
+    assert.equal(r2.ok, true);
+    assert.equal(r2.status.count, 2);
+
+    const diskState = JSON.parse(fs.readFileSync(path.join(tmpDir, `${cid}.json`), 'utf8'));
+    assert.ok(diskState.splitIdx > 16, `expected global splitIdx > 16, got ${diskState.splitIdx}`);
+
+    const outbound = { request: { contents: structuredClone(turns2) } };
+    const applied = compactor.applyToPayload(cid, outbound);
+    assert.equal(applied.applied, true);
+    assert.ok(outbound.request.contents.length < turns2.length);
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 }); } catch {}
+  }
+});
+
+test('buildCompactedContents heals drifted splitIdx by scanning full contents array for anchorFingerprint', () => {
+  const turns = [];
+  for (let i = 0; i < 25; i += 1) {
+    turns.push(makeTurn('user', `Turn U${i}: ${'X'.repeat(600)}`));
+    turns.push(makeTurn('model', `Turn M${i}: ${'Y'.repeat(600)}`));
+  }
+  const split = splitHistoryForCodexCompact(turns, { keepTailTokens: 3000 });
+  assert.equal(split.canCompact, true);
+  // Intentionally drift splitIdx far away from actual anchor position
+  const driftedState = {
+    summaryText: '## Hand-off\nDrifted snapshot summary text that is long enough.',
+    splitIdx: 5,
+    anchorMode: split.anchorMode,
+    anchorFingerprint: split.anchorFingerprint
+  };
+  const res = buildCompactedContents(turns, driftedState);
+  assert.equal(res.applied, true);
+  assert.ok(res.contents.length < turns.length);
+});
+
+test('resolveCascadeId scans recent conversation DBs even when candidateCascadeIds is empty', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-resolve-cid-'));
+  try {
+    const cid = '55555555-6666-4777-8888-999999999999';
+    const trajId = '1437b883-d20a-4b1c-8e00-111111111111';
+    const dbPath = path.join(tmpDir, `${cid}.db`);
+    const db = new DatabaseSync(dbPath);
+    db.exec('CREATE TABLE trajectory_meta (trajectory_id TEXT);');
+    db.prepare('INSERT INTO trajectory_meta (trajectory_id) VALUES (?)').run(trajId);
+    db.close();
+
+    const reader = createMetricsReader({ getDatabaseSync: () => DatabaseSync, getConfig: () => ({}) });
+    const resolved = reader.resolveCascadeId(trajId, { conversationsDir: tmpDir, candidateCascadeIds: [] });
+    assert.equal(resolved, cid);
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 }); } catch {}
+  }
+});
+
+test('proxy tool-pass fast-return still invokes maybeScheduleAutoCompact', () => {
+  const proxySrc = fs.readFileSync(path.join(process.cwd(), 'core/flow/proxy.mjs'), 'utf8');
+  const toolPassIdx = proxySrc.indexOf("detail: 'tool'");
+  assert.ok(toolPassIdx > 0);
+  const slice = proxySrc.slice(toolPassIdx, toolPassIdx + 500);
+  assert.match(slice, /maybeScheduleAutoCompact\(/);
+});
+
+test('telemetry renderer shows estimated ctx pct and savings immediately on flowCompactedPending without marking native pending', () => {
+  const inlineHtml = buildInlineTelemetryHtml({
+    telemetryLayout: 'compact',
+    telemetryCacheMode: 'session',
+    statusDotHtml: '<span class="ag-ctx-pending-dot ag-dot-idle"></span>',
+    displayTps: 88,
+    ttft: 1.2,
+    lastCtx: 420000,
+    limitKStr: '512k',
+    ctxClass: 'ag-ctx-warn',
+    ctxPct: 82,
+    compactedPending: true,
+    compactedEstPct: 12,
+    compactedEstTokens: 62000,
+    outTok: 500,
+    lastCacheRate: '80.0',
+    sessionCacheRate: '82.0'
+  });
+  assert.match(inlineHtml, /class="ag-ctx-compacted">Ctx ~12%<\/span>/);
+  assert.doesNotMatch(inlineHtml, /已压缩/);
+
+  const tooltipHtml = buildMetricsTooltipHtml({
+    genIdx: 10,
+    streamTps: 88,
+    e2eTps: 70,
+    streamTpsValid: true,
+    last: { ctx: 420000, inTok: 12000, cacheWrite: 0, cacheRead: 408000, ttft: 1.2, stream: 3.1, totDur: 4.3, outTok: 500, thinkTok: 200, respTok: 300, modelName: 'gemini-4-neon-high' },
+    lastCacheRate: '80.0',
+    ctxPct: 82,
+    contextLimitTokens: 512000,
+    limitKStr: '512k',
+    remainCtx: 92000,
+    compactedPending: true,
+    nativeCompactedPending: false,
+    nativeCompactingNow: false,
+    flowCompactedPending: true,
+    compactedEstPct: 12,
+    compactedEstTokens: 62000,
+    flowSavedTokensEst: 201657,
+    compactSummaryKb: 0,
+    compactingNow: false,
+    generatingPending: false,
+    pendingRetrying: false,
+    lastErrorMsg: '',
+    turnSteps: 1,
+    turnOut: 500,
+    turnThink: 200,
+    turnResp: 300,
+    turnDur: 4.3,
+    userStepsCount: 5,
+    validCount: 10,
+    totalIn: 50000,
+    totalCacheWrite: 0,
+    totalCache: 350000,
+    totalPrompt: 400000,
+    sessionCacheRate: '82.0',
+    totalOut: 3000,
+    totalThink: 1000,
+    totalResp: 2000
+  });
+  assert.match(tooltipHtml, /约已使用 12%/);
+  assert.match(tooltipHtml, /≈62k \/ 512k/);
+  assert.match(tooltipHtml, /已省 ~202k/);
+  assert.match(tooltipHtml, /data-native-pending="0"/);
+});
+
+test('sqlite-metrics includes flowCompSig in cache signature and cdp-bridge pushes immediate refresh on compact events', () => {
+  const metricsSrc = fs.readFileSync(path.join(process.cwd(), 'core/daemon/sqlite-metrics.mjs'), 'utf8');
+  const bridgeSrc = fs.readFileSync(path.join(process.cwd(), 'core/daemon/cdp-bridge.mjs'), 'utf8');
+
+  assert.match(metricsSrc, /flowCompSig/);
+  assert.match(metricsSrc, /flowCompactedPending/);
+  assert.match(bridgeSrc, /ev\.type === 'compact-cleared'/);
+  assert.match(bridgeSrc, /syncMetricsForSession\(true\)/);
 });

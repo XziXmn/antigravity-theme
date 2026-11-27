@@ -76,13 +76,17 @@ export function buildInlineTelemetryHtml({
   ctxClass,
   ctxPct,
   compactedPending,
+  compactedEstPct = null,
+  compactedEstTokens = 0,
   outTok,
   lastCacheRate,
   sessionCacheRate
 }) {
   if (telemetryLayout === 'detailed') {
     const inlineCtxHtml = compactedPending
-      ? '<span class="ag-ctx-compacted">Ctx 已压缩</span>'
+      ? compactedEstTokens > 0 && compactedEstPct != null
+        ? `<span class="ag-ctx-compacted">Ctx ~${fmtTok(compactedEstTokens)}/${limitKStr} (~${compactedEstPct}%)</span>`
+        : '<span class="ag-ctx-compacted">Ctx 已压缩</span>'
       : `<span>Ctx ${fmtTok(lastCtx)}/${limitKStr} <span class="${ctxClass}">(${ctxPct}%)</span></span>`;
     return (
       statusDotHtml +
@@ -100,7 +104,9 @@ export function buildInlineTelemetryHtml({
 
   const cacheVal = telemetryCacheMode === 'step' ? lastCacheRate : sessionCacheRate;
   const compactCtxHtml = compactedPending
-    ? '<span class="ag-ctx-compacted">Ctx 已压缩</span>'
+    ? compactedEstPct != null
+      ? `<span class="ag-ctx-compacted">Ctx ~${compactedEstPct}%</span>`
+      : '<span class="ag-ctx-compacted">Ctx 已压缩</span>'
     : `<span>Ctx <span class="${ctxClass}">${ctxPct}%</span></span>`;
 
   return (
@@ -162,8 +168,14 @@ export function buildMetricsTooltipHtml({
   limitKStr,
   remainCtx,
   compactedPending,
+  nativeCompactedPending = compactedPending,
+  flowCompactedPending = false,
+  compactedEstPct = null,
+  compactedEstTokens = 0,
+  flowSavedTokensEst = 0,
   compactSummaryKb,
   compactingNow,
+  nativeCompactingNow = compactingNow,
   generatingPending,
   pendingRetrying,
   lastErrorMsg,
@@ -223,12 +235,14 @@ export function buildMetricsTooltipHtml({
       : '';
   const liveChipHtml = `<span class="ag-tt-live-chip${liveChipClass}">${liveChipText}</span>`;
   const ctxBentoValHtml = compactedPending
-    ? '<span class="ag-tt-pill ag-tt-compacted-val">已压缩</span>'
+    ? compactedEstPct != null
+      ? `<span class="ag-tt-pill ag-tt-compacted-val">~${compactedEstPct}%</span>`
+      : '<span class="ag-tt-pill ag-tt-compacted-val">已压缩</span>'
     : `<span class="ag-tt-pill">${ctxPct}%</span>`;
   const ctxBentoSubText = compactedPending
     ? generatingPending
-      ? '新步落盘后刷新'
-      : '下次调用后刷新'
+      ? '已压缩 · 新步落盘刷新'
+      : '已压缩 · 下次调用刷新'
     : `余 ${fmtTok(remainCtx)} / ${limitKStr}`;
 
   const ctxUsedTargetPct = contextLimitTokens > 0 ? Math.min(100, (last.ctx / contextLimitTokens) * 100) : 0;
@@ -236,19 +250,22 @@ export function buildMetricsTooltipHtml({
   const ctxPcts = hasStepWrite
     ? computeSegPcts([last.inTok, last.cacheWrite, last.cacheRead], ctxUsedTargetPct, 1.5)
     : computeSegPcts([last.inTok, last.cacheRead], ctxUsedTargetPct, 1.6);
+  const compactBarWidthPct = compactedEstPct != null ? Math.max(4, Math.min(96, compactedEstPct)) : 8;
   const ctxSegsHtml = compactedPending
-    ? '<div class="ag-tt-seg ag-tt-c-emerald" style="width:8%"></div>'
+    ? `<div class="ag-tt-seg ag-tt-c-emerald" style="width:${compactBarWidthPct}%"></div>`
     : hasStepWrite
     ? `<div class="ag-tt-seg ag-tt-c-ctx-new" style="width:${ctxPcts[0]}%"></div><div class="ag-tt-seg ag-tt-c-slate" style="width:${ctxPcts[1]}%"></div><div class="ag-tt-seg ag-tt-c-ctx-cache" style="width:${ctxPcts[2]}%"></div>`
     : `<div class="ag-tt-seg ag-tt-c-ctx-new" style="width:${ctxPcts[0]}%"></div><div class="ag-tt-seg ag-tt-c-ctx-cache" style="width:${ctxPcts[1]}%"></div>`;
   const ctxWriteLeg = hasStepWrite
     ? `<span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-slate"></span>写缓存 ${fmtNum(last.cacheWrite)}</span>`
     : '';
-  const ctxBarTopMetaHtml = compactedPending
+  const ctxBarTopMetaHtml = flowCompactedPending
+    ? `<strong>已完成滑动压缩</strong>${flowSavedTokensEst > 0 ? ` · 省 ~${fmtTok(flowSavedTokensEst)}` : ''}`
+    : compactedPending
     ? `<strong>已完成压缩</strong>${compactSummaryKb > 0 ? ` · 摘要 ${compactSummaryKb} KB` : ''}`
     : `<strong>${fmtNum(last.ctx)}</strong> / ${limitKStr}`;
   const ctxBarLegendHtml = compactedPending
-    ? `<span class="ag-tt-legend-left"><span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-emerald"></span>压缩前 ${fmtNum(last.ctx)} (${ctxPct}%) · 下轮落盘更新精确占比</span></span>`
+    ? `<span class="ag-tt-legend-left"><span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-emerald"></span>压缩前 ${fmtNum(last.ctx)} (${ctxPct}%)${compactedEstTokens > 0 ? ` → 预估 ~${fmtTok(compactedEstTokens)}` : ''} · 下轮落盘更新精确占比</span></span>`
     : `<span class="ag-tt-legend-left">
           <span class="ag-tt-leg"><span class="ag-tt-dot ag-tt-c-ctx-new"></span>新增 ${fmtNum(last.inTok)}</span>
           ${ctxWriteLeg}
@@ -295,10 +312,17 @@ export function buildMetricsTooltipHtml({
   const usedPctDisp =
     ctxBreakdown && typeof ctxBreakdown.usedPercent === 'number'
       ? ctxBreakdown.usedPercent.toFixed(1)
+      : compactedPending && compactedEstPct != null
+      ? String(compactedEstPct)
       : String(ctxPct);
-  const usedTokDisp = ctxBreakdown && ctxBreakdown.usedTokens > 0 ? fmtTok(ctxBreakdown.usedTokens) : fmtTok(last.ctx);
+  const usedTokDisp =
+    ctxBreakdown && ctxBreakdown.usedTokens > 0
+      ? fmtTok(ctxBreakdown.usedTokens)
+      : compactedPending && compactedEstTokens > 0
+      ? fmtTok(compactedEstTokens)
+      : fmtTok(last.ctx);
   const maxTokDisp = ctxBreakdown && ctxBreakdown.maxTokens > 0 ? fmtTok(ctxBreakdown.maxTokens) : limitKStr;
-  const totalCompactions = multiModels?.compactions || (compactedPending ? 1 : 0);
+  const totalCompactions = multiModels?.compactions || (nativeCompactedPending ? 1 : 0);
 
   const rawCats = Array.isArray(ctxBreakdown?.categories) && ctxBreakdown.categories.length > 0
     ? ctxBreakdown.categories
@@ -338,15 +362,15 @@ export function buildMetricsTooltipHtml({
   const stepPromptTotal = (last.cacheRead || 0) + (last.inTok || 0);
   const stepNewPct = stepPromptTotal > 0 ? ((last.inTok / stepPromptTotal) * 100).toFixed(1) : '0.0';
 
-  const nativeCompStateText = compactingNow
+  const nativeCompStateText = nativeCompactingNow
     ? '压缩中…'
-    : compactedPending
+    : nativeCompactedPending
     ? `刚完成压缩${compactSummaryKb > 0 ? ` · ${compactSummaryKb} KB` : ''}`
     : totalCompactions > 0
     ? `已触发 ${totalCompactions} 次`
     : '未触发';
-  const nativeCompTone = compactingNow ? 'is-active' : compactedPending || totalCompactions > 0 ? 'is-ready' : 'is-idle';
-  const compStatusHtml = `<div class="ag-tt-comp-status" data-native-count="${totalCompactions}" data-native-pending="${compactedPending ? '1' : '0'}" data-native-running="${compactingNow ? '1' : '0'}" data-native-kb="${compactSummaryKb || 0}">
+  const nativeCompTone = nativeCompactingNow ? 'is-active' : nativeCompactedPending || totalCompactions > 0 ? 'is-ready' : 'is-idle';
+  const compStatusHtml = `<div class="ag-tt-comp-status" data-native-count="${totalCompactions}" data-native-pending="${nativeCompactedPending ? '1' : '0'}" data-native-running="${nativeCompactingNow ? '1' : '0'}" data-native-kb="${compactSummaryKb || 0}">
     <div class="ag-tt-comp-hdr"><span class="ag-tt-sub-hdr" style="margin-bottom:0">压缩状态</span><span class="ag-tt-comp-mode-pill is-native">原生</span></div>
     <div class="ag-tt-comp-row"><span class="ag-tt-comp-lbl"><i class="ag-tt-comp-dot ${nativeCompTone}"></i>原生压缩</span><span class="ag-tt-comp-val">${nativeCompStateText}</span></div>
   </div>`;
@@ -382,11 +406,11 @@ export function buildMetricsTooltipHtml({
       <span class="ag-tt-hdr-left">会话统计</span>
       <span class="ag-tt-hdr-right">${liveChipHtml}<span class="ag-tt-flow-chip-slot"></span></span>
     </div>
-    <div class="ag-tt-wait-note" id="ag-tt-wait-note"></div>
     <div class="ag-tt-dual-grid">
       <div class="ag-tt-col ag-tt-col-ctx">
         <div class="ag-tt-col-top">
           <span class="ag-tt-col-title">上下文窗口</span>
+          ${flowCompactedPending && flowSavedTokensEst > 0 ? `<span class="ag-tt-col-sub">已省 ~${fmtTok(flowSavedTokensEst)}</span>` : ''}
         </div>
         <div class="ag-tt-ctx-headline">
           <span class="ag-tt-ctx-pct-main">${compactedPending ? '约已使用 ' : '已使用 '}${usedPctDisp}%</span>

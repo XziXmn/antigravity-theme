@@ -696,6 +696,82 @@ test('pendingSwitch blocks stale live-status cross-write and keeps single isActi
   }
 });
 
+test('get_overview and refresh_quota reconcile pendingSwitch against live LS identity even if old process overwrote OS credential', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-live-reconcile-'));
+  try {
+    let activeRaw = 'raw-aaa-111';
+    const slots = new Map([
+      ['acc_aaa', 'raw-aaa-111'],
+      ['acc_bbb', 'raw-bbb-222']
+    ]);
+    let liveEmail = 'aaa@test.com';
+    let livePct = 20;
+    const mockVault = {
+      platform: 'win32',
+      available: true,
+      getCapability: () => ({ supported: true }),
+      readActiveRaw: () => ({ exists: true, raw: activeRaw }),
+      readActiveInfo: () => ({ exists: true, email: activeRaw.includes('aaa') ? 'aaa@test.com' : 'bbb@test.com', hash: shortCredentialHash(activeRaw) }),
+      restoreToActive: (id) => {
+        activeRaw = slots.get(id) || activeRaw;
+        return { ok: true, hash: shortCredentialHash(activeRaw) };
+      },
+      saveActiveTo: (id) => {
+        slots.set(id, activeRaw);
+        return { ok: true, email: id === 'acc_aaa' ? 'aaa@test.com' : 'bbb@test.com', hash: shortCredentialHash(activeRaw) };
+      },
+      readSavedInfo: (id) => ({ exists: slots.has(id), email: id === 'acc_aaa' ? 'aaa@test.com' : 'bbb@test.com', hash: shortCredentialHash(slots.get(id) || '') }),
+      readSavedRaw: (id) => ({ exists: slots.has(id), raw: slots.get(id) || '' }),
+      writeSavedRaw: (id, raw) => ({ ok: true, email: 'test@test.com', hash: shortCredentialHash(raw) })
+    };
+    const mgr = createAccountsManager({
+      userDir: tmpDir,
+      vault: mockVault,
+      nowFn: () => 1795700000000,
+      lsClient: {
+        getUserIdentity: async () => ({ email: liveEmail, planName: 'Pro' }),
+        getQuotaStatus: async () => ({ ok: true, accountEmail: liveEmail, planName: 'Pro', groups: [{ key: 'gemini', fiveHour: { remainingPct: livePct } }] })
+      },
+      relaunchHost: async () => ({ ok: true })
+    });
+    fs.writeFileSync(
+      path.join(tmpDir, 'accounts.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        activeId: 'acc_aaa',
+        accounts: [
+          { id: 'acc_aaa', email: 'aaa@test.com', hasCredential: true, credHash: shortCredentialHash('raw-aaa-111'), quotaSource: 'local-ls', lastQuota: { ok: true, groups: [{ key: 'gemini', fiveHour: { remainingPct: 20 } }] } },
+          { id: 'acc_bbb', email: 'bbb@test.com', hasCredential: true, credHash: shortCredentialHash('raw-bbb-222'), quotaSource: 'cached', lastQuota: { ok: true, groups: [{ key: 'gemini', fiveHour: { remainingPct: 95 } }] } }
+        ]
+      })
+    );
+
+    await mgr.switchAccount('acc_bbb', { relaunch: false });
+    // Simulate old host process writing aaa credential back into OS vault on exit before restart completes
+    activeRaw = 'raw-aaa-111';
+    const ovBeforeRestart = await mgr.dispatchAction({ action: 'get_overview' });
+    assert.ok(ovBeforeRestart.pendingSwitch, 'pendingSwitch should stay while live LS is still aaa');
+    assert.deepEqual(ovBeforeRestart.accounts.filter((a) => a.isActive).map((a) => a.id), ['acc_bbb']);
+
+    // Simulate restart completed: LS now reports bbb@test.com
+    liveEmail = 'bbb@test.com';
+    livePct = 88;
+    const ovAfterRestart = await mgr.dispatchAction({ action: 'get_overview', force: true });
+    assert.equal(ovAfterRestart.pendingSwitch, null, 'pendingSwitch should clear once live LS reports target email');
+    assert.deepEqual(ovAfterRestart.accounts.filter((a) => a.isActive).map((a) => a.id), ['acc_bbb']);
+    assert.equal(ovAfterRestart.accounts.find((a) => a.id === 'acc_bbb').lastQuota.groups[0].fiveHour.remainingPct, 88);
+    assert.equal(mockVault.readActiveInfo().email, 'bbb@test.com', 'OS credential should self-heal to bbb');
+
+    // refreshQuota should also work cleanly without deadlocking on pendingSwitch
+    livePct = 82;
+    const refRes = await mgr.refreshQuota('all');
+    assert.equal(refRes.ok, true);
+    assert.equal(refRes.overview.accounts.find((a) => a.id === 'acc_bbb').lastQuota.groups[0].fiveHour.remainingPct, 82);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('79-accounts-dashboard.js contains Stage 4 Codex minimalist dashboard & overview extension hooks', () => {
   const src = fs.readFileSync(new URL('../core/runtime/79-accounts-dashboard.js', import.meta.url), 'utf8');
   for (const token of ['ag-pop-main-nav', 'ag-pt-kpi-grid', 'ag-pool-forecast-row', 'ag-acc-meter-row', 'ag-overview-sections', 'ag-ov-pool', 'ag-ov-qline']) {

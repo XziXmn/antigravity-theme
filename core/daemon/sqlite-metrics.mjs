@@ -177,6 +177,7 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
     setBoundedMap(trajToCascadeMap, t, c);
     setBoundedMap(cascadeToTrajMap, c, t);
   }
+  const dbTrajIndexedMtime = new Map();
 
   function setMetricsCache(dbPath, entry) {
     if (metricsCache.has(dbPath)) metricsCache.delete(dbPath);
@@ -220,7 +221,9 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
     const telemetryCacheMode = cfg.telemetryCacheMode === 'step' ? 'step' : 'session';
     const lsLogFile = extraOpts && typeof extraOpts.lsLogFile === 'string' ? extraOpts.lsLogFile : '';
     const lsSig = extraOpts && typeof extraOpts.lsSig === 'string' ? extraOpts.lsSig : '';
-    const sig = `${rawDbSig}|lim:${manualLim}:${fallbackLim}|ly:${telemetryLayout}:${telemetryCacheMode}${lsSig ? `|ls:${lsSig}` : ''}`;
+    const flowCompaction = extraOpts && typeof extraOpts.flowCompaction === 'object' ? extraOpts.flowCompaction : null;
+    const flowCompSig = extraOpts && typeof extraOpts.flowCompSig === 'string' ? extraOpts.flowCompSig : '';
+    const sig = `${rawDbSig}|lim:${manualLim}:${fallbackLim}|ly:${telemetryLayout}:${telemetryCacheMode}${lsSig ? `|ls:${lsSig}` : ''}${flowCompSig ? `|fc:${flowCompSig}` : ''}`;
 
     const cached = metricsCache.get(dbPath);
     if (cached && cached.sig === sig) {
@@ -495,16 +498,25 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
       const sessionCacheRate = totalPrompt > 0 ? ((totalCache / totalPrompt) * 100).toFixed(1) : '0.0';
       const remainCtx = Math.max(0, contextLimitTokens - last.ctx);
       const limitKStr = formatContextLimitLabel(contextLimitTokens);
-      const compactedPending = Boolean(
+      const nativeCompactedPending = Boolean(
         lastCheckpoint &&
           (last.maxStepIdx >= 0 ? lastCheckpoint.idx > last.maxStepIdx : lastCheckpoint.cpMetaIdx > last.idx)
       );
       const compactSummaryKb =
-        compactedPending && lastCheckpoint && lastCheckpoint.summaryBytes > 0
+        nativeCompactedPending && lastCheckpoint && lastCheckpoint.summaryBytes > 0
           ? Number((lastCheckpoint.summaryBytes / 1024).toFixed(1))
           : 0;
       const activeCompactRow = activeStepRows.find((r) => r.step_type === 23) || null;
-      const compactingNow = Boolean(activeCompactRow);
+      const nativeCompactingNow = Boolean(activeCompactRow);
+      const flowCompactedAt = Number(flowCompaction?.compactedAt || 0);
+      const flowCompactedPending = Boolean(
+        flowCompaction?.active && flowCompactedAt > 0 && (!lastReqTsMs || flowCompactedAt > lastReqTsMs)
+      );
+      const flowCompactingNow = Boolean(flowCompaction?.inFlight);
+      const compactedPending = nativeCompactedPending || flowCompactedPending;
+      const compactingNow = nativeCompactingNow || flowCompactingNow;
+      const flowAfterTokensEst = flowCompactedPending ? Math.max(0, Number(flowCompaction?.afterTokensEst || 0)) : 0;
+      const flowSavedTokensEst = flowCompactedPending ? Math.max(0, Number(flowCompaction?.savedTokensEst || 0)) : 0;
       const nonUserActive = activeStepRows.filter(
         (r) => r.step_type !== 14 && (last.maxStepIdx < 0 || r.idx > last.maxStepIdx)
       );
@@ -614,6 +626,17 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
       const safeDotTitle = statusTitle.replace(/"/g, '&quot;');
       const statusDotHtml = `<span class="${statusDotClass}" aria-label="${safeDotTitle}"></span>`;
 
+      const ctxBreakdown = buildContextBreakdown(
+        last,
+        contextLimitTokens,
+        compactedPending,
+        flowAfterTokensEst > 0 ? flowAfterTokensEst : lastCheckpoint?.summaryTokens || 0,
+        valid
+      );
+      const compactedEstTokens = compactedPending && ctxBreakdown?.usedTokens > 0 ? ctxBreakdown.usedTokens : 0;
+      const compactedEstPct =
+        compactedPending && typeof ctxBreakdown?.usedPercent === 'number' ? Math.round(ctxBreakdown.usedPercent) : null;
+
       const turns = buildTurnSummaries(valid, userStepIdxs, manualLim, fallbackLim);
       const inlineHtml = buildInlineTelemetryHtml({
         telemetryLayout,
@@ -626,6 +649,8 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
         ctxClass,
         ctxPct,
         compactedPending,
+        compactedEstPct,
+        compactedEstTokens,
         outTok: last.outTok,
         lastCacheRate,
         sessionCacheRate
@@ -672,13 +697,6 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
       const genErrors = inc.items.filter((it) => it && it.errCode === 1).length;
       const totalErrorCount = stepErrorCount + genErrors;
 
-      const ctxBreakdown = buildContextBreakdown(
-        last,
-        contextLimitTokens,
-        compactedPending,
-        lastCheckpoint?.summaryTokens || 0,
-        valid
-      );
       const multiModels = buildModelContexts(valid, checkpointCount);
 
       let overviewProgress = null;
@@ -748,6 +766,12 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
         limitKStr,
         remainCtx,
         compactedPending,
+        nativeCompactedPending,
+        nativeCompactingNow,
+        flowCompactedPending,
+        compactedEstPct,
+        compactedEstTokens,
+        flowSavedTokensEst,
         compactSummaryKb,
         compactingNow,
         generatingPending,
@@ -898,30 +922,60 @@ export function createMetricsReader({ getDatabaseSync, getConfig }) {
     if (candidates.includes(raw)) return raw;
 
     const DatabaseSync = typeof getDatabaseSync === 'function' ? getDatabaseSync() : null;
-    if (DatabaseSync && conversationsDir) {
-      for (const cid of candidates) {
-        const cleanCid = String(cid || '').trim();
-        if (!cleanCid || !/^[0-9a-f-]{36}$/i.test(cleanCid)) continue;
-        if (cascadeToTrajMap.has(cleanCid)) continue;
-        const dbPath = path.join(conversationsDir, `${cleanCid}.db`);
-        if (!fs.existsSync(dbPath)) continue;
-        let db = null;
-        try {
-          db = new DatabaseSync(dbPath, { readOnly: true, timeout: 100 });
-          const rows = db.prepare('SELECT trajectory_id FROM trajectory_meta LIMIT 4').all();
-          for (const r of rows) {
-            const tid = String(r?.trajectory_id || '').trim();
-            if (tid) recordTrajectoryMapping(tid, cleanCid);
-          }
-          if (trajToCascadeMap.has(raw)) return trajToCascadeMap.get(raw);
-        } catch {
-        } finally {
-          try {
-            db?.close();
-          } catch {}
-        }
+    if (!DatabaseSync || !conversationsDir) return raw;
+
+    const indexDbFile = (cleanCid) => {
+      if (!cleanCid || !/^[0-9a-f-]{36}$/i.test(cleanCid)) return;
+      const dbPath = path.join(conversationsDir, `${cleanCid}.db`);
+      let mtimeMs = 0;
+      try {
+        if (!fs.existsSync(dbPath)) return;
+        mtimeMs = fs.statSync(dbPath).mtimeMs || 0;
+      } catch {
+        return;
       }
+      if (dbTrajIndexedMtime.get(cleanCid) === mtimeMs && mtimeMs > 0) return;
+      let db = null;
+      try {
+        db = new DatabaseSync(dbPath, { readOnly: true, timeout: 100 });
+        const rows = db.prepare('SELECT trajectory_id FROM trajectory_meta LIMIT 8').all();
+        for (const r of rows) {
+          const tid = String(r?.trajectory_id || '').trim();
+          if (tid) recordTrajectoryMapping(tid, cleanCid);
+        }
+        setBoundedMap(dbTrajIndexedMtime, cleanCid, mtimeMs);
+      } catch {
+      } finally {
+        try {
+          db?.close();
+        } catch {}
+      }
+    };
+
+    for (const cid of candidates) {
+      indexDbFile(String(cid || '').trim());
+      if (trajToCascadeMap.has(raw)) return trajToCascadeMap.get(raw);
     }
+
+    // Fallback: scan up to 24 most recently modified conversation DBs when session is switched/backgrounded
+    try {
+      const entries = fs.readdirSync(conversationsDir);
+      const recentDbs = [];
+      for (const name of entries) {
+        if (!/^[0-9a-f-]{36}\.db$/i.test(name)) continue;
+        const cleanCid = name.slice(0, -3);
+        try {
+          const st = fs.statSync(path.join(conversationsDir, name));
+          recentDbs.push({ cleanCid, mtimeMs: st.mtimeMs || 0 });
+        } catch {}
+      }
+      recentDbs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      for (const item of recentDbs.slice(0, 24)) {
+        indexDbFile(item.cleanCid);
+        if (trajToCascadeMap.has(raw)) return trajToCascadeMap.get(raw);
+      }
+    } catch {}
+
     return raw;
   }
 

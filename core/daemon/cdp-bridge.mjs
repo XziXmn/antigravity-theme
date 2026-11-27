@@ -401,6 +401,14 @@ export function createCdpManager({
   if (flowController && typeof flowController.setEventListener === 'function') {
     flowController.setEventListener((ev) => {
       void broadcastFlowEvent(ev);
+      if (ev && (ev.type === 'compact-start' || ev.type === 'compact' || ev.type === 'compact-cleared')) {
+        triggerFastWatch(12000);
+        for (const entry of attachedTargets.values()) {
+          if (entry.hostConfirmed && !entry.isSwarmIframe && typeof entry.syncMetricsForSession === 'function') {
+            void entry.syncMetricsForSession(true);
+          }
+        }
+      }
     });
   }
   let superseded = false;
@@ -677,7 +685,14 @@ export function createCdpManager({
             rawSig = rawSig || 'empty';
             const isRemote = Boolean(remoteSource?.sig && typeof remoteSource.openDb === 'function');
             const lsSig = prev.pendingActive && !isRemote ? getLsLogSig(endpoint.lsLogFile) : '';
-            const sessionKey = `${cid}@${rawSig}|lim:${activeConfig.manualContextLimit || 0}:${activeConfig.fallbackContextLimit || 256000}|ly:${activeConfig.telemetryLayout}:${activeConfig.telemetryCacheMode}${lsSig ? `|ls:${lsSig}` : ''}`;
+            const flowCompaction =
+              flowController && typeof flowController.getCompactionStatus === 'function'
+                ? flowController.getCompactionStatus(cid)
+                : null;
+            const flowCompSig = flowCompaction
+              ? `${flowCompaction.active ? 1 : 0}:${flowCompaction.inFlight ? 1 : 0}:${flowCompaction.count || 0}:${flowCompaction.compactedAt || 0}:${flowCompaction.afterTokensEst || 0}`
+              : '';
+            const sessionKey = `${cid}@${rawSig}|lim:${activeConfig.manualContextLimit || 0}:${activeConfig.fallbackContextLimit || 256000}|ly:${activeConfig.telemetryLayout}:${activeConfig.telemetryCacheMode}${lsSig ? `|ls:${lsSig}` : ''}${flowCompSig ? `|fc:${flowCompSig}` : ''}`;
             if (!force && sessionKey === prev.hash) continue;
 
             const payload = metricsReader.parseConversationMetrics(
@@ -689,11 +704,15 @@ export function createCdpManager({
                     rawDbSig: remoteSource.sig,
                     openDb: remoteSource.openDb,
                     lsLogFile: '',
-                    lsSig: ''
+                    lsSig: '',
+                    flowCompaction,
+                    flowCompSig
                   }
                 : {
                     lsLogFile: endpoint.lsLogFile,
-                    lsSig
+                    lsSig,
+                    flowCompaction,
+                    flowCompSig
                   }
             );
             if (!payload || payload.transientError) {
@@ -1174,6 +1193,9 @@ export function createCdpManager({
                     });
                   } catch {}
                 }
+                if (action === 'compact' || action === 'revert') {
+                  void syncMetricsForSession(true);
+                }
               })();
               return;
             }
@@ -1619,11 +1641,38 @@ export function createCdpManager({
         void lsClient
           .getQuotaStatus({ force: true })
           .then(async (q) => {
-            if (!q || !q.ok) return;
+            const broadcastAccountsOverview = (overview) => {
+              if (!overview) return;
+              const ovJson = JSON.stringify({ ok: true, overview })
+                .replace(/\u2028/g, '\\u2028')
+                .replace(/\u2029/g, '\\u2029');
+              for (const entry of attachedTargets.values()) {
+                if (!entry.hostConfirmed || entry.isSwarmIframe || entry.ws?.readyState !== WebSocket.OPEN) continue;
+                entry
+                  .send('Runtime.evaluate', {
+                    expression: `if (typeof window.__ag_on_accounts_response === 'function') { window.__ag_on_accounts_response('', ${ovJson}); }`,
+                    returnByValue: false
+                  })
+                  .catch(() => {});
+              }
+            };
+            if (!q || !q.ok) {
+              if (accountsManager && typeof accountsManager.observeLiveStatus === 'function' && typeof lsClient.getUserIdentity === 'function') {
+                try {
+                  const identity = await lsClient.getUserIdentity({ force: true });
+                  if (identity?.email) {
+                    const obs = await accountsManager.observeLiveStatus({ identity, quota: null });
+                    if (obs?.changed && obs?.overview) broadcastAccountsOverview(obs.overview);
+                  }
+                } catch {}
+              }
+              return;
+            }
             if (accountsManager && typeof accountsManager.observeLiveStatus === 'function') {
               try {
                 const identity = typeof lsClient.getUserIdentity === 'function' ? await lsClient.getUserIdentity() : null;
-                await accountsManager.observeLiveStatus({ identity, quota: q });
+                const obs = await accountsManager.observeLiveStatus({ identity, quota: q });
+                if (obs?.changed && obs?.overview) broadcastAccountsOverview(obs.overview);
               } catch {}
             }
             const payloadJson = JSON.stringify(q).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');

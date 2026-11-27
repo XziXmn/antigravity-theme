@@ -482,6 +482,76 @@
     }
   };
 
+  const flowRecoveryByCid = Object.create(null);
+
+  function clearFlowRecoveryForCid(cid) {
+    if (!cid) return;
+    const cur = flowRecoveryByCid[cid];
+    if (cur && cur.timerId) clearTimeout(cur.timerId);
+    delete flowRecoveryByCid[cid];
+  }
+
+  window.__ag_on_flow_recovery_event = function (ev) {
+    if (!ev || typeof ev !== 'object') return;
+    const cid = String(ev.cascadeId || '').trim();
+    if (!cid) return;
+    const type = String(ev.type || '');
+    if (type === 'recovery-stage') {
+      clearFlowRecoveryForCid(cid);
+      const ttlMs = 90000;
+      const timerId = setTimeout(() => {
+        const cur = flowRecoveryByCid[cid];
+        if (cur && cur.timerId === timerId) {
+          delete flowRecoveryByCid[cid];
+          try { applyPendingWaitVisuals(); } catch {}
+        }
+      }, ttlMs);
+      flowRecoveryByCid[cid] = {
+        active: true,
+        stage: String(ev.stage || ''),
+        reason: String(ev.reason || ''),
+        attempt: Number(ev.attempt || 0),
+        maxAttempts: Number(ev.maxAttempts || 0),
+        targetModel: String(ev.targetModel || ''),
+        doneText: '',
+        expiresAt: Date.now() + ttlMs,
+        timerId
+      };
+      try { applyPendingWaitVisuals(); } catch {}
+      return;
+    }
+    if (type === 'outcome') {
+      const verdict = String(ev.verdict || '');
+      if (verdict === 'staged' || verdict === 'continued') {
+        clearFlowRecoveryForCid(cid);
+        const ttlMs = 6000;
+        const doneText = String(ev.detail || (verdict === 'continued' ? '自动续写完成' : '已软重试通过'));
+        const timerId = setTimeout(() => {
+          const cur = flowRecoveryByCid[cid];
+          if (cur && cur.timerId === timerId) {
+            delete flowRecoveryByCid[cid];
+            try { applyPendingWaitVisuals(); } catch {}
+          }
+        }, ttlMs);
+        flowRecoveryByCid[cid] = {
+          active: false,
+          stage: '',
+          reason: '',
+          attempt: 0,
+          maxAttempts: 0,
+          targetModel: '',
+          doneText,
+          expiresAt: Date.now() + ttlMs,
+          timerId
+        };
+        try { applyPendingWaitVisuals(); } catch {}
+      } else if (flowRecoveryByCid[cid]) {
+        clearFlowRecoveryForCid(cid);
+        try { applyPendingWaitVisuals(); } catch {}
+      }
+    }
+  };
+
   function syncTooltipLiveOverlay(tt, snap, ownerPill, ownerBox) {
     if (!tt || !snap) return;
     const chipEl = tt.querySelector('.ag-tt-live-chip');
@@ -489,18 +559,15 @@
       if (chipEl.textContent !== snap.chipText) chipEl.textContent = snap.chipText;
       const targetChipClass = 'ag-tt-live-chip' + (snap.chipClass ? ' ' + snap.chipClass : '');
       if (chipEl.className !== targetChipClass) chipEl.className = targetChipClass;
+      if (snap.chipText && snap.dotTitle) {
+        if (chipEl.getAttribute('title') !== snap.dotTitle) chipEl.setAttribute('title', snap.dotTitle);
+      } else if (chipEl.hasAttribute('title')) {
+        chipEl.removeAttribute('title');
+      }
     }
     const noteEl = tt.querySelector('.ag-tt-wait-note');
     if (noteEl) {
-      const targetNoteClass = 'ag-tt-wait-note' + (snap.noteClass ? ' ' + snap.noteClass : '');
-      if (noteEl.className !== targetNoteClass) noteEl.className = targetNoteClass;
-      if (noteEl.getAttribute('data-ag-note-html') !== snap.noteHtml) {
-        noteEl.setAttribute('data-ag-note-html', snap.noteHtml);
-        noteEl.innerHTML = snap.noteHtml;
-        if (ownerPill && tt.getAttribute('data-visible') === '1') {
-          positionMetricsTooltip(ownerPill, tt, ownerBox);
-        }
-      }
+      noteEl.remove();
     }
     syncTooltipCacheObs(tt);
     syncTooltipQuotaOverlay(tt);
@@ -1326,6 +1393,11 @@
     }
 
     const waitSec = ps.waitStartMs ? Math.max(0, Math.floor((now - ps.waitStartMs) / 1000)) : 0;
+    let flowRecovery = curCid && flowRecoveryByCid[curCid] ? flowRecoveryByCid[curCid] : null;
+    if (flowRecovery && flowRecovery.expiresAt && flowRecovery.expiresAt <= now) {
+      clearFlowRecoveryForCid(curCid);
+      flowRecovery = null;
+    }
     const snap = computeStatusSnapshot({
       now,
       st,
@@ -1337,7 +1409,8 @@
       documentHidden: Boolean(document.hidden),
       navigatorOnline: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
       hasConversation: Boolean(curCid),
-      curModel: typeof getSelectedModelLabel === 'function' ? getSelectedModelLabel(inputBox) : ''
+      curModel: typeof getSelectedModelLabel === 'function' ? getSelectedModelLabel(inputBox) : '',
+      flowRecovery
     });
     ps.lastSnap = snap;
 

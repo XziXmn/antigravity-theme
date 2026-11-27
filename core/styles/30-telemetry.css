@@ -370,6 +370,16 @@
   background-color: #EF4444;
 }
 
+#ag-live-metrics-tooltip .ag-tt-live-chip.is-recovered {
+  color: #059669 !important;
+  background-color: var(--ag-tt-surface) !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-live-chip.is-recovered::before {
+  background-color: #10B981;
+}
+
 #ag-live-metrics-tooltip .ag-tt-wait-note {
   display: none;
   align-items: center;
@@ -1121,6 +1131,11 @@
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-live-chip.is-error {
   color: #FB7185 !important;
   background-color: rgba(251, 113, 133, 0.16) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-live-chip.is-recovered {
+  color: #34D399 !important;
+  background-color: rgba(52, 211, 153, 0.14) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-wait-note {

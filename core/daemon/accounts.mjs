@@ -259,16 +259,81 @@ export function createAccountsManager({
     return { quota: { ...quota, groups, buckets }, changed };
   }
 
-  function getOverview() {
+  async function reconcileWithLiveIdentity({ force = false } = {}) {
+    if (!lsClient || typeof lsClient.getUserIdentity !== 'function') return '';
+    const identity = await lsClient.getUserIdentity({ force }).catch(() => null);
+    const liveEmail = normalizeCredEmail(identity?.email || '');
+    if (!liveEmail) return '';
+
+    const store = loadStore();
+    const now = nowFn();
+    const pending = sanitizePendingSwitch(store.pendingSwitch, now);
+
+    if (pending) {
+      if (liveEmail !== pending.targetEmail) {
+        return '';
+      }
+      store.pendingSwitch = null;
+      const acct =
+        store.accounts.find((a) => normalizeCredEmail(a.email) === liveEmail) ||
+        store.accounts.find((a) => a.id === pending.targetId) ||
+        null;
+      if (acct) {
+        store.activeId = acct.id;
+        acct.lastUsedAtMs = now;
+        acct.updatedAt = now;
+        if (typeof lsClient.getQuotaStatus === 'function') {
+          const q = await lsClient.getQuotaStatus({ force: true }).catch(() => null);
+          const qEmail = normalizeCredEmail(q?.accountEmail || '');
+          if (q && q.ok && (!qEmail || qEmail === liveEmail)) {
+            acct.lastQuota = q;
+            acct.quotaSource = 'local-ls';
+            acct.quotaError = '';
+            acct.onboardingAccepted = true;
+            if (q.planName) acct.planName = q.planName;
+            recordQuotaSamples(liveEmail, q);
+          }
+        }
+        try {
+          const cap = vault ? vault.getCapability() : { supported: false };
+          if (cap.supported && vault.readActiveInfo().email !== liveEmail) {
+            vault.restoreToActive(acct.id, { expectedEmail: acct.email });
+          }
+        } catch {}
+      }
+      saveStore(store);
+      appendTimeline(liveEmail);
+      return liveEmail;
+    }
+
+    const acct = store.accounts.find((a) => normalizeCredEmail(a.email) === liveEmail) || null;
+    if (acct && store.activeId !== acct.id) {
+      store.activeId = acct.id;
+      saveStore(store);
+    }
+    return liveEmail;
+  }
+
+  function getOverview({ liveEmail = '' } = {}) {
     const store = loadStore();
     const now = nowFn();
     const cap = vault ? vault.getCapability() : { supported: false, backend: 'none', reason: 'vault unavailable' };
     const activeCred = cap.supported ? vault.readActiveInfo() : { exists: false, email: '', hash: '' };
     const pendingSwitch = sanitizePendingSwitch(store.pendingSwitch, now);
+    const normLive = normalizeCredEmail(liveEmail);
+    const activeByLive = normLive
+      ? store.accounts.find((a) => normalizeCredEmail(a.email) === normLive)
+      : null;
     const activeByCred = activeCred.email
       ? store.accounts.find((a) => normalizeCredEmail(a.email) === activeCred.email)
       : null;
-    const effectiveActiveId = activeByCred ? activeByCred.id : store.activeId;
+    const effectiveActiveId = pendingSwitch
+      ? store.activeId || pendingSwitch.targetId
+      : activeByLive
+      ? activeByLive.id
+      : activeByCred
+      ? activeByCred.id
+      : store.activeId;
     let storeMutated = false;
     const accounts = store.accounts.map((a) => {
       const rec = reconcileOfflineQuotaSnapshot(a.lastQuota, now, a.updatedAt || 0);
@@ -382,6 +447,7 @@ export function createAccountsManager({
     if ((accountId === 'all' || accountId === 'active') && minIntervalMs > 0 && lastRefreshAllAtMs > 0 && now - lastRefreshAllAtMs < minIntervalMs) {
       return { ok: true, throttled: true, overview: getOverview() };
     }
+    const liveEmail = await reconcileWithLiveIdentity({ force: true });
     const store = loadStore();
     const activeInfo = vault && vault.getCapability().supported ? vault.readActiveInfo() : { email: '' };
     const targets =
@@ -391,11 +457,11 @@ export function createAccountsManager({
 
     const results = [];
     for (const a of targets) {
-      results.push(await refreshOneAccountQuota(store, a, { activeEmail: activeInfo.email }));
+      results.push(await refreshOneAccountQuota(store, a, { activeEmail: liveEmail || activeInfo.email }));
     }
     if (accountId === 'all' || accountId === 'active') lastRefreshAllAtMs = nowFn();
     saveStore(store);
-    return { ok: true, results, overview: getOverview() };
+    return { ok: true, results, overview: getOverview({ liveEmail }) };
   }
 
   async function switchAccount(accountId, { auto = false, relaunch = true } = {}) {
@@ -600,14 +666,16 @@ export function createAccountsManager({
     const email = normalizeCredEmail(identity?.email || activeInfo.email);
     if (!email) return { ok: true, skipped: true };
 
+    let changed = false;
     const pending = sanitizePendingSwitch(store.pendingSwitch, now);
     if (pending) {
       if (email === pending.targetEmail) {
         store.pendingSwitch = null;
         saveStore(store);
+        changed = true;
       } else {
         // Old Antigravity process is still alive before restart completes; ignore stale identity/quota writes
-        return { ok: true, skipped: true, pendingSwitch: pending };
+        return { ok: true, skipped: true, changed: false, pendingSwitch: pending };
       }
     }
 
@@ -652,7 +720,10 @@ export function createAccountsManager({
         acct.updatedAt = now;
         dirty = true;
       }
-      if (dirty) saveStore(store);
+      if (dirty) {
+        saveStore(store);
+        changed = true;
+      }
     }
 
     // Check auto-switch threshold
@@ -678,21 +749,23 @@ export function createAccountsManager({
               atMs: nowFn()
             };
             log(`[Accounts] Auto-switched ${email} (${curPct}%) -> ${best.email}`);
-            return { ok: true, autoSwitched: true, notice: lastAutoSwitchNotice, ...switched };
+            return { ok: true, autoSwitched: true, changed: true, notice: lastAutoSwitchNotice, ...switched };
           } catch (err) {
             log(`[Accounts] Auto-switch failed: ${err?.message || err}`);
           }
         }
       }
     }
-    return { ok: true, autoSwitched: false };
+    return { ok: true, autoSwitched: false, changed, overview: changed ? getOverview({ liveEmail: email }) : null };
   }
 
   async function dispatchAction(payload = {}) {
     const act = String(payload?.action || '').trim();
     switch (act) {
-      case 'get_overview':
-        return getOverview();
+      case 'get_overview': {
+        const liveEmail = await reconcileWithLiveIdentity({ force: Boolean(payload.force) });
+        return getOverview({ liveEmail });
+      }
       case 'capture_current':
         return await captureCurrentAccount({ alias: payload.alias || '' });
       case 'start_oauth_add':

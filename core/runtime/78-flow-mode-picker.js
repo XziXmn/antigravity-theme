@@ -245,6 +245,12 @@
         if (isCompactEv && !compactFxDispatched && typeof window.__ag_on_flow_compact_fx === 'function') {
           window.__ag_on_flow_compact_fx(ev, 'main');
         }
+        if (
+          (ev.type === 'recovery-stage' || ev.type === 'outcome') &&
+          typeof window.__ag_on_flow_recovery_event === 'function'
+        ) {
+          window.__ag_on_flow_recovery_event(ev);
+        }
         publishFlowStatusCache();
         if (shouldRefreshCompact && typeof window.__ag_refresh_flow_state_for_pane === 'function') {
           window.__ag_refresh_flow_state_for_pane(shouldRefreshCompact);

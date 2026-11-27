@@ -111,7 +111,7 @@ function readBaseVersion() {
       if (ver) return ver;
     } catch {}
   }
-  return '1.4.2';
+  return '1.4.3';
 }
 
 export const BASE_VERSION = readBaseVersion();

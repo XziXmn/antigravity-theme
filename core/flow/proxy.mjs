@@ -1103,7 +1103,7 @@ export function createFlowProxyServer({
       traj: origTraj.slice(0, 12),
       mode,
       isSubagent,
-      route: 'managed-recovery',
+      route: payloadMutatedByCompactor ? `managed-recovery+${compactorDiag}` : 'managed-recovery',
       injectedChars: seatText.length,
       injectPos: injectContentMsg ? (everyTurn ? 'tail-user' : 'head-user') : 'sys-only',
       everyTurn,
@@ -1178,6 +1178,10 @@ export function createFlowProxyServer({
         detail: 'tool'
       });
       emit('outcome', { cascadeId: origTraj, mode, verdict: 'pass', detail: 'tool' });
+      if (flowCfg.compactEnabled && canTrackCompaction) {
+        const pt = Number(primarySse?.usageMetadata?.promptTokenCount || 0) || fallbackPromptTokens;
+        if (pt > 0) maybeScheduleAutoCompact(origTraj, pt, modelName, flowCfg);
+      }
       sendSseResult(res, primaryRes.body, 200);
       return;
     }
@@ -1188,17 +1192,28 @@ export function createFlowProxyServer({
     const allowEscalation = mode === 'engineering' || mode === 'full';
     const allowRemap = mode === 'full' && flowCfg.remapEnabled && Boolean(flowCfg.remapTargetModel);
 
-    const makeContinuationTransport = (basePayload) => async ({ accumulatedText }) => {
-      const contPayload = buildContinuationPayload(basePayload, accumulatedText, flowCfg.continuationText);
-      const r = await sendUpstream({
-        upstream: flowCfg.upstream,
-        reqPath,
-        headers: req.headers,
-        payloadObj: contPayload
-      });
-      if (r.status !== 200) throw new Error(`CONT_HTTP_${r.status}`);
-      const sse = extractSseText(r.body);
-      return { text: sse.text, finishReason: sse.finish || 'STOP' };
+    const makeContinuationTransport = (basePayload) => {
+      let contAttempt = 0;
+      return async ({ accumulatedText }) => {
+        contAttempt += 1;
+        emit('recovery-stage', {
+          cascadeId: origTraj,
+          mode,
+          stage: 'continue',
+          attempt: contAttempt,
+          maxAttempts: flowCfg.maxContinuations
+        });
+        const contPayload = buildContinuationPayload(basePayload, accumulatedText, flowCfg.continuationText);
+        const r = await sendUpstream({
+          upstream: flowCfg.upstream,
+          reqPath,
+          headers: req.headers,
+          payloadObj: contPayload
+        });
+        if (r.status !== 200) throw new Error(`CONT_HTTP_${r.status}`);
+        const sse = extractSseText(r.body);
+        return { text: sse.text, finishReason: sse.finish || 'STOP' };
+      };
     };
 
     const runRecover = async (basePayload, sse) => {
@@ -1273,6 +1288,15 @@ export function createFlowProxyServer({
         // Rotate upstream trajectory_id/sessionId so server-side poisoned refusal history is bypassed
         // while local accounting keeps using origTraj.
         rotateRequestIdentity(stagedPayload);
+        const stageReason =
+          recovered.outcome === Outcome.REFUSED
+            ? 'refusal'
+            : recovered.outcome === Outcome.FILTER_TRIGGERED || isPolicyBlockText(primarySse.text)
+            ? 'filter'
+            : !primarySse.text.trim() && primarySse.toolCalls === 0
+            ? 'empty'
+            : 'retry';
+        emit('recovery-stage', { cascadeId: origTraj, mode, stage: 'staging', reason: stageReason });
         try {
           const r = await sendUpstream({
             upstream: flowCfg.upstream,
@@ -1339,6 +1363,20 @@ export function createFlowProxyServer({
         if (retryBlock) {
           injectProxySystemMessage(escPayload, retryBlock, { everyTurn: true });
         }
+        const escReason =
+          finalOutcome === Outcome.REFUSED
+            ? 'refusal'
+            : finalOutcome === Outcome.FILTER_TRIGGERED || isPolicyBlockText(finalText)
+            ? 'filter'
+            : 'empty';
+        emit('recovery-stage', {
+          cascadeId: origTraj,
+          mode,
+          stage: 'soft-retry',
+          attempt,
+          maxAttempts: 2,
+          reason: escReason
+        });
         try {
           const r = await sendUpstream({
             upstream: flowCfg.upstream,
@@ -1387,6 +1425,7 @@ export function createFlowProxyServer({
       });
       remapPayload.model = flowCfg.remapTargetModel;
       rotateRequestIdentity(remapPayload);
+      emit('recovery-stage', { cascadeId: origTraj, mode, stage: 'remap', targetModel: flowCfg.remapTargetModel });
       try {
         const r = await sendUpstream({
           upstream: flowCfg.upstream,
@@ -1446,8 +1485,9 @@ export function createFlowProxyServer({
     });
     emit('outcome', { cascadeId: origTraj, mode, verdict, detail, actions, ms: Date.now() - t0 });
 
-    if (flowCfg.compactEnabled && !isSubagent && origTraj && bestSse?.usageMetadata?.promptTokenCount) {
-      maybeScheduleAutoCompact(origTraj, Number(bestSse.usageMetadata.promptTokenCount), modelName, flowCfg);
+    if (flowCfg.compactEnabled && canTrackCompaction) {
+      const pt = Number(bestSse?.usageMetadata?.promptTokenCount || 0) || fallbackPromptTokens;
+      if (pt > 0) maybeScheduleAutoCompact(origTraj, pt, modelName, flowCfg);
     }
 
     // Prevent upstream filter text from entering client history and poisoning subsequent turns

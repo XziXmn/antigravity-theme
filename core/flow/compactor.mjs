@@ -403,6 +403,15 @@ export function buildCompactedContents(origContents, state) {
           break;
         }
       }
+      // Full-array fallback heals index drift from earlier incremental compactions
+      if (matchIdx < 2) {
+        for (let i = list.length - 1; i >= 2; i -= 1) {
+          if (contentFingerprint(list[i]) === state.anchorFingerprint) {
+            matchIdx = i;
+            break;
+          }
+        }
+      }
     }
   } else if (state.splitIdx < list.length) {
     matchIdx = state.splitIdx;
@@ -699,6 +708,16 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
       const afterTokensEst = summaryTokens + split.tailTokens;
       const savedTokensEst = Math.max(0, beforeTokensEst - afterTokensEst);
 
+      let realSplitIdx = split.splitIdx;
+      if (split.anchorFingerprint) {
+        for (let i = origContents.length - 1; i >= 2; i -= 1) {
+          if (contentFingerprint(origContents[i]) === split.anchorFingerprint) {
+            realSplitIdx = i;
+            break;
+          }
+        }
+      }
+
       const nextState = {
         version: 1,
         cascadeId: safe,
@@ -706,7 +725,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
         hijackCount: Number(prevState?.hijackCount || 0),
         compactedAt: Date.now(),
         reason,
-        splitIdx: split.splitIdx,
+        splitIdx: realSplitIdx,
         anchorMode: split.anchorMode || 'user',
         anchorFingerprint: split.anchorFingerprint,
         totalTurnsAtCompact: origContents.length,

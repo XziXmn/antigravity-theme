@@ -272,3 +272,86 @@ test('Offline, real terminal error, and daemon timeout turn red while user cance
   assert.equal(normalReq.isRetrying, false, 'normal first attempt modelRequest must not false-trigger retry banner');
   assert.equal(normalReq.visualState, 'running');
 });
+
+test('Residual lastStepErrorMsg must not trigger false retrying during normal execution', () => {
+  const snap = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'llm', pendingRetrying: false },
+    live: {
+      matched: true,
+      hasProvider: true,
+      aspStatus: 1,
+      effRunStatus: 2,
+      hasTrajectory: true,
+      execCase: 'modelRequest',
+      execAttempt: 1,
+      execRetryAtMs: 0,
+      lastStepErrorMsg: 'previous turn transient error',
+      loadingText: ''
+    },
+    waitSec: 4,
+    lastHb: NOW
+  });
+  assert.equal(snap.isRetrying, false);
+  assert.equal(snap.visualState, 'running');
+  assert.equal(snap.chipText, '新步执行中...');
+});
+
+test('Flow recovery stages and completion render directly in live chip', () => {
+  const baseLive = { matched: true, hasProvider: true, aspStatus: 1, effRunStatus: 2, hasTrajectory: true };
+  const s1 = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'llm' },
+    live: baseLive,
+    lastHb: NOW,
+    flowRecovery: { active: true, stage: 'staging', reason: 'refusal', expiresAt: NOW + 30000 }
+  });
+  assert.equal(s1.visualState, 'slow');
+  assert.equal(s1.chipClass, 'is-slow');
+  assert.equal(s1.chipText, '拒答 · 软重试中');
+
+  const s2 = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'llm' },
+    live: baseLive,
+    lastHb: NOW,
+    flowRecovery: { active: true, stage: 'soft-retry', reason: 'refusal', attempt: 1, maxAttempts: 2, expiresAt: NOW + 30000 }
+  });
+  assert.equal(s2.chipText, '拒答软重试 1/2');
+
+  const s3 = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'llm' },
+    live: baseLive,
+    lastHb: NOW,
+    flowRecovery: { active: true, stage: 'continue', attempt: 1, maxAttempts: 2, expiresAt: NOW + 30000 }
+  });
+  assert.equal(s3.chipText, '自动续写中 1/2');
+
+  const s4 = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'llm' },
+    live: baseLive,
+    lastHb: NOW,
+    flowRecovery: { active: true, stage: 'remap', expiresAt: NOW + 30000 }
+  });
+  assert.equal(s4.chipText, '切换备用模型重试');
+
+  const doneSnap = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'idle' },
+    live: { matched: true, hasProvider: true, aspStatus: 1, effRunStatus: 1, hasTrajectory: true },
+    lastHb: NOW,
+    flowRecovery: { active: false, doneText: '拒答已重试通过', expiresAt: NOW + 5000 }
+  });
+  assert.equal(doneSnap.visualState, 'idle');
+  assert.equal(doneSnap.chipClass, 'is-recovered');
+  assert.equal(doneSnap.chipText, '拒答已重试通过');
+});
+
+test('telemetry-renderer removes redundant wait-note banner and proxy emits recovery-stage', () => {
+  const rendererSrc = fs.readFileSync(path.join(ROOT_DIR, 'core', 'daemon', 'telemetry-renderer.mjs'), 'utf8');
+  const proxySrc = fs.readFileSync(path.join(ROOT_DIR, 'core', 'flow', 'proxy.mjs'), 'utf8');
+  assert.equal(rendererSrc.includes('ag-tt-wait-note'), false);
+  assert.ok(proxySrc.includes("emit('recovery-stage'"));
+});
