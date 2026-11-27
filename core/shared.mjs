@@ -349,7 +349,7 @@ export function findRunningDaemonPids({
         const res = spawnSyncImpl(
           shellBin,
           ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-          { windowsHide: true, encoding: 'utf8', timeout: 5000 }
+          { windowsHide: true, encoding: 'utf8', timeout: 12000 }
         );
         if (!res?.error && res?.status === 0) {
           return parseDaemonPidsFromWinCimJson(res.stdout, { excludePids, extraPatterns });
@@ -397,7 +397,7 @@ export function inspectDaemonPidStatus(
         const res = spawnSyncImpl(
           shellBin,
           ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-          { windowsHide: true, encoding: 'utf8', timeout: 4000 }
+          { windowsHide: true, encoding: 'utf8', timeout: 12000 }
         );
         if (!res?.error && res?.status === 0) {
           const text = stripUtf8Bom(String(res.stdout || '')).trim();

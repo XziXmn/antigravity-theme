@@ -465,7 +465,14 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
     const styleFiles = listSortedFiles(STYLES_DIR, '.css');
     const runtimeFiles = listSortedFiles(RUNTIME_DIR, '.js');
     const localeFiles = listSortedFiles(I18N_DIR, '.json');
-    const coreFiles = [...styleFiles, path.join(CORE_DIR, 'i18n.json'), ...localeFiles, ...runtimeFiles];
+    const coreFiles = [
+      ...styleFiles,
+      path.join(CORE_DIR, 'i18n.json'),
+      ...localeFiles,
+      ...runtimeFiles,
+      path.join(ROOT_DIR, 'package.json'),
+      path.join(CORE_DIR, 'manifest.json')
+    ];
     const userFiles = safeMode
       ? []
       : [
@@ -698,7 +705,8 @@ export function createBundleController({ safeMode = false, cliChannel = null, ha
       .slice(0, 8);
 
     const channelTag = channel === 'insiders' ? 'insiders' : 'stable';
-    cachedPatchVersion = `${BASE_VERSION}-${channelTag}-${hash}`;
+    const currentBaseVersion = readBaseVersion();
+    cachedPatchVersion = `${currentBaseVersion}-${channelTag}-${hash}`;
 
     const bootPayload = {
       version: cachedPatchVersion,

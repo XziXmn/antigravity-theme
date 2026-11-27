@@ -409,11 +409,14 @@
     return ui.accountFilter;
   }
 
-  function resolveLiveQuotaWin(win, nowMs = Date.now()) {
+  function resolveLiveQuotaWin(win, nowMs = Date.now(), fallbackUpdatedAt = 0) {
     if (!win || typeof win !== 'object') return null;
     let remainingPct = typeof win.remainingPct === 'number' ? Math.max(0, Math.min(100, win.remainingPct)) : null;
     let resetInSec = typeof win.resetInSec === 'number' && Number.isFinite(win.resetInSec) ? Math.max(0, win.resetInSec) : 0;
-    const resetMs = win.resetTime ? Date.parse(win.resetTime) : NaN;
+    let resetMs = win.resetTime ? Date.parse(win.resetTime) : NaN;
+    if (!Number.isFinite(resetMs) && resetInSec > 0 && Number.isFinite(fallbackUpdatedAt) && fallbackUpdatedAt > 0) {
+      resetMs = fallbackUpdatedAt + resetInSec * 1000;
+    }
     if (Number.isFinite(resetMs)) {
       const liveSec = Math.round((resetMs - nowMs) / 1000);
       if (liveSec <= 0) {
@@ -1373,11 +1376,12 @@
       return 'free';
     };
 
-    const renderAccMeterRow = (lbl, win) => {
-      if (!win) return '';
-      const pct = typeof win.remainingPct === 'number' ? Math.max(0, Math.min(100, win.remainingPct)) : null;
+    const renderAccMeterRow = (lbl, win, updatedAt = 0) => {
+      const liveWin = resolveLiveQuotaWin(win, Date.now(), updatedAt);
+      if (!liveWin) return '';
+      const pct = typeof liveWin.remainingPct === 'number' ? Math.max(0, Math.min(100, liveWin.remainingPct)) : null;
       const tone = pct === null ? '' : pct <= 20 ? 'crit' : pct <= 50 ? 'warn' : 'ok';
-      const resetStr = pct !== null && pct < 100 && win.resetInSec > 0 ? fmtReset(win.resetInSec) : '';
+      const resetStr = pct !== null && pct < 100 && liveWin.resetInSec > 0 ? fmtReset(liveWin.resetInSec) : '';
       return (
         '<div class="ag-acc-meter-row">' +
         '<span class="ag-acc-meter-lbl">' + esc(lbl) + '</span>' +
@@ -1429,8 +1433,8 @@
                     (g) =>
                       '<div class="ag-acc-qgroup">' +
                       '<div class="ag-acc-qgtitle">' + esc(g.label || g.key) + '</div>' +
-                      renderAccMeterRow(s.win5h, g.fiveHour) +
-                      renderAccMeterRow(s.win7d, g.weekly) +
+                      renderAccMeterRow(s.win5h, g.fiveHour, a.updatedAt) +
+                      renderAccMeterRow(s.win7d, g.weekly, a.updatedAt) +
                       '</div>'
                   )
                   .join('') +
@@ -1451,7 +1455,6 @@
               '</div>' +
               '<div class="ag-acc-actions-grid">' +
               slot1Html +
-              '<button type="button" class="ag-s-hdr-link" data-acc-act="refresh_one" data-acc-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>' + esc(s.refreshBtn) + '</button>' +
               '<button type="button" class="ag-s-hdr-link is-danger" data-acc-act="remove" data-acc-id="' + esc(a.id) + '">' + esc(s.removeBtn) + '</button>' +
               '</div>' +
               '</div>' +
@@ -1475,7 +1478,7 @@
       '<button type="button" class="ag-s-hdr-link is-primary" data-acc-act="capture"' + (busy ? ' disabled' : '') + '>' + esc(s.captureBtn) + '</button>' +
       '<button type="button" class="ag-s-hdr-link" data-acc-act="oauth_add"' + (busy ? ' disabled' : '') + '>' + esc(s.oauthBtn) + '</button>' +
       '<button type="button" class="ag-s-hdr-link" data-acc-act="native_add"' + (busy ? ' disabled' : '') + '>' + esc(s.nativeAddBtn) + '</button>' +
-      '<button type="button" class="ag-s-hdr-link" data-acc-act="refresh_all"' + (busy ? ' disabled' : '') + '>' + esc(s.refreshAllBtn) + '</button>' +
+      '<button type="button" class="ag-s-hdr-link" data-acc-act="refresh_all"' + (busy ? ' disabled' : '') + '>' + esc(ui.busyAction === 'refresh_all' ? (getLoc() === 'en' ? 'Syncing…' : '同步中…') : s.refreshAllBtn) + '</button>' +
       '</div></div>' +
       filterRowHtml +
       '<div class="ag-s-card">' + cardsHtml + '</div>' +
@@ -1501,6 +1504,7 @@
 
   function computePaneSig() {
     const ov = ui.overview;
+    const nowMs = Date.now();
     return JSON.stringify([
       getLoc(),
       ui.busyAction,
@@ -1512,7 +1516,19 @@
       ov?.pendingNativeLogin || false,
       ov?.privacyMask || false,
       JSON.stringify(ov?.autoSwitch || {}),
-      (ov?.accounts || []).map((a) => `${a.id}:${a.disabled}:${a.credHash}:${a.updatedAt}:${a.quotaError || ''}`).join(',')
+      (ov?.accounts || [])
+        .map((a) => {
+          const qSig = filterVisibleQuotaGroups(a.lastQuota?.groups)
+            .slice(0, 2)
+            .map((g) => {
+              const w5 = resolveLiveQuotaWin(g.fiveHour, nowMs, a.updatedAt);
+              const w7 = resolveLiveQuotaWin(g.weekly, nowMs, a.updatedAt);
+              return `${w5?.remainingPct ?? ''}:${Math.floor((w5?.resetInSec || 0) / 60)}/${w7?.remainingPct ?? ''}:${Math.floor((w7?.resetInSec || 0) / 60)}`;
+            })
+            .join('|');
+          return `${a.id}:${a.credHash}:${a.updatedAt}:${a.quotaError || ''}:${qSig}`;
+        })
+        .join(',')
     ]);
   }
 
@@ -1525,12 +1541,18 @@
     if (!force && sig === lastPaneSig && pane.innerHTML !== '') return;
     lastPaneSig = sig;
 
+    const scrollHost = pane.closest?.('[data-settings-content-pane="true"]') || pane.parentElement;
+    const prevScrollTop = scrollHost ? scrollHost.scrollTop : 0;
+
     const bannerHtml = ui.banner
       ? '<div class="ag-s-card" style="padding:9px 14px;font-size:12px;margin-bottom:14px;color:' +
         (ui.banner.error ? 'var(--ag-s-err)' : 'var(--ag-s-ok)') + '">' + esc(ui.banner.text) + '</div>'
       : '';
 
     pane.innerHTML = bannerHtml + renderAccountsTab(s);
+    if (scrollHost && prevScrollTop > 0) {
+      scrollHost.scrollTop = prevScrollTop;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -2174,11 +2196,11 @@
           ? { error: false, text: s.busyOauth }
           : act === 'native_add'
           ? { error: false, text: s.busyNativeAdd }
-          : act === 'refresh_all' || act === 'refresh_one'
-          ? { error: false, text: s.busyRefresh }
           : act === 'switch'
           ? { error: false, text: s.busySwitch }
-          : null;
+          : act === 'refresh_all'
+          ? null
+          : ui.banner;
       renderPane();
 
       const wantRelaunch = ui.overview?.autoSwitch?.autoRelaunch !== false;
@@ -2187,7 +2209,6 @@
       else if (act === 'oauth_add') res = await callAccounts('start_oauth_add');
       else if (act === 'native_add') res = await callAccounts('prepare_native_add', { relaunch: wantRelaunch });
       else if (act === 'refresh_all') res = await callAccounts('refresh_quota', { accountId: 'all' });
-      else if (act === 'refresh_one') res = await callAccounts('refresh_quota', { accountId: id });
       else if (act === 'switch') res = await callAccounts('switch_account', { accountId: id, relaunch: wantRelaunch });
       else if (act === 'remove') {
         res = await callAccounts('remove_account', { accountId: id });
@@ -2559,6 +2580,7 @@
     }
     refreshTopbarBadge();
     syncOverviewExtensions();
+    if (accountsTabActive) renderPane();
   }, 15000);
 
   window.__ag_accounts_cleanup = () => {

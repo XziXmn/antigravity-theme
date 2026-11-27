@@ -391,7 +391,7 @@
 
 .ag-acc-actions-grid {
   display: grid;
-  grid-template-columns: repeat(3, 58px);
+  grid-template-columns: repeat(2, 58px);
   gap: 6px;
   align-items: center;
   flex-shrink: 0;

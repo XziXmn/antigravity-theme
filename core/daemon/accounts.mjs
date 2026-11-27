@@ -219,10 +219,13 @@ export function createAccountsManager({
     return acct;
   }
 
-  function reconcileQuotaWindow(win, nowMs) {
+  function reconcileQuotaWindow(win, nowMs, updatedAt = 0) {
     if (!win || typeof win !== 'object') return null;
     const resetTime = typeof win.resetTime === 'string' ? win.resetTime.trim() : '';
-    const resetMs = resetTime ? Date.parse(resetTime) : NaN;
+    let resetMs = resetTime ? Date.parse(resetTime) : NaN;
+    if (!Number.isFinite(resetMs) && typeof win.resetInSec === 'number' && win.resetInSec > 0 && Number.isFinite(updatedAt) && updatedAt > 0) {
+      resetMs = updatedAt + win.resetInSec * 1000;
+    }
     if (Number.isFinite(resetMs) && resetMs <= nowMs) {
       return {
         ...win,
@@ -237,19 +240,23 @@ export function createAccountsManager({
     return { ...win, resetInSec };
   }
 
-  function reconcileOfflineQuotaSnapshot(quota, nowMs) {
+  function reconcileOfflineQuotaSnapshot(quota, nowMs, updatedAt = 0) {
     if (!quota || typeof quota !== 'object') return null;
+    let changed = false;
     const groups = Array.isArray(quota.groups)
-      ? quota.groups.map((g) => ({
-          ...g,
-          fiveHour: reconcileQuotaWindow(g.fiveHour, nowMs),
-          weekly: reconcileQuotaWindow(g.weekly, nowMs)
-        }))
+      ? quota.groups.map((g) => {
+          const next5h = reconcileQuotaWindow(g.fiveHour, nowMs, updatedAt);
+          const next7d = reconcileQuotaWindow(g.weekly, nowMs, updatedAt);
+          if ((next5h?.expiredReset && g.fiveHour?.remainingPct !== 100) || (next7d?.expiredReset && g.weekly?.remainingPct !== 100)) {
+            changed = true;
+          }
+          return { ...g, fiveHour: next5h, weekly: next7d };
+        })
       : [];
     const buckets = Array.isArray(quota.buckets)
-      ? quota.buckets.map((b) => reconcileQuotaWindow(b, nowMs) || b)
+      ? quota.buckets.map((b) => reconcileQuotaWindow(b, nowMs, updatedAt) || b)
       : [];
-    return { ...quota, groups, buckets };
+    return { quota: { ...quota, groups, buckets }, changed };
   }
 
   function getOverview() {
@@ -262,6 +269,25 @@ export function createAccountsManager({
       ? store.accounts.find((a) => normalizeCredEmail(a.email) === activeCred.email)
       : null;
     const effectiveActiveId = activeByCred ? activeByCred.id : store.activeId;
+    let storeMutated = false;
+    const accounts = store.accounts.map((a) => {
+      const rec = reconcileOfflineQuotaSnapshot(a.lastQuota, now, a.updatedAt || 0);
+      if (rec?.changed) {
+        a.lastQuota = rec.quota;
+        storeMutated = true;
+      }
+      return {
+        ...a,
+        lastQuota: rec ? rec.quota : null,
+        isActive: a.id === effectiveActiveId,
+        isPendingTarget: Boolean(pendingSwitch && a.id === pendingSwitch.targetId)
+      };
+    });
+    if (storeMutated) {
+      try {
+        saveStore(store);
+      } catch {}
+    }
     return {
       ok: true,
       activeId: effectiveActiveId,
@@ -273,12 +299,7 @@ export function createAccountsManager({
       vaultCapability: cap,
       oauthInProgress,
       lastAutoSwitchNotice,
-      accounts: store.accounts.map((a) => ({
-        ...a,
-        lastQuota: reconcileOfflineQuotaSnapshot(a.lastQuota, now),
-        isActive: a.id === effectiveActiveId,
-        isPendingTarget: Boolean(pendingSwitch && a.id === pendingSwitch.targetId)
-      }))
+      accounts
     };
   }
 
@@ -349,7 +370,8 @@ export function createAccountsManager({
 
     // Never call external private CloudCode APIs for inactive accounts;
     // preserve last official client snapshot and reconcile any elapsed reset windows offline.
-    acct.lastQuota = reconcileOfflineQuotaSnapshot(acct.lastQuota, nowFn());
+    const rec = reconcileOfflineQuotaSnapshot(acct.lastQuota, nowFn(), acct.updatedAt || 0);
+    acct.lastQuota = rec ? rec.quota : null;
     acct.quotaSource = 'cached';
     acct.quotaError = '';
     return { ok: true, id: acct.id, source: 'cached', offline: true };

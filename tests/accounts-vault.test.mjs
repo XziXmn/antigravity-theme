@@ -842,8 +842,13 @@ test('pure-Node relaunch-worker validates allowlisted binaries, atomically syncs
 
     const accountsUiSrc = fs.readFileSync(path.resolve('core/runtime/79-accounts-dashboard.js'), 'utf8');
     assert.equal(accountsUiSrc.includes('data-acc-act="toggle_disable"'), false);
+    assert.equal(accountsUiSrc.includes('data-acc-act="refresh_one"'), false);
+    assert.equal(accountsUiSrc.includes('resolveLiveQuotaWin(g.fiveHour, nowMs, a.updatedAt)'), true);
     assert.equal(accountsUiSrc.includes('ag_topbar_usage_metric'), true);
     assert.equal(accountsUiSrc.includes('ag_usage_pop_prefs'), true);
+
+    const pathsSrc = fs.readFileSync(path.resolve('core/daemon/paths.mjs'), 'utf8');
+    assert.equal(pathsSrc.includes('const currentBaseVersion = readBaseVersion()'), true);
 
     const settingsUiSrc = fs.readFileSync(path.resolve('core/runtime/75-settings-ui.js'), 'utf8');
     assert.equal(settingsUiSrc.includes('syncUiPrefsToRuntime'), true);
@@ -876,5 +881,74 @@ test('topbarUsageMetric persists across bundle controller restarts via user/conf
     } else if (fs.existsSync(cfgPath)) {
       fs.rmSync(cfgPath, { force: true });
     }
+  }
+});
+
+test('offline account quota reconciles elapsed resetTime and fallback updatedAt+resetInSec to 100% and persists', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-offline-reconcile-'));
+  try {
+    const now = 1_780_000_000_000;
+    const storePath = path.join(tmpDir, 'accounts.json');
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: 1,
+        activeId: 'acc_cur',
+        accounts: [
+          {
+            id: 'acc_cur',
+            email: 'cur@example.com',
+            updatedAt: now - 60_000,
+            lastQuota: {
+              ok: true,
+              groups: [
+                {
+                  key: 'gemini',
+                  label: 'Gemini',
+                  fiveHour: { remainingFraction: 0.77, remainingPct: 77, resetTime: new Date(now + 3600_000).toISOString(), resetInSec: 3600 },
+                  weekly: { remainingFraction: 0.69, remainingPct: 69, resetTime: new Date(now + 86400_000).toISOString(), resetInSec: 86400 }
+                }
+              ]
+            }
+          },
+          {
+            id: 'acc_expired_by_fallback',
+            email: 'bak@example.com',
+            updatedAt: now - 3600_000, // 1h ago
+            lastQuota: {
+              ok: true,
+              groups: [
+                {
+                  key: 'gemini',
+                  label: 'Gemini',
+                  // No resetTime, only resetInSec=1800 (30m from 1h ago -> expired 30m ago)
+                  fiveHour: { remainingFraction: 0.01, remainingPct: 1, resetTime: '', resetInSec: 1800 },
+                  weekly: { remainingFraction: 0.24, remainingPct: 24, resetTime: new Date(now + 500_000_000).toISOString(), resetInSec: 500_000 }
+                }
+              ]
+            }
+          }
+        ]
+      }),
+      'utf8'
+    );
+
+    const mgr = createAccountsManager({
+      userDir: tmpDir,
+      vault: { getCapability: () => ({ supported: false, backend: 'none' }) },
+      nowFn: () => now
+    });
+    const ov = mgr.getOverview();
+    const bak = ov.accounts.find((a) => a.id === 'acc_expired_by_fallback');
+    assert.equal(bak.lastQuota.groups[0].fiveHour.remainingPct, 100);
+    assert.equal(bak.lastQuota.groups[0].fiveHour.resetInSec, 0);
+    assert.equal(bak.lastQuota.groups[0].weekly.remainingPct, 24);
+
+    // Verify reconciliation persisted to accounts.json
+    const persisted = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+    const persistedBak = persisted.accounts.find((a) => a.id === 'acc_expired_by_fallback');
+    assert.equal(persistedBak.lastQuota.groups[0].fiveHour.remainingPct, 100);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
