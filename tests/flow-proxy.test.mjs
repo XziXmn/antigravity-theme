@@ -760,3 +760,108 @@ test('detectSubagentRequest ignores built-in <subagents> tool docs on active mai
     await closeServer(flakyUpstream);
   }
 });
+
+test('flow proxy recovers full-mode refusals even when judge fails, strips breaking tool chains on 400 staging fallback, and logs final verdict to /ag-flow/diag', async () => {
+  const captured = [];
+  const mockUpstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      captured.push(parsed);
+      // 1. Judge request fails with 404 (simulating unavailable judge model)
+      if (String(parsed?.requestId || '').startsWith('ag-flow-judge-')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 404, message: 'model not found' } }));
+        return;
+      }
+      const contents = parsed?.request?.contents || [];
+      const hasTools = Array.isArray(parsed?.request?.tools) && parsed.request.tools.length > 0;
+      const isStaged = contents.some((c) =>
+        (c?.parts || []).some((pt) => String(pt?.text || '').includes('虚构创作与文本交付任务'))
+      );
+      // 2. Staged retry that keeps legacy tools returns 400; clean-history staging without tools succeeds
+      if (isStaged && hasTools) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 400, message: 'INVALID_ARGUMENT: tool turn mismatch' } }));
+        return;
+      }
+      if (isStaged && !hasTools) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(buildGeminiSse('夜风穿过长廊，檐角铜铃轻响一声，他收起信笺转身步入正殿。', { finishReason: 'STOP' }));
+        return;
+      }
+      // 3. Primary request returns realistic refusal
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(
+        buildGeminiSse(
+          '无法生成该番外短篇。你的请求要求创作高冲突内容，超出了安全限制，即便在虚构小说的语境下也不能提供。',
+          { finishReason: 'STOP' }
+        )
+      );
+    });
+  });
+
+  const upPort = await listenServer(mockUpstream);
+  const store = createFlowSessionStore({ getDefaultMode: () => 'default' });
+  const cid = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  store.setSessionMode({ cascadeId: cid, mode: 'full' });
+
+  const proxyApi = createFlowProxyServer({
+    getConfig: () => ({
+      upstream: `http://127.0.0.1:${upPort}`,
+      defaultMode: 'default',
+      modelPattern: 'gemini',
+      judgeEnabled: true,
+      judgeModel: 'gemini-3.8-flash-low',
+      refusalRewrite: true,
+      softenEnabled: true
+    }),
+    getActiveMainSessions: () => [cid],
+    sessionStore: store
+  });
+  const proxyPort = await listenServer(proxyApi.server);
+
+  try {
+    const r = await httpPost(
+      proxyPort,
+      '/v1internal:streamGenerateContent?alt=sse',
+      {
+        model: 'gemini-4-hydrogen-medium',
+        request: {
+          labels: { trajectory_id: cid },
+          tools: [{ functionDeclarations: [{ name: 'read_file' }] }],
+          contents: [
+            { role: 'user', parts: [{ text: '写一个番外短篇看看效果' }] },
+            { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { path: 'x.md' } } }] },
+            { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { content: 'ok' } } }] }
+          ]
+        }
+      },
+      { authorization: 'Bearer test-token' }
+    );
+    assert.equal(r.status, 200);
+    assert.match(extractSseText(r.body).text, /夜风穿过长廊/);
+    assert.equal(store.getRuntimeState(cid)?.lastVerdict, 'staged');
+
+    // Verify /ag-flow/diag records final verdict, actions, and primaryStatus
+    const diagRes = await new Promise((resolve, reject) => {
+      http
+        .get({ host: '127.0.0.1', port: proxyPort, path: '/ag-flow/diag' }, (res) => {
+          const ch = [];
+          res.on('data', (c) => ch.push(c));
+          res.on('end', () => resolve(JSON.parse(Buffer.concat(ch).toString('utf8'))));
+        })
+        .on('error', reject);
+    });
+    const lastDiag = diagRes.recent[diagRes.recent.length - 1];
+    assert.equal(lastDiag.primaryStatus, 200);
+    assert.equal(lastDiag.verdict, 'staged');
+    assert.ok(lastDiag.actions.some((a) => a.type === 'judge-fallback'));
+    assert.ok(lastDiag.actions.some((a) => a.type === 'staging-http-error' && a.status === 400));
+    assert.ok(lastDiag.actions.some((a) => a.type === 'staging-rewrite' && a.cleanHistory === true));
+  } finally {
+    await closeServer(proxyApi.server);
+    await closeServer(mockUpstream);
+  }
+});

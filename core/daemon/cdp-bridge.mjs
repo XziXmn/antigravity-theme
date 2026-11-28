@@ -1599,7 +1599,11 @@ export function createCdpManager({
       if (syncTickCount % 24 === 1) trimDaemonLogsIfNeeded(runOnce);
       const bundleChanged = bundleCtrl.rebuildBundleIfNeeded();
       if (promptSuggester && typeof promptSuggester.syncState === 'function') {
-        promptSuggester.syncState();
+        const accOv =
+          accountsManager && typeof accountsManager.getOverview === 'function' ? accountsManager.getOverview() : null;
+        if (!accOv?.pendingSwitch && !accOv?.pendingNativeLogin) {
+          promptSuggester.syncState();
+        }
       }
       const { activeConfig } = bundleCtrl.getState();
       if (sshRemoteCtrl && typeof sshRemoteCtrl.syncState === 'function') {
@@ -1616,10 +1620,10 @@ export function createCdpManager({
       }
       const shouldHeartbeatCheck = bundleChanged || syncTickCount % 6 === 1;
       const shouldBroadcastQuota = syncTickCount % 4 === 1;
-      const shouldBackgroundRefreshAccounts = syncTickCount % 100 === 5;
+      const shouldBackgroundRefreshAccounts = syncTickCount % 20 === 5;
       if (shouldBackgroundRefreshAccounts && accountsManager && typeof accountsManager.refreshQuota === 'function') {
         void accountsManager
-          .refreshQuota('active', { minIntervalMs: 240_000 })
+          .refreshQuota('active', { minIntervalMs: 30_000 })
           .then((res) => {
             if (!res?.ok || res.throttled || !res.overview) return;
             const ovJson = JSON.stringify({ ok: true, overview: res.overview })

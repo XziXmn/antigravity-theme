@@ -93,9 +93,19 @@ export function createRecoverer({
     if (outcome === Outcome.LENGTH_CAPPED && !refusal) return outcome;
     if (!refusal && !looksAbnormalStop(response.text)) return Outcome.OK;
     if (judge === null) return refusal ? Outcome.REFUSED : Outcome.LENGTH_CAPPED;
-    const verdict = await judge(response);
+    let verdict = '';
+    try {
+      verdict = await judge(response);
+    } catch (err) {
+      actions.push({
+        type: 'judge-fallback',
+        reason: String(err?.message || err || 'judge_error').slice(0, 120)
+      });
+      return refusal ? Outcome.REFUSED : outcome === Outcome.LENGTH_CAPPED ? outcome : Outcome.OK;
+    }
     if (!['complete', 'truncated', 'refused'].includes(verdict)) {
-      throw new TypeError('Invalid judge verdict');
+      actions.push({ type: 'judge-fallback', reason: 'invalid_verdict' });
+      return refusal ? Outcome.REFUSED : outcome === Outcome.LENGTH_CAPPED ? outcome : Outcome.OK;
     }
     actions.push({ type: 'judge', verdict });
     if (verdict === 'refused') return Outcome.REFUSED;

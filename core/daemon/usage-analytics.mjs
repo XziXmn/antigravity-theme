@@ -697,18 +697,19 @@ export function projectPoolMonthlyQuota({
       : 0);
   const currentWinDailyWeeklyRate = curWeekUsedPct > 0 ? curWeekUsedPct / Math.max(0.35, weekElapsedDays) : 0;
 
-  // Empirical Bayes smoothing against 7-day uniform prior (14.3%/d) when observation span is short (<2.5d)
+  // Empirical Bayes smoothing against adaptive prior when observation span is short (<2.5d)
   const PRIOR_DAILY_PCT = 14.3;
   const PRIOR_DAYS = 1.2;
+  const adaptivePriorDaily = Math.min(PRIOR_DAILY_PCT, Math.max(2.0, curWeekUsedPct * 0.45));
   const acctMultSamples = Math.max(1, monthPoolStat?.acctCountWithSamples || 1);
   const perAcctWeeklyDrop = monthPoolStat ? monthPoolStat.weeklyDrop / acctMultSamples : curWeekUsedPct;
   const smoothedSampleRate =
     observedDays < 2.5 && perAcctWeeklyDrop > 0
-      ? (perAcctWeeklyDrop + PRIOR_DAILY_PCT * PRIOR_DAYS) / (observedDays + PRIOR_DAYS)
+      ? (perAcctWeeklyDrop + adaptivePriorDaily * PRIOR_DAYS) / (observedDays + PRIOR_DAYS)
       : perAcctSampleAvg;
   const smoothedCurWinRate =
     weekElapsedDays < 2.5 && curWeekUsedPct > 0
-      ? (curWeekUsedPct + PRIOR_DAILY_PCT * PRIOR_DAYS) / (weekElapsedDays + PRIOR_DAYS)
+      ? (curWeekUsedPct + adaptivePriorDaily * PRIOR_DAYS) / (weekElapsedDays + PRIOR_DAYS)
       : currentWinDailyWeeklyRate;
 
   let perAcctDailyWeeklyRate = 0;
@@ -1073,7 +1074,7 @@ export function createUsageAnalytics({ getDatabaseSync, conversationsDir, userDi
       const { costUsd, savedUsd } = estimateRequestCostUsd(ev.model, ev);
       const ymd = formatLocalYmd(ev.ts);
 
-      if (timelineFirstMs > 0 && ev.ts >= startMs && ev.ts < timelineFirstMs) {
+      if (timelineFirstMs > 0 && ev.ts >= startMs && ev.ts < timelineFirstMs && (accountFilter === 'all' || evEmail === accountFilter)) {
         const prePool = classifyModelQuotaPool(ev.model);
         if (!preTimelinePoolEventTs.has(prePool)) preTimelinePoolEventTs.set(prePool, []);
         preTimelinePoolEventTs.get(prePool).push(ev.ts);
@@ -1313,12 +1314,13 @@ export function createUsageAnalytics({ getDatabaseSync, conversationsDir, userDi
       });
     }
 
-    const extractPrimaryFiveHourPct = (accMeta, em) => {
+    const extractPrimaryQuotaWindowPct = (accMeta, em, winKey) => {
       const groups = Array.isArray(accMeta?.lastQuota?.groups) ? accMeta.lastQuota.groups : [];
       const gem = groups.find((g) => g?.key === 'gemini') || groups[0];
-      if (typeof gem?.fiveHour?.remainingPct === 'number') return gem.fiveHour.remainingPct;
+      if (typeof gem?.[winKey]?.remainingPct === 'number') return gem[winKey].remainingPct;
       const gemSnap = allAccountQStats.perPool.get('gemini')?.accountSnapshots?.get(em);
-      if (typeof gemSnap?.fiveHourPct === 'number') return gemSnap.fiveHourPct;
+      const snapKey = winKey === 'weekly' ? 'weeklyPct' : 'fiveHourPct';
+      if (typeof gemSnap?.[snapKey] === 'number') return gemSnap[snapKey];
       return null;
     };
 
@@ -1329,7 +1331,8 @@ export function createUsageAnalytics({ getDatabaseSync, conversationsDir, userDi
         return {
           ...a,
           isCurrent: Boolean(activeAcctEmailNorm && a.email === activeAcctEmailNorm),
-          fiveHourRemainingPct: extractPrimaryFiveHourPct(a, a.email),
+          fiveHourRemainingPct: extractPrimaryQuotaWindowPct(a, a.email, 'fiveHour'),
+          weeklyRemainingPct: extractPrimaryQuotaWindowPct(a, a.email, 'weekly'),
           cacheHitPct: pt > 0 ? Number(((a.cacheReadTokens / pt) * 100).toFixed(1)) : 0,
           estCostUsd: Number(a.estCostUsd.toFixed(4)),
           quota5hConsumedPct: Math.round(qs.fiveHourDrop),

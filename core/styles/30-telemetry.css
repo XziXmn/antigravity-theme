@@ -1776,6 +1776,15 @@
   background: #10B981;
 }
 
+#ag-live-metrics-tooltip .ag-tt-flow-chip.is-warn {
+  color: #D97706;
+  background: rgba(217, 119, 6, 0.12);
+}
+
+#ag-live-metrics-tooltip .ag-tt-flow-chip.is-warn .ag-tt-flow-chip-dot {
+  background: #D97706;
+}
+
 /* ============================================================================
  * Flow Sliding Compaction: Composer Rim Glow + Bottom Pill In-Place Swap
  * ============================================================================ */

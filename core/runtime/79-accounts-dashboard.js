@@ -64,6 +64,7 @@
     ovProgressCollapsed: false,
     overviewQuotaCollapsed: false,
     loadingAccounts: false,
+    syncingQuota: false,
     loadingAnalytics: false,
     busyAction: '',
     banner: null,
@@ -108,7 +109,7 @@
         captureBtn: 'Capture Current',
         oauthBtn: 'Add via OAuth',
         nativeAddBtn: 'Sign-out & Add',
-        refreshAllBtn: 'Sync Current',
+        refreshAllBtn: 'Refresh All',
         privacyMask: 'Mask emails',
         privacyDesc: 'Hide middle characters of email addresses across cards and charts.',
         autoSwitch: 'Auto-switch on low quota',
@@ -166,7 +167,7 @@
         busySwitch: 'Switching account & syncing credentials…',
         okCaptured: 'Captured account',
         poolQuotaTitle: 'Quota & Forecast',
-        weekProjLbl: 'This Week',
+        weekProjLbl: '7d Cycle Est.',
         monthProjLbl: 'This Month',
         projDepleteLbl: 'Est. Left',
         resetsLbl: 'Resets',
@@ -187,7 +188,7 @@
         captureBtn: '擷取目前帳號',
         oauthBtn: 'OAuth 新增',
         nativeAddBtn: '切無登入新增',
-        refreshAllBtn: '同步目前額度',
+        refreshAllBtn: '刷新全部額度',
         privacyMask: '隱私遮罩',
         privacyDesc: '在帳號列表與統計圖表中隱藏信箱中間字元。',
         autoSwitch: '低額度自動切換',
@@ -245,7 +246,7 @@
         busySwitch: '正在切換帳號並同步憑證…',
         okCaptured: '已成功擷取帳號',
         poolQuotaTitle: '額度與預測',
-        weekProjLbl: '本週預估',
+        weekProjLbl: '7日窗口預估',
         monthProjLbl: '本月預估',
         projDepleteLbl: '約餘時長',
         resetsLbl: '已重置',
@@ -265,7 +266,7 @@
       captureBtn: '捕获当前账号',
       oauthBtn: 'OAuth 添加',
       nativeAddBtn: '切无登录添加',
-      refreshAllBtn: '同步当前额度',
+      refreshAllBtn: '刷新全部额度',
       privacyMask: '隐私打码',
       privacyDesc: '在账号卡片与统计表中隐藏邮箱中间字符。',
       autoSwitch: '低额度自动切号',
@@ -323,7 +324,7 @@
       busySwitch: '正在切换账号并同步凭据…',
       okCaptured: '已成功捕获账号',
       poolQuotaTitle: '额度与预测',
-      weekProjLbl: '本周预估',
+      weekProjLbl: '7日窗口预估',
       monthProjLbl: '本月预估',
       projDepleteLbl: '约余时长',
       resetsLbl: '已重置',
@@ -932,20 +933,22 @@
 
         const isEnLoc = getLoc() === 'en';
         const depleteParts = [];
+        const hReset = typeof proj.hoursTo5hReset === 'number' ? proj.hoursTo5hReset : 5;
+        const dReset = typeof proj.daysToNextWeeklyReset === 'number' ? proj.daysToNextWeeklyReset : 7;
         if (typeof proj.estDeplete5hHours === 'number' && !proj.fiveHourSafeUntilReset) {
-          depleteParts.push(`5h ${proj.estDeplete5hHours}h`);
+          depleteParts.push(`5h ~${proj.estDeplete5hHours}h`);
         } else if (fhRem !== null && fhRem > 0 && proj.fiveHourSafeUntilReset) {
-          depleteParts.push(isEnLoc ? '5h Safe' : '5h 安全');
+          depleteParts.push(`5h >${hReset}h`);
         }
         if (typeof proj.estDepleteWeeklyDays === 'number' && !proj.weeklySafeUntilReset) {
-          depleteParts.push(`${s.win7d} ${proj.estDepleteWeeklyDays}d`);
+          depleteParts.push(`${s.win7d} ~${proj.estDepleteWeeklyDays}d`);
         } else if (wkRem !== null && wkRem > 0 && proj.weeklySafeUntilReset) {
-          depleteParts.push(isEnLoc ? 'Wk Safe' : `${s.win7d}安全`);
+          depleteParts.push(`${s.win7d} >${dReset}d`);
         }
         const depleteStr = depleteParts.length ? depleteParts.join(' · ') : '—';
         const depleteTitle = isEnLoc
-          ? `5h burn: ${proj.burnRate5hPerHour || 0}%/h (reset in ${proj.hoursTo5hReset || 0}h) · Weekly burn: ${proj.weeklyDailyRatePct || 0}%/d (reset in ${proj.daysToNextWeeklyReset || 0}d)`
-          : `5h 燃速 ${proj.burnRate5hPerHour || 0}%/h（${proj.hoursTo5hReset || 0}h 后重置）· 周额日耗 ${proj.weeklyDailyRatePct || 0}%/天（${proj.daysToNextWeeklyReset || 0}d 后重置）`;
+          ? `5h burn: ${proj.burnRate5hPerHour || 0}%/h (reset in ${hReset}h) · Weekly burn: ${proj.weeklyDailyRatePct || 0}%/d (reset in ${dReset}d)`
+          : `按当前燃速，预计可支撑时长（>重置时间表示本轮不会耗尽）：5h ${proj.burnRate5hPerHour || 0}%/h（${hReset}h 后重置）· 周额 ${proj.weeklyDailyRatePct || 0}%/天（${dReset}d 后重置）`;
 
         const wkTokStr = proj.weekProjectedTokens > 0 ? '~' + fmtTok(proj.weekProjectedTokens) : '0';
         const wkCostStr = '$' + Math.round(Number(proj.weekProjectedCostUsd || 0));
@@ -1163,12 +1166,14 @@
     const acctRows = cmpAccounts
       .map((a) => {
         const rem5h = typeof a.fiveHourRemainingPct === 'number' ? a.fiveHourRemainingPct + '%' : '—';
+        const remWk = typeof a.weeklyRemainingPct === 'number' ? a.weeklyRemainingPct + '%' : '—';
         return (
           '<tr><td><span class="ag-acc-dot' + (a.isCurrent ? ' is-active' : '') + '" style="margin-right:6px"></span>' +
           esc(maskEmail(a.email, masked)) + '</td>' +
           '<td>' + esc(fmtTok(a.totalTokens)) + '</td>' +
           '<td>$' + esc((a.estCostUsd || 0).toFixed(2)) + '</td>' +
-          '<td>' + esc(rem5h) + '</td></tr>'
+          '<td>' + esc(rem5h) + '</td>' +
+          '<td>' + esc(remWk) + '</td></tr>'
         );
       })
       .join('');
@@ -1178,13 +1183,13 @@
       ? '<tr><th>Model</th><th>Reqs</th><th>Tokens</th><th>Cost</th></tr>'
       : '<tr><th>模型</th><th>请求</th><th>Tokens</th><th>费用</th></tr>';
     const acctHead = isEn
-      ? '<tr><th>Account</th><th>Tokens</th><th>Cost</th><th>5h Left</th></tr>'
-      : '<tr><th>账号</th><th>Tokens</th><th>费用</th><th>5h 剩余</th></tr>';
+      ? '<tr><th>Account</th><th>Tokens</th><th>Cost</th><th>5h Left</th><th>Wk Left</th></tr>'
+      : '<tr><th>账号</th><th>Tokens</th><th>费用</th><th>5h 剩余</th><th>周额剩余</th></tr>';
 
     const activeTab = ui.popTrendTab === 'accounts' ? 'accounts' : 'models';
     const detailHtml =
       activeTab === 'accounts'
-        ? '<table class="ag-ana-table"><thead>' + acctHead + '</thead><tbody>' + (acctRows || '<tr><td colspan="4">—</td></tr>') + '</tbody></table>'
+        ? '<table class="ag-ana-table"><thead>' + acctHead + '</thead><tbody>' + (acctRows || '<tr><td colspan="5">—</td></tr>') + '</tbody></table>'
         : '<table class="ag-ana-table"><thead>' + modHead + '</thead><tbody>' + (modRows || '<tr><td colspan="4">—</td></tr>') + '</tbody></table>';
     const lowerHtml =
       '<div class="ag-s-card"><div class="ag-s-row">' +
@@ -1421,10 +1426,37 @@
         '</div></div>'
       : '';
 
+    const fmtQuotaSyncHint = (a) => {
+      const ts = Number(a?.lastQuota?.fetchedAt || a?.updatedAt || 0);
+      if (!ts || !Number.isFinite(ts)) return '';
+      const isEn = getLoc() === 'en';
+      const d = new Date(ts);
+      const nowD = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const sameDay =
+        d.getFullYear() === nowD.getFullYear() &&
+        d.getMonth() === nowD.getMonth() &&
+        d.getDate() === nowD.getDate();
+      const timeStr = sameDay
+        ? `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+        : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      return (isEn ? 'Updated ' : '刷新于 ') + timeStr;
+    };
+
     const cardsHtml = accounts.length
       ? accounts
           .map((a) => {
             const visibleGroups = filterVisibleQuotaGroups(a.lastQuota?.groups);
+            const emptyQuotaHint =
+              !visibleGroups.length && !a.quotaError
+                ? '<div class="ag-s-row-desc" style="margin-top:6px;opacity:0.75">' +
+                  esc(
+                    getLoc() === 'en'
+                      ? 'No quota snapshot yet — click "Refresh All" to sync.'
+                      : '暂无额度快照，请点击「刷新全部额度」同步。'
+                  ) +
+                  '</div>'
+                : '';
             const qHtml = visibleGroups.length
               ? '<div class="ag-acc-quotas' + (visibleGroups.length === 1 ? ' is-single' : '') + '">' +
                 visibleGroups
@@ -1439,8 +1471,9 @@
                   )
                   .join('') +
                 '</div>'
-              : '';
+              : emptyQuotaHint;
 
+            const syncHint = visibleGroups.length ? fmtQuotaSyncHint(a) : '';
             const slot1Html = !a.isActive
               ? '<button type="button" class="ag-s-hdr-link is-primary" data-acc-act="switch" data-acc-id="' + esc(a.id) + '"' + (busy ? ' disabled' : '') + '>' + esc(s.switchBtn) + '</button>'
               : '<span class="ag-acc-slot-active">' + esc(s.activeBadge) + '</span>';
@@ -1452,6 +1485,7 @@
               '<span class="ag-acc-dot' + (a.isActive ? ' is-active' : '') + '"></span>' +
               '<span class="ag-acc-email">' + esc(maskEmail(a.email, masked)) + '</span>' +
               (a.planName ? '<span class="ag-acc-pill">' + esc(a.planName) + '</span>' : '') +
+              (syncHint ? '<span class="ag-s-row-desc" style="margin:0 0 0 4px;font-size:11px;opacity:0.72">' + esc(syncHint) + '</span>' : '') +
               '</div>' +
               '<div class="ag-acc-actions-grid">' +
               slot1Html +
@@ -1478,7 +1512,7 @@
       '<button type="button" class="ag-s-hdr-link is-primary" data-acc-act="capture"' + (busy ? ' disabled' : '') + '>' + esc(s.captureBtn) + '</button>' +
       '<button type="button" class="ag-s-hdr-link" data-acc-act="oauth_add"' + (busy ? ' disabled' : '') + '>' + esc(s.oauthBtn) + '</button>' +
       '<button type="button" class="ag-s-hdr-link" data-acc-act="native_add"' + (busy ? ' disabled' : '') + '>' + esc(s.nativeAddBtn) + '</button>' +
-      '<button type="button" class="ag-s-hdr-link" data-acc-act="refresh_all"' + (busy ? ' disabled' : '') + '>' + esc(ui.busyAction === 'refresh_all' ? (getLoc() === 'en' ? 'Syncing…' : '同步中…') : s.refreshAllBtn) + '</button>' +
+      '<button type="button" class="ag-s-hdr-link" data-acc-act="refresh_all"' + (busy || ui.syncingQuota ? ' disabled' : '') + '>' + esc(ui.busyAction === 'refresh_all' || ui.syncingQuota ? (getLoc() === 'en' ? 'Syncing…' : '同步中…') : s.refreshAllBtn) + '</button>' +
       '</div></div>' +
       filterRowHtml +
       '<div class="ag-s-card">' + cardsHtml + '</div>' +
@@ -1508,6 +1542,7 @@
     return JSON.stringify([
       getLoc(),
       ui.busyAction,
+      ui.syncingQuota,
       ui.loadingAccounts,
       isShowClaudeQuotaEnabled(),
       ui.banner?.text || '',
@@ -1526,7 +1561,7 @@
               return `${w5?.remainingPct ?? ''}:${Math.floor((w5?.resetInSec || 0) / 60)}/${w7?.remainingPct ?? ''}:${Math.floor((w7?.resetInSec || 0) / 60)}`;
             })
             .join('|');
-          return `${a.id}:${a.credHash}:${a.updatedAt}:${a.quotaError || ''}:${qSig}`;
+          return `${a.id}:${a.credHash}:${a.updatedAt}:${a.lastQuota?.fetchedAt || 0}:${a.quotaError || ''}:${qSig}`;
         })
         .join(',')
     ]);
@@ -1727,8 +1762,29 @@
     }
     if (btn.title !== nextTitle) btn.title = nextTitle;
   }
+  function mergeLiveQuotaIntoOverview() {
+    const q = window.__ag_quota_state;
+    const accts = ui.overview?.accounts;
+    if (!q || !q.ok || !Array.isArray(q.groups) || !Array.isArray(accts) || accts.length === 0) return false;
+    const qEmail = String(q.accountEmail || '').trim().toLowerCase();
+    const target = (qEmail && accts.find((a) => String(a.email || '').trim().toLowerCase() === qEmail)) || accts.find((a) => a.isActive);
+    if (!target) return false;
+    const prevFetched = Number(target.lastQuota?.fetchedAt || 0);
+    const nextFetched = Number(q.fetchedAt || 0);
+    if (nextFetched > 0 && nextFetched <= prevFetched && target.quotaSource === 'local-ls') return false;
+    target.lastQuota = q;
+    target.quotaSource = 'local-ls';
+    target.quotaError = '';
+    if (q.planName) target.planName = q.planName;
+    if (nextFetched > 0) target.updatedAt = nextFetched;
+    return true;
+  }
+
   window.__ag_refresh_topbar_usage = () => {
     refreshTopbarBadge();
+    if (mergeLiveQuotaIntoOverview() && accountsTabActive) {
+      renderPane();
+    }
     if (ui.popoverOpen) renderUsagePopover();
   };
   window.__ag_set_demo_mode = function setDemoMode(demoCfg) {
@@ -2089,7 +2145,7 @@
         }
         if (ev.target?.closest?.('[data-pop-refresh]')) {
           void refreshAnalytics(true);
-          void callAccounts('refresh_quota', { accountId: 'all' }).then((res) => {
+          void callAccounts('refresh_quota', { accountId: 'active', minIntervalMs: 5000 }).then((res) => {
             if (res?.overview) {
               ui.overview = res.overview;
               renderUsagePopover();
@@ -2103,12 +2159,20 @@
   // ---------------------------------------------------------------------------
   // 4. Settings Modal Synchronization & Account Actions
   // ---------------------------------------------------------------------------
-  function triggerAutoQuotaRefresh(minIntervalMs = 45000) {
-    void callAccounts('refresh_quota', { accountId: 'active', minIntervalMs }).then((res) => {
+  function triggerAutoQuotaRefresh(minIntervalMs = 45000, accountId = 'active') {
+    if (ui.syncingQuota) return;
+    if (accountId === 'all') {
+      ui.syncingQuota = true;
+      renderPane();
+    }
+    void callAccounts('refresh_quota', { accountId, minIntervalMs }).then((res) => {
+      if (accountId === 'all') ui.syncingQuota = false;
       if (res?.ok && res.overview) {
         ui.overview = res.overview;
         renderPane();
         if (ui.popoverOpen) renderUsagePopover();
+      } else if (accountId === 'all') {
+        renderPane();
       }
     });
   }
@@ -2135,16 +2199,30 @@
     }
     if (accountsTabActive) {
       mountAccountsPane(Boolean(opts.forceMount));
-      void refreshOverview();
-      triggerAutoQuotaRefresh(45000);
+      void refreshOverview().then(() => {
+        if (!accountsTabActive || disposed) return;
+        const nowMs = Date.now();
+        const accts = Array.isArray(ui.overview?.accounts) ? ui.overview.accounts : [];
+        const hasMissingOrVeryStaleBg = accts.some((a) => {
+          if (a.disabled || a.id === ui.overview?.activeId) return false;
+          const groups = Array.isArray(a.lastQuota?.groups) ? a.lastQuota.groups : [];
+          if (groups.length === 0) return true;
+          const fetched = Number(a.lastQuota?.fetchedAt || a.updatedAt || 0);
+          return !fetched || nowMs - fetched > 600_000;
+        });
+        triggerAutoQuotaRefresh(10_000, 'active');
+        if (hasMissingOrVeryStaleBg) {
+          triggerAutoQuotaRefresh(600_000, 'all');
+        }
+      });
       acctAutoRefreshTimer = setInterval(() => {
         if (!accountsTabActive || disposed) {
           clearInterval(acctAutoRefreshTimer);
           acctAutoRefreshTimer = null;
           return;
         }
-        triggerAutoQuotaRefresh(45000);
-      }, 45000);
+        triggerAutoQuotaRefresh(20_000, 'active');
+      }, 20_000);
     }
   }
   window.__ag_on_accounts_tab_active = onAccountsTabActive;
@@ -2208,7 +2286,7 @@
       if (act === 'capture') res = await callAccounts('capture_current');
       else if (act === 'oauth_add') res = await callAccounts('start_oauth_add');
       else if (act === 'native_add') res = await callAccounts('prepare_native_add', { relaunch: wantRelaunch });
-      else if (act === 'refresh_all') res = await callAccounts('refresh_quota', { accountId: 'all' });
+      else if (act === 'refresh_all') res = await callAccounts('refresh_quota', { accountId: 'all', force: true });
       else if (act === 'switch') res = await callAccounts('switch_account', { accountId: id, relaunch: wantRelaunch });
       else if (act === 'remove') {
         res = await callAccounts('remove_account', { accountId: id });

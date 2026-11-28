@@ -227,24 +227,28 @@
           ? { default: '預設', writing: '寫作', engineering: '工程', full: '全面' }
           : { default: '默认', writing: '写作', engineering: '工程', full: '全面' };
         const modeLabel = modeMap[paneSt.mode] || modeMap.default;
+        const isActive = proxy.running && asar.patched;
+        const unpatchedWarn = !isActive && paneSt.mode !== 'default';
         const tipText =
           modeLabel +
           ' · ' +
           (proxy.running
-            ? (asar.patched ? (isEn ? 'Relay Active :' : '接管 :') : isEn ? 'Direct :' : '仅转发 :') + proxy.port
+            ? (asar.patched ? (isEn ? 'Relay Active :' : '接管 :') : isEn ? 'Unpatched (Direct) :' : '未接管(直连) :') + proxy.port
             : isEn ? 'Relay Off' : '未启动');
-        const isActive = proxy.running && asar.patched;
-        const sig = modeLabel + '|' + isActive + '|' + tipText;
+        const chipText = unpatchedWarn
+          ? modeLabel + ' · ' + (isEn ? 'Direct' : isTw ? '未接管' : '未接管')
+          : modeLabel;
+        const sig = chipText + '|' + isActive + '|' + unpatchedWarn + '|' + tipText;
         if (slot.getAttribute('data-ag-flow-sig') !== sig) {
           slot.setAttribute('data-ag-flow-sig', sig);
           slot.innerHTML =
             '<span class="ag-tt-flow-chip' +
-            (isActive ? ' is-on' : '') +
+            (isActive ? ' is-on' : unpatchedWarn ? ' is-warn' : '') +
             '" title="' +
             escapeStatusHtml(tipText) +
             '">' +
             '<i class="ag-tt-flow-chip-dot"></i>' +
-            escapeStatusHtml(modeLabel) +
+            escapeStatusHtml(chipText) +
             '</span>';
         }
       }
@@ -1398,11 +1402,23 @@
       clearFlowRecoveryForCid(curCid);
       flowRecovery = null;
     }
+    const compactFxEntry = compactFxByCid[resolveCompactFxKey(curCid, paneKey)] || null;
+    const isCompactFxRunning = Boolean(compactFxEntry && compactFxEntry.phase === 'running');
+    const hasCompactFx = Boolean(compactFxEntry);
+    const effectiveSt =
+      isCompactFxRunning && stKind === 'idle'
+        ? Object.assign({}, st || {}, { pendingKind: 'compact' })
+        : st;
+    const effectiveWaitSec =
+      isCompactFxRunning && stKind === 'idle' && compactFxEntry.startedAt
+        ? Math.max(waitSec, Math.max(0, Math.floor((now - Number(compactFxEntry.startedAt || now)) / 1000)))
+        : waitSec;
+
     const snap = computeStatusSnapshot({
       now,
-      st,
+      st: effectiveSt,
       live,
-      waitSec,
+      waitSec: effectiveWaitSec,
       unconnSec,
       lastHb: window.__ag_last_daemon_hb || 0,
       visibleSince: window.__ag_visible_since || 0,
@@ -1410,11 +1426,11 @@
       navigatorOnline: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
       hasConversation: Boolean(curCid),
       curModel: typeof getSelectedModelLabel === 'function' ? getSelectedModelLabel(inputBox) : '',
-      flowRecovery
+      flowRecovery,
+      flowCompacting: isCompactFxRunning
     });
     ps.lastSnap = snap;
 
-    const hasCompactFx = Boolean(compactFxByCid[resolveCompactFxKey(curCid, paneKey)]);
     const routeVisible =
       isMetricsRouteActive(pane) || snap.visualState === 'error' || snap.visualState === 'slow' || snap.isExecuting || hasCompactFx;
 

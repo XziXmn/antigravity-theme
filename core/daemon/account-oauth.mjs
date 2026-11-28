@@ -12,6 +12,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { URL } from 'node:url';
 import { decodeJwtEmail, normalizeCredEmail } from './credential-vault.mjs';
+import { discoverLiveHub, parseQuotaSummary } from './ls-client.mjs';
 
 export const OFFICIAL_OAUTH_CLIENT_PAIRS = Object.freeze([
   {
@@ -208,7 +209,11 @@ export function parseOAuthTokenPayload(rawText) {
     const accessToken = String(inner.access_token || outer.access_token || '').trim();
     const refreshToken = String(inner.refresh_token || outer.refresh_token || '').trim();
     const idToken = String(inner.id_token || outer.id_token || '').trim();
-    const expiryDate = Number(inner.expiry_date || outer.expiry_date || 0) || null;
+    let expiryDate = Number(inner.expiry_date || outer.expiry_date || 0) || null;
+    if (!expiryDate && typeof (inner.expiry || outer.expiry) === 'string') {
+      const parsedMs = Date.parse(inner.expiry || outer.expiry);
+      if (Number.isFinite(parsedMs) && parsedMs > 0) expiryDate = parsedMs;
+    }
     const email = normalizeCredEmail(outer.id_token_email || inner.id_token_email || outer.email || decodeJwtEmail(idToken));
     return { accessToken, refreshToken, idToken, expiryDate, email, outer, inner };
   } catch {
@@ -221,6 +226,7 @@ export function buildVaultCredentialJson({
   refreshToken,
   idToken = '',
   expiryDate = null,
+  expiresIn = null,
   email = '',
   templateRaw = ''
 }) {
@@ -241,13 +247,24 @@ export function buildVaultCredentialJson({
     } catch {}
   }
 
+  const expiryMs = Number(expiryDate || 0);
+  const hasExpiryMs = Number.isFinite(expiryMs) && expiryMs > 0;
+  const expiryIso = hasExpiryMs ? new Date(expiryMs).toISOString() : '';
+  const resolvedExpiresIn =
+    Number.isFinite(Number(expiresIn)) && Number(expiresIn) > 0
+      ? Math.round(Number(expiresIn))
+      : hasExpiryMs
+      ? Math.max(0, Math.round((expiryMs - Date.now()) / 1000))
+      : null;
+
   const inner = {
     ...(baseTokenObj || {}),
     access_token: accessToken,
     refresh_token: refreshToken,
     token_type: 'Bearer',
     ...(idToken ? { id_token: idToken } : {}),
-    ...(expiryDate ? { expiry_date: expiryDate } : {}),
+    ...(hasExpiryMs ? { expiry_date: expiryMs, expiry: expiryIso } : {}),
+    ...(resolvedExpiresIn !== null ? { expires_in: resolvedExpiresIn } : {}),
     ...(email && useLegacyString ? { id_token_email: email } : {})
   };
 
@@ -263,7 +280,7 @@ export function buildVaultCredentialJson({
   return JSON.stringify({
     ...baseOuter,
     token: inner,
-    auth_method: baseOuter.auth_method || 'oauth',
+    auth_method: baseOuter.auth_method || 'consumer',
     ...(email ? { id_token_email: email } : {})
   });
 }
@@ -415,7 +432,14 @@ export async function startLoopbackOAuthFlow({
           refreshToken,
           idToken,
           expiryDate,
-          credJson: buildVaultCredentialJson({ accessToken, refreshToken, idToken, expiryDate, email })
+          credJson: buildVaultCredentialJson({
+            accessToken,
+            refreshToken,
+            idToken,
+            expiryDate,
+            expiresIn: tokData.expires_in,
+            email
+          })
         });
       } catch (err) {
         finish(err);
@@ -444,4 +468,284 @@ export async function startLoopbackOAuthFlow({
       }, timeoutMs);
     });
   });
+}
+
+const CLOUDCODE_QUOTA_BASES = Object.freeze([
+  'https://daily-cloudcode-pa.googleapis.com',
+  'https://cloudcode-pa.googleapis.com'
+]);
+
+export function resolveAntigravityUserAgent() {
+  let lsVer = '';
+  try {
+    lsVer = String(discoverLiveHub()?.lsVersion || '').trim();
+  } catch {}
+  const ver = lsVer || '2.36.0';
+  const plat = process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux';
+  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+  return `antigravity/${ver} ${plat}/${arch}`;
+}
+
+export function normalizeCloudCodePlanName(lcaData) {
+  if (!lcaData || typeof lcaData !== 'object') return '';
+  const raw = String(
+    lcaData?.paidTier?.name ||
+      lcaData?.paidTier?.id ||
+      lcaData?.currentTier?.name ||
+      lcaData?.currentTier?.id ||
+      ''
+  ).trim();
+  if (!raw) return '';
+  if (/ultra/i.test(raw)) return 'Ultra';
+  if (/pro/i.test(raw)) return 'Pro';
+  if (/plus/i.test(raw)) return 'Plus';
+  if (/enterprise|teams/i.test(raw)) return 'Enterprise';
+  if (/free|standard|legacy|antigravity/i.test(raw)) return 'Free';
+  return raw;
+}
+
+export function parseAvailableModelsQuota(rawJson, nowMs = Date.now(), { planName = '' } = {}) {
+  const modelsMap = rawJson?.models && typeof rawJson.models === 'object' ? rawJson.models : null;
+  if (!modelsMap) return null;
+
+  const pools = new Map();
+  for (const [modelId, info] of Object.entries(modelsMap)) {
+    if (!info || typeof info !== 'object') continue;
+    const qi = info.quotaInfo && typeof info.quotaInfo === 'object' ? info.quotaInfo : null;
+    if (!qi) continue;
+    const hasFrac = typeof qi.remainingFraction === 'number' && Number.isFinite(qi.remainingFraction);
+    const resetTime = typeof qi.resetTime === 'string' ? qi.resetTime.trim() : '';
+    if (!hasFrac && !resetTime) continue;
+
+    const label = String(info.displayName || modelId || '').trim();
+    const low = `${modelId} ${label}`.toLowerCase();
+    const isGemini = /\bgemini\b/.test(low);
+    const is3p = /\bclaude\b|\bgpt\b|\bopus\b|\bsonnet\b/.test(low);
+    const key = isGemini && !is3p ? 'gemini' : is3p ? 'claude-gpt' : '';
+    if (!key) continue;
+
+    const resetMs = resetTime ? Date.parse(resetTime) : NaN;
+    const expired = Number.isFinite(resetMs) && resetMs <= nowMs;
+    const frac = expired ? 1 : hasFrac ? Math.max(0, Math.min(1, qi.remainingFraction)) : null;
+    const pct = frac === null ? null : Math.round(frac * 100);
+    const resetInSec = expired
+      ? 0
+      : Number.isFinite(resetMs)
+      ? Math.max(0, Math.round((resetMs - nowMs) / 1000))
+      : null;
+
+    const existing = pools.get(key);
+    const candWin = {
+      remainingFraction: frac,
+      remainingPct: pct,
+      resetTime: expired ? '' : resetTime,
+      resetInSec,
+      ...(expired ? { expiredReset: true } : {})
+    };
+    if (!existing || (pct !== null && (existing.remainingPct === null || pct < existing.remainingPct))) {
+      pools.set(key, candWin);
+    }
+  }
+
+  if (pools.size === 0) return null;
+  const order = ['gemini', 'claude-gpt'];
+  const groups = [];
+  const buckets = [];
+  for (const key of order) {
+    const win = pools.get(key);
+    if (!win) continue;
+    const label = key === 'gemini' ? 'Gemini' : 'Claude / GPT';
+    groups.push({ key, label, fiveHour: win, weekly: null });
+    buckets.push({
+      key,
+      label,
+      remainingFraction: win.remainingFraction,
+      remainingPct: win.remainingPct,
+      resetTime: win.resetTime,
+      resetInSec: win.resetInSec,
+      modelCount: 0
+    });
+  }
+  return {
+    ok: true,
+    fetchedAt: nowMs,
+    planName: String(planName || '').trim(),
+    availablePromptCredits: null,
+    availableFlowCredits: null,
+    groups,
+    buckets
+  };
+}
+
+async function postCloudCodeJson(url, headers, bodyObj, { fetchImpl = globalThis.fetch, timeoutMs = 10000 } = {}) {
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const res = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyObj || {}),
+      signal: ctrl ? ctrl.signal : undefined
+    });
+    const text = await res.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {}
+    return {
+      ok: res.ok,
+      status: res.status,
+      data,
+      error: res.ok ? '' : String(data?.error?.message || data?.error || `HTTP ${res.status}`)
+    };
+  } catch (err) {
+    return { ok: false, status: 0, data: null, error: err?.message || String(err || 'request failed') };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetches official per-account quota via Google OAuth2 + CloudCode Assist control-plane APIs
+ * (daily-cloudcode-pa.googleapis.com -> loadCodeAssist + retrieveUserQuotaSummary / fetchAvailableModels).
+ */
+export async function fetchAccountCloudCodeQuota({
+  rawCredentialJson = '',
+  accessToken: inputAccessToken = '',
+  refreshToken: inputRefreshToken = '',
+  email = '',
+  pairs = null,
+  fetchImpl = globalThis.fetch,
+  nowFn = () => Date.now(),
+  timeoutMs = 10000,
+  userAgent = ''
+} = {}) {
+  if (typeof fetchImpl !== 'function') {
+    return { ok: false, error: 'fetch unavailable', quota: null, planName: '', refreshedCredJson: '' };
+  }
+  const parsed = rawCredentialJson ? parseOAuthTokenPayload(rawCredentialJson) : null;
+  let accessToken = String(inputAccessToken || parsed?.accessToken || '').trim();
+  let refreshToken = String(inputRefreshToken || parsed?.refreshToken || '').trim();
+  let idToken = String(parsed?.idToken || '').trim();
+  let expiryDate = parsed?.expiryDate || null;
+  let didRefresh = false;
+  let refreshedExpiresIn = null;
+  const nowMs = nowFn();
+
+  const ensureFreshToken = async (forceRefresh = false) => {
+    const isFresh = Boolean(accessToken && expiryDate && expiryDate - nowMs > 120_000);
+    if (!forceRefresh && isFresh) return accessToken;
+    if (!refreshToken) {
+      if (accessToken && !forceRefresh) return accessToken;
+      throw new Error('Missing OAuth refresh token');
+    }
+    const tok = await refreshAccessToken(refreshToken, { pairs, fetchImpl });
+    accessToken = tok.accessToken;
+    refreshToken = tok.refreshToken || refreshToken;
+    if (tok.idToken) idToken = tok.idToken;
+    expiryDate = tok.expiryDate || nowMs + 3600_000;
+    refreshedExpiresIn = tok.expiresIn || 3600;
+    didRefresh = true;
+    return accessToken;
+  };
+
+  try {
+    await ensureFreshToken(false);
+  } catch (err) {
+    const msg = err?.message || String(err || 'OAuth refresh failed');
+    const isRevoked = /invalid_grant|revoked|expired/i.test(msg);
+    return {
+      ok: false,
+      error: isRevoked ? 'OAuth token expired or revoked; please re-add account' : msg,
+      quota: null,
+      planName: '',
+      refreshedCredJson: ''
+    };
+  }
+
+  const ua = userAgent || resolveAntigravityUserAgent();
+  const buildHeaders = (tok) => ({
+    Authorization: `Bearer ${tok}`,
+    'Content-Type': 'application/json',
+    'User-Agent': ua
+  });
+
+  const callWithAuthRetry = async (baseUrl, epPath, bodyObj) => {
+    let res = await postCloudCodeJson(`${baseUrl}${epPath}`, buildHeaders(accessToken), bodyObj, {
+      fetchImpl,
+      timeoutMs
+    });
+    if (res.status === 401 && refreshToken) {
+      try {
+        await ensureFreshToken(true);
+        res = await postCloudCodeJson(`${baseUrl}${epPath}`, buildHeaders(accessToken), bodyObj, {
+          fetchImpl,
+          timeoutMs
+        });
+      } catch (err) {
+        return { ok: false, status: 401, data: null, error: err?.message || 'Unauthorized' };
+      }
+    }
+    return res;
+  };
+
+  let lastErr = '';
+  for (const baseUrl of CLOUDCODE_QUOTA_BASES) {
+    const lcaRes = await callWithAuthRetry(baseUrl, '/v1internal:loadCodeAssist', {
+      metadata: { ideType: 'ANTIGRAVITY', pluginType: 'GEMINI' }
+    });
+    const proj = String(lcaRes.data?.cloudaicompanionProject || '').trim();
+    const planName = normalizeCloudCodePlanName(lcaRes.data);
+    const reqBody = proj ? { project: proj } : {};
+
+    const sumRes = await callWithAuthRetry(baseUrl, '/v1internal:retrieveUserQuotaSummary', reqBody);
+    const doneNow = nowFn();
+    const sumParsed = sumRes.ok && sumRes.data ? parseQuotaSummary(sumRes.data, doneNow, { planName }) : null;
+    let quota = sumParsed;
+
+    if (!quota) {
+      const famRes = await callWithAuthRetry(baseUrl, '/v1internal:fetchAvailableModels', reqBody);
+      if (famRes.ok && famRes.data) {
+        quota = parseAvailableModelsQuota(famRes.data, nowFn(), { planName });
+      }
+      if (!quota) {
+        lastErr = sumRes.error || famRes.error || lcaRes.error || 'CloudCode quota unavailable';
+      }
+    }
+
+    if (quota) {
+      const refreshedCredJson = didRefresh
+        ? buildVaultCredentialJson({
+            accessToken,
+            refreshToken,
+            idToken,
+            expiryDate,
+            expiresIn: refreshedExpiresIn,
+            email: normalizeCredEmail(email || parsed?.email || ''),
+            templateRaw: rawCredentialJson
+          })
+        : '';
+      return {
+        ok: true,
+        quota,
+        planName: quota.planName || planName,
+        project: proj,
+        refreshedCredJson,
+        error: ''
+      };
+    }
+
+    if (sumRes.status === 401 || sumRes.status === 403 || lcaRes.status === 403) {
+      lastErr = sumRes.error || lcaRes.error || `HTTP ${sumRes.status || lcaRes.status}`;
+      break;
+    }
+  }
+
+  return {
+    ok: false,
+    error: lastErr || 'CloudCode quota request failed',
+    quota: null,
+    planName: '',
+    refreshedCredJson: ''
+  };
 }

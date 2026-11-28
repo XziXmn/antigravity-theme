@@ -354,4 +354,16 @@ test('telemetry-renderer removes redundant wait-note banner and proxy emits reco
   const proxySrc = fs.readFileSync(path.join(ROOT_DIR, 'core', 'flow', 'proxy.mjs'), 'utf8');
   assert.equal(rendererSrc.includes('ag-tt-wait-note'), false);
   assert.ok(proxySrc.includes("emit('recovery-stage'"));
+
+  const flowCompactSnap = computeStatusSnapshot({
+    now: NOW,
+    st: { pendingKind: 'compact' },
+    live: { matched: true, hasProvider: true, aspStatus: 1, effRunStatus: 1, hasTrajectory: true },
+    waitSec: 8,
+    lastHb: NOW,
+    flowCompacting: true
+  });
+  assert.equal(flowCompactSnap.isExecuting, true);
+  assert.equal(flowCompactSnap.visualState, 'running');
+  assert.match(flowCompactSnap.chipText, /正在压缩/);
 });

@@ -235,6 +235,7 @@ export function createFlowProxyServer({
   getActiveMainSessions = () => [],
   resolveCascadeId = (id) => id,
   getContextWindow = () => 0,
+  isCascadeBusy = async () => false,
   sessionStore,
   compactionDir = '',
   onEvent = null,
@@ -253,10 +254,14 @@ export function createFlowProxyServer({
   let quotaCooldownUntil = 0;
   const recentDiag = [];
   const lastMainTurnTextByCid = new Map();
+  const activeTurnsByCid = new Map();
+  const pendingManualCompactByCid = new Map();
 
   function pushDiag(entry) {
-    recentDiag.push({ at: Date.now(), ...entry });
+    const item = { at: Date.now(), ...entry };
+    recentDiag.push(item);
     if (recentDiag.length > 20) recentDiag.shift();
+    return item;
   }
 
   function emit(type, payload) {
@@ -485,10 +490,37 @@ export function createFlowProxyServer({
           pres.on('data', refreshIdle);
           pres.on('end', clearIdle);
 
-          if (typeof onUsagePromptTokens === 'function' && code === 200) {
+          const deferEnd = typeof onUsagePromptTokens === 'function' && code === 200;
+          const isSseResp =
+            /text\/event-stream/i.test(String(pres.headers['content-type'] || '')) ||
+            String(reqPath || '').includes('streamGenerateContent');
+          const hasContentLength = Boolean(pres.headers['content-length']);
+
+          if (deferEnd) {
             let latestPromptTokens = 0;
             let scanTail = '';
             let usageNotified = false;
+            let presEnded = false;
+            let finalized = false;
+
+            const finalizeStream = async () => {
+              if (finalized || !presEnded || !usageNotified) return;
+              finalized = true;
+              const picked = latestPromptTokens > 0 ? latestPromptTokens : fallbackPromptTokens > 0 ? fallbackPromptTokens : 0;
+              try {
+                await onUsagePromptTokens(picked, {
+                  res,
+                  isSse: isSseResp,
+                  hasContentLength
+                });
+              } catch {}
+              if (!res.writableEnded && !res.destroyed) {
+                try {
+                  res.end();
+                } catch {}
+              }
+            };
+
             const scanChunkText = (s) => {
               if (!s) return;
               const bufStr = scanTail + s;
@@ -501,14 +533,8 @@ export function createFlowProxyServer({
               scanTail = bufStr.slice(-256);
             };
             const finishUsage = () => {
-              if (usageNotified) return;
-              usageNotified = true;
-              const picked = latestPromptTokens > 0 ? latestPromptTokens : fallbackPromptTokens > 0 ? fallbackPromptTokens : 0;
-              if (picked > 0) {
-                try {
-                  onUsagePromptTokens(picked);
-                } catch {}
-              }
+              if (!usageNotified) usageNotified = true;
+              void finalizeStream();
             };
 
             const respEnc = String(pres.headers['content-encoding'] || '').trim().toLowerCase();
@@ -564,6 +590,10 @@ export function createFlowProxyServer({
             if (inspectStream !== pres) {
               inspectStream.on('error', finishUsage);
             }
+            pres.on('end', () => {
+              presEnded = true;
+              void finalizeStream();
+            });
           }
           pres.on('error', (err) => {
             clearIdle();
@@ -575,7 +605,7 @@ export function createFlowProxyServer({
             }
           });
           if (!res.headersSent) res.writeHead(code, pres.headers);
-          pres.pipe(res);
+          pres.pipe(res, deferEnd ? { end: false } : undefined);
         }
       );
 
@@ -745,32 +775,44 @@ export function createFlowProxyServer({
     return fresh;
   }
 
-  function createUpstreamJudge({ flowCfg, reqPath }) {
+  function createUpstreamJudge({ flowCfg, reqPath, project = '' }) {
     if (!flowCfg.judgeEnabled || !lastAuthHeaders) return null;
+    const primaryModel = flowCfg.judgeModel || 'gemini-3.8-flash-low';
+    const fallbackModel = /gemini-3\.5-flash-lite/i.test(primaryModel) ? '' : 'gemini-3.5-flash-lite';
+    const invokeJudgeModel = async (targetModel, prompt) => {
+      const judgePayload = {
+        project: project || 'aicode-consumers',
+        requestId: `ag-flow-judge-${Date.now()}`,
+        model: targetModel,
+        request: {
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 32, temperature: 0 }
+        }
+      };
+      const r = await sendUpstream({
+        upstream: flowCfg.upstream,
+        reqPath,
+        headers: lastAuthHeaders,
+        payloadObj: judgePayload,
+        useHttp2: false,
+        timeoutMs: flowCfg.judgeTimeoutMs || 20000
+      });
+      if (r.status !== 200) throw new Error(`JUDGE_HTTP_${r.status}`);
+      const sse = extractSseText(r.body);
+      const text = sse.text.trim();
+      if (!text) throw new Error('JUDGE_EMPTY_REPLY');
+      return text;
+    };
     return createJudge({
       call: async (prompt) => {
-        const judgePayload = {
-          project: 'aicode-consumers',
-          requestId: `ag-flow-judge-${Date.now()}`,
-          model: flowCfg.judgeModel || 'gemini-3.8-flash-low',
-          request: {
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { maxOutputTokens: 32, temperature: 0 }
+        try {
+          return await invokeJudgeModel(primaryModel, prompt);
+        } catch (err) {
+          if (fallbackModel) {
+            return await invokeJudgeModel(fallbackModel, prompt);
           }
-        };
-        const r = await sendUpstream({
-          upstream: flowCfg.upstream,
-          reqPath,
-          headers: lastAuthHeaders,
-          payloadObj: judgePayload,
-          useHttp2: false,
-          timeoutMs: flowCfg.judgeTimeoutMs || 20000
-        });
-        if (r.status !== 200) throw new Error(`JUDGE_HTTP_${r.status}`);
-        const sse = extractSseText(r.body);
-        const text = sse.text.trim();
-        if (!text) throw new Error('JUDGE_EMPTY_REPLY');
-        return text;
+          throw err;
+        }
       }
     });
   }
@@ -796,8 +838,84 @@ export function createFlowProxyServer({
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive'
       });
+      res.end(rawOrBuiltSse);
+      return;
     }
-    res.end(rawOrBuiltSse);
+    if (status === 200) {
+      res.end(rawOrBuiltSse);
+    } else {
+      res.end(buildGeminiSse(`[ag-flow] Upstream HTTP ${status}`, { finishReason: 'STOP' }));
+    }
+  }
+
+  function runWithSseKeepalive(res, { isSse = true, hasContentLength = false, headerDelayMs = 0 } = {}, taskFn) {
+    if (!res || res.destroyed || res.writableEnded || !isSse || hasContentLength) {
+      return Promise.resolve().then(taskFn);
+    }
+    let keepaliveTimer = null;
+    let delayTimer = null;
+    let clientClosed = false;
+    const ensureHeaderAndPulse = () => {
+      if (clientClosed || res.destroyed || res.writableEnded) return;
+      try {
+        if (!res.headersSent) {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive'
+          });
+        }
+        res.write(': ag-compacting\n\n');
+      } catch {}
+    };
+    const startPulse = () => {
+      ensureHeaderAndPulse();
+      keepaliveTimer = setInterval(ensureHeaderAndPulse, 2500);
+      if (typeof keepaliveTimer.unref === 'function') keepaliveTimer.unref();
+    };
+    if (headerDelayMs > 0 && !res.headersSent) {
+      delayTimer = setTimeout(startPulse, headerDelayMs);
+      if (typeof delayTimer.unref === 'function') delayTimer.unref();
+    } else {
+      startPulse();
+    }
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        if (delayTimer) clearTimeout(delayTimer);
+        if (keepaliveTimer) clearInterval(keepaliveTimer);
+        res.off('close', onClose);
+      };
+      const onClose = () => {
+        if (!res.writableEnded) clientClosed = true;
+        cleanup();
+        resolve({ aborted: true });
+      };
+      res.once('close', onClose);
+      Promise.resolve()
+        .then(taskFn)
+        .then((val) => {
+          cleanup();
+          resolve(val);
+        })
+        .catch((err) => {
+          cleanup();
+          reject(err);
+        });
+    });
+  }
+
+  function releaseTurnHandle(cid, res) {
+    if (!cid) return;
+    const set = activeTurnsByCid.get(cid);
+    if (set) {
+      set.delete(res);
+      if (set.size === 0) activeTurnsByCid.delete(cid);
+    }
+    if (pendingManualCompactByCid.has(cid) && (!set || set.size === 0)) {
+      const waiters = pendingManualCompactByCid.get(cid) || [];
+      pendingManualCompactByCid.delete(cid);
+      for (const w of waiters) w({ fallbackRun: true });
+    }
   }
 
   async function handleGenerateContent(req, res, bodyBuf, reqPath) {
@@ -940,9 +1058,40 @@ export function createFlowProxyServer({
     // Capture latest main session payload for Codex virtual compaction & hijack/apply when enabled
     // Allow sessions only hit by the background-tab heuristic (not real explicit/M669 subagents)
     const canTrackCompaction = Boolean(origTraj && (!isSubagent || subInfo.heuristicOnly));
+    if (canTrackCompaction) {
+      let turnSet = activeTurnsByCid.get(origTraj);
+      if (!turnSet) {
+        turnSet = new Set();
+        activeTurnsByCid.set(origTraj, turnSet);
+      }
+      turnSet.add(res);
+      let released = false;
+      const cleanupTurn = () => {
+        if (released) return;
+        released = true;
+        releaseTurnHandle(origTraj, res);
+      };
+      res.once('close', cleanupTurn);
+      res.once('finish', cleanupTurn);
+    }
     let payloadMutatedByCompactor = false;
     let compactorDiag = '';
     if (canTrackCompaction) {
+      if (
+        flowCfg.compactEnabled &&
+        !isNativeCompactionRequest(workingPayload) &&
+        typeof compactor.awaitInFlight === 'function' &&
+        compactor.getStatus(origTraj).inFlight
+      ) {
+        log(`[FlowCompactor] Holding turn for ${origTraj.slice(0, 8)} until in-flight compaction finishes`);
+        const isSseReq = String(reqPath || '').includes('streamGenerateContent');
+        const waitRes = await runWithSseKeepalive(
+          res,
+          { isSse: isSseReq, hasContentLength: false, headerDelayMs: 2500 },
+          () => compactor.awaitInFlight(origTraj, { timeoutMs: 45000 })
+        );
+        if (waitRes?.aborted || res.destroyed || res.writableEnded) return;
+      }
       compactor.captureTurnPayload(origTraj, origPayload, { model: modelName, reqPath });
       if (flowCfg.compactEnabled) {
         if (isNativeCompactionRequest(workingPayload)) {
@@ -965,7 +1114,12 @@ export function createFlowProxyServer({
 
     const onUsagePromptTokens =
       flowCfg.compactEnabled && canTrackCompaction
-        ? (promptTokens) => maybeScheduleAutoCompact(origTraj, promptTokens, modelName, flowCfg)
+        ? (promptTokens, streamMeta = {}) =>
+            maybeScheduleAutoCompact(origTraj, promptTokens, modelName, flowCfg, {
+              res: streamMeta.res || res,
+              isSse: streamMeta.isSse !== false,
+              hasContentLength: Boolean(streamMeta.hasContentLength)
+            })
         : null;
     const fallbackPromptTokens =
       flowCfg.compactEnabled && canTrackCompaction ? estimatePayloadTokens(workingPayload) : 0;
@@ -1064,11 +1218,13 @@ export function createFlowProxyServer({
       return;
     }
 
-    const scene = mode === 'writing' ? 'writing' : 'engineering';
+    const scene = mode === 'writing' ? 'writing' : mode === 'full' ? 'full' : 'engineering';
+    const hasToolsDeclared = Array.isArray(reqShape.tools) && reqShape.tools.length > 0;
+    const seatScene = mode === 'writing' || (mode === 'full' && !hasToolsDeclared) ? 'writing' : 'engineering';
     const runtimeState = origTraj ? sessionStore.getRuntimeState(origTraj) : null;
     const seatText =
       buildPromptAssembly({
-        mode,
+        mode: mode === 'full' && !hasToolsDeclared ? 'writing' : mode,
         flowCfg,
         sessionCfg,
         runtimeState,
@@ -1094,7 +1250,7 @@ export function createFlowProxyServer({
       injectContentMsg,
       everyTurn
     });
-    pushDiag({
+    const diagEntry = pushDiag({
       bytes: bodyBuf.length,
       encoding: bodyEncoding,
       model: modelName,
@@ -1102,6 +1258,7 @@ export function createFlowProxyServer({
       routeReason: subRoute.reason || '',
       traj: origTraj.slice(0, 12),
       mode,
+      scene,
       isSubagent,
       route: payloadMutatedByCompactor ? `managed-recovery+${compactorDiag}` : 'managed-recovery',
       injectedChars: seatText.length,
@@ -1120,6 +1277,9 @@ export function createFlowProxyServer({
         payloadObj: activePayload
       });
     } catch (err) {
+      diagEntry.verdict = 'error';
+      diagEntry.detail = err.message;
+      diagEntry.ms = Date.now() - t0;
       sendSseResult(res, JSON.stringify({ error: { code: 502, message: `[ag-flow] ${err.message}` } }), 502);
       return;
     }
@@ -1146,47 +1306,74 @@ export function createFlowProxyServer({
       });
     }
 
+    diagEntry.primaryStatus = primaryRes.status;
+
     if (primaryRes.status === 429) {
       quotaCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+      const qActions = [...actions, { type: 'quota-429' }];
       sessionStore.observeOutcome(origTraj, {
         verdict: 'blocked',
-        actions: [...actions, { type: 'quota-429' }],
+        actions: qActions,
         model: modelName,
         ms: Date.now() - t0,
         detail: '429 quota'
       });
+      diagEntry.verdict = 'blocked';
+      diagEntry.detail = '429 quota';
+      diagEntry.actions = qActions;
+      diagEntry.ms = Date.now() - t0;
       emit('outcome', { cascadeId: origTraj, mode, verdict: 'blocked', detail: '429 quota' });
       sendSseResult(res, buildGeminiSse(QUOTA_FALLBACK_TEXT, { finishReason: 'STOP', model: modelName }), 200);
       return;
     }
 
     if (primaryRes.status === 401 || primaryRes.status === 403) {
+      diagEntry.verdict = 'auth-error';
+      diagEntry.detail = `HTTP ${primaryRes.status}`;
+      diagEntry.ms = Date.now() - t0;
       emit('auth-error', { status: primaryRes.status, cascadeId: origTraj });
       sendSseResult(res, primaryRes.body, primaryRes.status);
       return;
     }
 
-    const primarySse = primaryRes.status === 200 ? extractSseText(primaryRes.body) : { text: '', thought: '', finish: '', toolCalls: 0, frames: 0, usageMetadata: null };
+    const emptySse = { text: '', thought: '', finish: '', blockReason: '', error: '', toolCalls: 0, frames: 0, usageMetadata: null };
+    const primarySse = primaryRes.status === 200 ? extractSseText(primaryRes.body) : emptySse;
+    diagEntry.primaryFinish = primarySse.finish || '';
+    if (primarySse.blockReason) diagEntry.primaryBlockReason = primarySse.blockReason;
 
     // Pass tool-call-only agentic turns straight through untouched
-    if (primaryRes.status === 200 && primarySse.toolCalls > 0 && !primarySse.text.trim()) {
+    if (primaryRes.status === 200 && primarySse.toolCalls > 0 && !primarySse.text.trim() && !primarySse.blockReason) {
+      const tActions = [...actions, { type: 'tool-pass' }];
       sessionStore.observeOutcome(origTraj, {
         verdict: 'pass',
-        actions: [...actions, { type: 'tool-pass' }],
+        actions: tActions,
         model: modelName,
         ms: Date.now() - t0,
         detail: 'tool'
       });
+      diagEntry.verdict = 'pass';
+      diagEntry.detail = 'tool';
+      diagEntry.actions = tActions;
+      diagEntry.ms = Date.now() - t0;
       emit('outcome', { cascadeId: origTraj, mode, verdict: 'pass', detail: 'tool' });
       if (flowCfg.compactEnabled && canTrackCompaction) {
         const pt = Number(primarySse?.usageMetadata?.promptTokenCount || 0) || fallbackPromptTokens;
-        if (pt > 0) maybeScheduleAutoCompact(origTraj, pt, modelName, flowCfg);
+        if (pt > 0 || pendingManualCompactByCid.has(origTraj)) {
+          await maybeScheduleAutoCompact(origTraj, pt, modelName, flowCfg, {
+            res,
+            isSse: String(reqPath || '').includes('streamGenerateContent')
+          });
+        }
       }
       sendSseResult(res, primaryRes.body, 200);
       return;
     }
 
-    const judge = createUpstreamJudge({ flowCfg, reqPath });
+    const judge = createUpstreamJudge({
+      flowCfg,
+      reqPath,
+      project: origPayload?.project || ''
+    });
     const allowContinue = (mode === 'writing' || mode === 'full') && flowCfg.maxContinuations > 0;
     const allowStaging = (mode === 'writing' || mode === 'full') && flowCfg.refusalRewrite !== false;
     const allowEscalation = mode === 'engineering' || mode === 'full';
@@ -1212,21 +1399,37 @@ export function createFlowProxyServer({
         });
         if (r.status !== 200) throw new Error(`CONT_HTTP_${r.status}`);
         const sse = extractSseText(r.body);
-        return { text: sse.text, finishReason: sse.finish || 'STOP' };
+        return { text: sse.text, finishReason: sse.finish || sse.blockReason || 'STOP' };
       };
     };
 
+    const inspectEffectiveRefusal = (sse) => {
+      const eff = analyzeDeliverable(sse.text, { scene }).hasDeliverable
+        ? sse.text
+        : `${sse.text}\n${sse.thought}`.trim();
+      return analyzeRefusal(eff, { scene });
+    };
+
+    const isRejectedOrEmptySse = (sse, outcome) => {
+      if (!sse) return true;
+      if (sse.blockReason || outcome === Outcome.FILTER_TRIGGERED || outcome === Outcome.REFUSED) return true;
+      if (isPolicyBlockText(sse.text)) return true;
+      if (!String(sse.text || '').trim() && sse.toolCalls === 0) return true;
+      return inspectEffectiveRefusal(sse).isRefusal;
+    };
+
     const runRecover = async (basePayload, sse) => {
+      const effectiveFinish = sse.finish || sse.blockReason || (sse.text.trim() ? 'STOP' : '');
       if (!allowContinue) {
-        const effText = analyzeDeliverable(sse.text, { scene }).hasDeliverable ? sse.text : `${sse.text}\n${sse.thought}`.trim();
-        const ref = analyzeRefusal(effText, { scene });
-        const finishOut = classifyFinishReason(sse.finish || (sse.text.trim() ? 'STOP' : ''));
-        const outcome = isPolicyBlockText(sse.text)
-          ? Outcome.FILTER_TRIGGERED
-          : ref.isRefusal
-            ? Outcome.REFUSED
-            : finishOut;
-        return { text: sse.text, finishReason: sse.finish || 'STOP', outcome, actions: [] };
+        const ref = inspectEffectiveRefusal(sse);
+        const finishOut = classifyFinishReason(effectiveFinish);
+        const outcome =
+          sse.blockReason || isPolicyBlockText(sse.text) || finishOut === Outcome.FILTER_TRIGGERED
+            ? Outcome.FILTER_TRIGGERED
+            : ref.isRefusal
+              ? Outcome.REFUSED
+              : finishOut;
+        return { text: sse.text, finishReason: effectiveFinish || 'STOP', outcome, actions: [] };
       }
       const recover = createRecoverer({
         transport: makeContinuationTransport(basePayload),
@@ -1235,10 +1438,16 @@ export function createFlowProxyServer({
         maxContinuations: flowCfg.maxContinuations,
         scene
       });
-      return await recover(
+      const rec = await recover(
         { messages: [{ role: 'user', content: requestText(basePayload) }] },
-        { text: sse.text, finishReason: sse.finish || (sse.text.trim() ? 'STOP' : '') }
+        { text: sse.text, finishReason: effectiveFinish }
       );
+      // Guardrail: never allow an unexpected ABNORMAL judge/transport failure to mask an explicit refusal
+      if (rec.outcome === Outcome.ABNORMAL) {
+        if (sse.blockReason || isPolicyBlockText(sse.text)) rec.outcome = Outcome.FILTER_TRIGGERED;
+        else if (inspectEffectiveRefusal(sse).isRefusal) rec.outcome = Outcome.REFUSED;
+      }
+      return rec;
     };
 
     let bestSse = primarySse;
@@ -1252,10 +1461,7 @@ export function createFlowProxyServer({
     const isBadPrimary =
       primaryRes.status !== 200 ||
       isBlockedStatus(primaryRes.status, primaryRes.body) ||
-      isPolicyBlockText(primarySse.text) ||
-      recovered.outcome === Outcome.REFUSED ||
-      recovered.outcome === Outcome.FILTER_TRIGGERED ||
-      (!primarySse.text.trim() && primarySse.toolCalls === 0);
+      isRejectedOrEmptySse(primarySse, recovered.outcome);
 
     let changedByRecovery = recovered.actions.some((a) => a.type === 'continue');
     let finalText = recovered.text;
@@ -1265,38 +1471,49 @@ export function createFlowProxyServer({
     // Track A: Keysmith Staging same-model rewrite (writing & full)
     // Always re-inject the active session's system prompt into the retry turn tail regardless of the everyInvocation button state.
     if (isBadPrimary && allowStaging) {
-      const stagedPayload = prepareOutboundPayload(workingPayload, {
-        flowCfg,
-        mode,
-        scene,
-        seatText,
-        useSafety,
-        stripManaged: customPrompt.active,
-        injectContentMsg: false,
-        everyTurn: false
-      });
-      const reqObj = stagedPayload.request || stagedPayload;
-      const stagedContents = buildStagedGeminiContents(reqObj.contents || [], {
-        frame: flowCfg.outputChannelHardening ? OUTPUT_CHANNEL_FRAME : '',
-        lang
-      });
-      if (stagedContents) {
+      const stageReason =
+        recovered.outcome === Outcome.REFUSED
+          ? 'refusal'
+          : recovered.outcome === Outcome.FILTER_TRIGGERED || primarySse.blockReason || isPolicyBlockText(primarySse.text)
+          ? 'filter'
+          : !primarySse.text.trim() && primarySse.toolCalls === 0
+          ? 'empty'
+          : 'retry';
+      const tryStagingOnce = async ({ stripToolsHistory = false } = {}) => {
+        const stagedPayload = prepareOutboundPayload(workingPayload, {
+          flowCfg,
+          mode,
+          scene,
+          seatText,
+          useSafety,
+          stripManaged: customPrompt.active,
+          injectContentMsg: false,
+          everyTurn: false
+        });
+        const reqObj = stagedPayload.request || stagedPayload;
+        if (stripToolsHistory) {
+          delete reqObj.tools;
+          delete reqObj.toolConfig;
+          delete reqObj.tool_config;
+        }
+        const stagedContents = buildStagedGeminiContents(reqObj.contents || [], {
+          frame: flowCfg.outputChannelHardening ? OUTPUT_CHANNEL_FRAME : '',
+          lang,
+          stripToolsHistory
+        });
+        if (!stagedContents) return { tried: false, accepted: false, status: 0 };
         reqObj.contents = stagedContents;
         if (seatText) {
           injectProxySystemMessage(stagedPayload, seatText, { everyTurn: true });
         }
-        // Rotate upstream trajectory_id/sessionId so server-side poisoned refusal history is bypassed
-        // while local accounting keeps using origTraj.
         rotateRequestIdentity(stagedPayload);
-        const stageReason =
-          recovered.outcome === Outcome.REFUSED
-            ? 'refusal'
-            : recovered.outcome === Outcome.FILTER_TRIGGERED || isPolicyBlockText(primarySse.text)
-            ? 'filter'
-            : !primarySse.text.trim() && primarySse.toolCalls === 0
-            ? 'empty'
-            : 'retry';
-        emit('recovery-stage', { cascadeId: origTraj, mode, stage: 'staging', reason: stageReason });
+        emit('recovery-stage', {
+          cascadeId: origTraj,
+          mode,
+          stage: 'staging',
+          reason: stageReason,
+          cleanHistory: stripToolsHistory
+        });
         try {
           const r = await sendUpstream({
             upstream: flowCfg.upstream,
@@ -1304,40 +1521,48 @@ export function createFlowProxyServer({
             headers: req.headers,
             payloadObj: stagedPayload
           });
-          if (r.status === 200) {
-            const sse = extractSseText(r.body);
-            const stRec = await runRecover(stagedPayload, sse);
-            const rejected =
-              stRec.outcome === Outcome.REFUSED ||
-              stRec.outcome === Outcome.FILTER_TRIGGERED ||
-              isPolicyBlockText(stRec.text) ||
-              !stRec.text.trim();
-            if (!rejected) {
-              actions.push({ type: 'staging-rewrite' }, ...stRec.actions);
-              finalText = stRec.text;
-              finalFinish = stRec.finishReason || 'STOP';
-              finalOutcome = stRec.outcome;
-              bestSse = sse;
-              bestRaw = r.body;
-              bestStatus = 200;
-              changedByRecovery = true;
-            } else {
-              actions.push({ type: 'staging-rewrite-failed' });
-            }
+          if (r.status !== 200) {
+            actions.push({ type: 'staging-http-error', status: r.status, cleanHistory: stripToolsHistory });
+            log(`[Flow] Track A staging HTTP ${r.status} (clean=${stripToolsHistory}) for ${origTraj.slice(0, 8)}: ${String(r.body || '').slice(0, 180)}`);
+            return { tried: true, accepted: false, status: r.status };
           }
+          const sse = extractSseText(r.body);
+          const stRec = await runRecover(stagedPayload, sse);
+          const rejected = isRejectedOrEmptySse(
+            { ...sse, text: stRec.text },
+            stRec.outcome
+          );
+          if (!rejected) {
+            actions.push({ type: 'staging-rewrite', cleanHistory: stripToolsHistory }, ...stRec.actions);
+            finalText = stRec.text;
+            finalFinish = stRec.finishReason || 'STOP';
+            finalOutcome = stRec.outcome;
+            bestSse = sse;
+            bestRaw = r.body;
+            bestStatus = 200;
+            changedByRecovery = true;
+            return { tried: true, accepted: true, status: 200 };
+          }
+          actions.push({ type: 'staging-rewrite-failed', cleanHistory: stripToolsHistory });
+          return { tried: true, accepted: false, status: 200 };
         } catch (err) {
-          actions.push({ type: 'staging-error', message: err.message });
+          actions.push({ type: 'staging-error', message: err.message, cleanHistory: stripToolsHistory });
+          log(`[Flow] Track A staging error for ${origTraj.slice(0, 8)}: ${err.message}`);
+          return { tried: true, accepted: false, status: 0 };
         }
+      };
+
+      const st1 = await tryStagingOnce({ stripToolsHistory: false });
+      // Fallback: if full history + tools failed with HTTP 400 or still rejected on an agentic chain, retry with stripped clean text history
+      if (!st1.accepted && (st1.status === 400 || hasToolsDeclared)) {
+        await tryStagingOnce({ stripToolsHistory: true });
       }
     }
 
-    // Track B: Engineering escalation ladder + softening + context narrowing (engineering & full)
+    // Track B: Escalation ladder + softening + context narrowing (engineering & full)
     const stillBad =
       bestStatus !== 200 ||
-      finalOutcome === Outcome.REFUSED ||
-      finalOutcome === Outcome.FILTER_TRIGGERED ||
-      isPolicyBlockText(finalText) ||
-      (!finalText.trim() && bestSse.toolCalls === 0);
+      isRejectedOrEmptySse({ ...bestSse, text: finalText }, finalOutcome);
 
     if (stillBad && allowEscalation) {
       for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -1355,7 +1580,15 @@ export function createFlowProxyServer({
         });
         if (flowCfg.softenEnabled) softenRequest(escPayload);
         if (attempt >= 2) {
-          narrowContext(escPayload, { keepTurns: 2, toolResultChars: 800, maxContents: 30 });
+          const nr = narrowContext(escPayload, { keepTurns: 2, toolResultChars: 800, maxContents: 30 });
+          if (nr.aborted) {
+            const escReq = escPayload.request || escPayload;
+            delete escReq.tools;
+            delete escReq.toolConfig;
+            delete escReq.tool_config;
+            const cleanStaged = buildStagedGeminiContents(escReq.contents || [], { lang, stripToolsHistory: true });
+            if (cleanStaged) escReq.contents = cleanStaged;
+          }
           rotateRequestIdentity(escPayload);
         }
         // Force tail re-injection AFTER softening/narrowContext so long-context truncation never strips the session prompt
@@ -1366,7 +1599,7 @@ export function createFlowProxyServer({
         const escReason =
           finalOutcome === Outcome.REFUSED
             ? 'refusal'
-            : finalOutcome === Outcome.FILTER_TRIGGERED || isPolicyBlockText(finalText)
+            : finalOutcome === Outcome.FILTER_TRIGGERED || bestSse.blockReason || isPolicyBlockText(finalText)
             ? 'filter'
             : 'empty';
         emit('recovery-stage', {
@@ -1384,33 +1617,41 @@ export function createFlowProxyServer({
             headers: req.headers,
             payloadObj: escPayload
           });
-          if (r.status !== 200) continue;
-          const sse = extractSseText(r.body);
-          const eff = analyzeDeliverable(sse.text, { scene }).hasDeliverable ? sse.text : `${sse.text}\n${sse.thought}`;
-          const ref = analyzeRefusal(eff, { scene });
-          if (!isPolicyBlockText(sse.text) && !ref.isRefusal && sse.text.trim()) {
-            const escRec = allowContinue ? await runRecover(escPayload, sse) : { text: sse.text, finishReason: sse.finish || 'STOP', outcome: Outcome.OK, actions: [] };
-            actions.push({ type: 'escalate-retry', attempt }, ...escRec.actions);
-            finalText = escRec.text;
-            finalFinish = escRec.finishReason || 'STOP';
-            finalOutcome = escRec.outcome;
-            bestSse = sse;
-            bestRaw = r.body;
-            bestStatus = 200;
-            changedByRecovery = true;
-            break;
+          if (r.status !== 200) {
+            actions.push({ type: 'escalate-http-error', attempt, status: r.status });
+            log(`[Flow] Track B attempt ${attempt} HTTP ${r.status} for ${origTraj.slice(0, 8)}: ${String(r.body || '').slice(0, 180)}`);
+            continue;
           }
-        } catch {}
+          const sse = extractSseText(r.body);
+          const ref = inspectEffectiveRefusal(sse);
+          if (!sse.blockReason && !isPolicyBlockText(sse.text) && !ref.isRefusal && sse.text.trim()) {
+            const escRec = allowContinue
+              ? await runRecover(escPayload, sse)
+              : { text: sse.text, finishReason: sse.finish || 'STOP', outcome: Outcome.OK, actions: [] };
+            if (!isRejectedOrEmptySse({ ...sse, text: escRec.text }, escRec.outcome)) {
+              actions.push({ type: 'escalate-retry', attempt }, ...escRec.actions);
+              finalText = escRec.text;
+              finalFinish = escRec.finishReason || 'STOP';
+              finalOutcome = escRec.outcome;
+              bestSse = sse;
+              bestRaw = r.body;
+              bestStatus = 200;
+              changedByRecovery = true;
+              break;
+            }
+          }
+          actions.push({ type: 'escalate-retry-failed', attempt });
+        } catch (err) {
+          actions.push({ type: 'escalate-error', attempt, message: err?.message || 'error' });
+          log(`[Flow] Track B attempt ${attempt} error for ${origTraj.slice(0, 8)}: ${err?.message || err}`);
+        }
       }
     }
 
     // Track C: Optional fallback model remap (full mode only)
     const stillBadAfterEsc =
       bestStatus !== 200 ||
-      finalOutcome === Outcome.REFUSED ||
-      finalOutcome === Outcome.FILTER_TRIGGERED ||
-      isPolicyBlockText(finalText) ||
-      (!finalText.trim() && bestSse.toolCalls === 0);
+      isRejectedOrEmptySse({ ...bestSse, text: finalText }, finalOutcome);
 
     if (stillBadAfterEsc && allowRemap) {
       const remapPayload = prepareOutboundPayload(workingPayload, {
@@ -1433,9 +1674,13 @@ export function createFlowProxyServer({
           headers: req.headers,
           payloadObj: remapPayload
         });
-        if (r.status === 200) {
+        if (r.status !== 200) {
+          actions.push({ type: 'remap-http-error', status: r.status, targetModel: flowCfg.remapTargetModel });
+          log(`[Flow] Track C remap HTTP ${r.status} (${flowCfg.remapTargetModel}) for ${origTraj.slice(0, 8)}`);
+        } else {
           const sse = extractSseText(r.body);
-          if (sse.text.trim() && !isPolicyBlockText(sse.text)) {
+          const ref = inspectEffectiveRefusal(sse);
+          if (sse.text.trim() && !sse.blockReason && !isPolicyBlockText(sse.text) && !ref.isRefusal) {
             actions.push({ type: 'model-remap', targetModel: flowCfg.remapTargetModel });
             finalText = sse.text;
             finalFinish = sse.finish || 'STOP';
@@ -1444,9 +1689,14 @@ export function createFlowProxyServer({
             bestRaw = r.body;
             bestStatus = 200;
             changedByRecovery = true;
+          } else {
+            actions.push({ type: 'remap-rejected', targetModel: flowCfg.remapTargetModel });
           }
         }
-      } catch {}
+      } catch (err) {
+        actions.push({ type: 'remap-error', message: err?.message || 'error' });
+        log(`[Flow] Track C remap error for ${origTraj.slice(0, 8)}: ${err?.message || err}`);
+      }
     }
 
     // Compute concise verdict for UI status indicator
@@ -1468,7 +1718,7 @@ export function createFlowProxyServer({
     } else if (finalOutcome === Outcome.REFUSED) {
       verdict = 'refused';
       detail = '被拒';
-    } else if (finalOutcome === Outcome.FILTER_TRIGGERED || isPolicyBlockText(finalText)) {
+    } else if (finalOutcome === Outcome.FILTER_TRIGGERED || bestSse.blockReason || isPolicyBlockText(finalText)) {
       verdict = 'blocked';
       detail = '上游拦截';
     } else if (!finalText.trim()) {
@@ -1476,22 +1726,39 @@ export function createFlowProxyServer({
       detail = '空响应';
     }
 
+    const totalMs = Date.now() - t0;
+    diagEntry.verdict = verdict;
+    diagEntry.detail = detail;
+    diagEntry.seatScene = seatScene;
+    diagEntry.actions = actions.slice(-8);
+    diagEntry.ms = totalMs;
+    if (verdict !== 'pass' || actions.length > 0) {
+      log(
+        `[Flow] ${origTraj.slice(0, 8)} (${mode}/${modelName}) -> ${verdict} [${detail}] actions=${actions.map((a) => a.type).join(',') || 'none'} (${totalMs}ms)`
+      );
+    }
+
     sessionStore.observeOutcome(origTraj, {
       verdict,
       actions,
       model: modelName,
-      ms: Date.now() - t0,
+      ms: totalMs,
       detail
     });
-    emit('outcome', { cascadeId: origTraj, mode, verdict, detail, actions, ms: Date.now() - t0 });
+    emit('outcome', { cascadeId: origTraj, mode, verdict, detail, actions, ms: totalMs });
 
     if (flowCfg.compactEnabled && canTrackCompaction) {
       const pt = Number(bestSse?.usageMetadata?.promptTokenCount || 0) || fallbackPromptTokens;
-      if (pt > 0) maybeScheduleAutoCompact(origTraj, pt, modelName, flowCfg);
+      if (pt > 0 || pendingManualCompactByCid.has(origTraj)) {
+        await maybeScheduleAutoCompact(origTraj, pt, modelName, flowCfg, {
+          res,
+          isSse: String(reqPath || '').includes('streamGenerateContent')
+        });
+      }
     }
 
     // Prevent upstream filter text from entering client history and poisoning subsequent turns
-    if (isPolicyBlockText(finalText)) {
+    if (isPolicyBlockText(finalText) || (verdict === 'blocked' && !String(finalText || '').trim())) {
       sendSseResult(res, buildGeminiSse(BLOCK_FALLBACK_TEXT, { finishReason: 'STOP', model: modelName }), 200);
       return;
     }
@@ -1509,53 +1776,8 @@ export function createFlowProxyServer({
     sendSseResult(res, bestRaw, bestStatus);
   }
 
-  function maybeScheduleAutoCompact(cascadeId, promptTokenCount, model, flowCfg) {
-    if (!cascadeId || !flowCfg?.compactEnabled || !lastAuthHeaders) return;
-    const contextWindow = typeof getContextWindow === 'function' ? Number(getContextWindow(cascadeId, model) || 0) : 0;
-    if (
-      !compactor.shouldAutoCompact(cascadeId, {
-        promptTokenCount,
-        model,
-        contextWindow,
-        thresholdPct: flowCfg.compactThresholdPct,
-        keepTailTokens: flowCfg.compactKeepTailTokens
-      })
-    ) {
-      return;
-    }
-    log(
-      `[FlowCompactor] Scheduling auto compaction for ${String(cascadeId).slice(0, 8)} (promptTokens=${promptTokenCount}, window=${contextWindow || 'est'})`
-    );
-    emit('compact-start', { cascadeId, reason: 'auto', promptTokens: promptTokenCount });
-    void compactor
-      .runCompaction(cascadeId, {
-        sendUpstream,
-        upstream: flowCfg.upstream,
-        authHeaders: lastAuthHeaders,
-        compactModel: flowCfg.compactModel,
-        keepTailTokens: flowCfg.compactKeepTailTokens,
-        reason: 'auto'
-      })
-      .then((res) => {
-        if (!res?.ok) {
-          log(`[FlowCompactor] Auto compaction skipped/failed for ${String(cascadeId).slice(0, 8)}: ${res?.error || 'unknown'}`);
-        }
-        emit('compact', { cascadeId, reason: 'auto', ...res });
-      })
-      .catch((err) => {
-        const msg = err?.message || String(err || 'compaction_error');
-        log(`[FlowCompactor] Auto compaction error for ${String(cascadeId).slice(0, 8)}: ${msg}`);
-        emit('compact', { cascadeId, reason: 'auto', ok: false, error: msg });
-      });
-  }
-
-  async function compactNow(cascadeId) {
-    const flowCfg = normalizeFlowConfig(getConfig());
-    if (!lastAuthHeaders) {
-      emit('compact', { cascadeId, reason: 'manual', ok: false, error: 'no_auth_headers' });
-      return { ok: false, error: 'no_auth_headers' };
-    }
-    emit('compact-start', { cascadeId, reason: 'manual' });
+  async function runCompactionAndEmit(cascadeId, flowCfg, { reason = 'auto', promptTokens = 0 } = {}) {
+    emit('compact-start', { cascadeId, reason, promptTokens });
     let res;
     try {
       res = await compactor.runCompaction(cascadeId, {
@@ -1564,17 +1786,97 @@ export function createFlowProxyServer({
         authHeaders: lastAuthHeaders,
         compactModel: flowCfg.compactModel,
         keepTailTokens: flowCfg.compactKeepTailTokens,
-        reason: 'manual'
+        reason
       });
     } catch (err) {
       const msg = err?.message || String(err || 'compaction_error');
-      emit('compact', { cascadeId, reason: 'manual', ok: false, error: msg });
+      emit('compact', { cascadeId, reason, ok: false, error: msg });
       return { ok: false, error: msg };
     }
+    if (!res?.ok) {
+      log(`[FlowCompactor] ${reason === 'manual' ? 'Manual' : 'Auto'} compaction skipped/failed for ${String(cascadeId).slice(0, 8)}: ${res?.error || 'unknown'}`);
+    }
     if (res?.ok || res?.error !== 'compaction_in_flight') {
-      emit('compact', { cascadeId, reason: 'manual', ...res });
+      emit('compact', { cascadeId, reason, ...res });
     }
     return res;
+  }
+
+  async function maybeScheduleAutoCompact(
+    cascadeId,
+    promptTokenCount,
+    model,
+    flowCfg,
+    { res = null, isSse = true, hasContentLength = false } = {}
+  ) {
+    if (!cascadeId || !flowCfg?.compactEnabled || !lastAuthHeaders) return null;
+    const manualWaiters = pendingManualCompactByCid.get(cascadeId) || null;
+    const isManualPending = Boolean(manualWaiters && manualWaiters.length > 0);
+    if (isManualPending) pendingManualCompactByCid.delete(cascadeId);
+
+    const contextWindow = typeof getContextWindow === 'function' ? Number(getContextWindow(cascadeId, model) || 0) : 0;
+    const shouldAuto =
+      !isManualPending &&
+      compactor.shouldAutoCompact(cascadeId, {
+        promptTokenCount,
+        model,
+        contextWindow,
+        thresholdPct: flowCfg.compactThresholdPct,
+        keepTailTokens: flowCfg.compactKeepTailTokens
+      });
+
+    if (!isManualPending && !shouldAuto) return null;
+
+    const reason = isManualPending ? 'manual' : 'auto';
+    log(
+      `[FlowCompactor] Running ${reason} compaction inside turn stream for ${String(cascadeId).slice(0, 8)} (promptTokens=${promptTokenCount}, window=${contextWindow || 'est'})`
+    );
+
+    const runTask = () => runCompactionAndEmit(cascadeId, flowCfg, { reason, promptTokens: promptTokenCount });
+    const out = res
+      ? await runWithSseKeepalive(res, { isSse, hasContentLength, headerDelayMs: 0 }, runTask)
+      : await runTask();
+
+    if (manualWaiters) {
+      for (const resolveWaiter of manualWaiters) {
+        try {
+          resolveWaiter({ handledInStream: true, result: out });
+        } catch {}
+      }
+    }
+    return out;
+  }
+
+  async function compactNow(cascadeId) {
+    const flowCfg = normalizeFlowConfig(getConfig());
+    if (!lastAuthHeaders) {
+      emit('compact', { cascadeId, reason: 'manual', ok: false, error: 'no_auth_headers' });
+      return { ok: false, error: 'no_auth_headers' };
+    }
+
+    // If a model turn is currently active for this cascadeId, serialize compaction at the
+    // end of that turn's HTTP stream so language_server waits cleanly before tool execution.
+    const activeSet = cascadeId ? activeTurnsByCid.get(cascadeId) : null;
+    if (activeSet && activeSet.size > 0) {
+      log(`[FlowCompactor] Turn in progress for ${String(cascadeId).slice(0, 8)}; queuing manual compaction into stream gate`);
+      emit('compact-start', { cascadeId, reason: 'manual' });
+      const streamHook = await new Promise((resolve) => {
+        const list = pendingManualCompactByCid.get(cascadeId) || [];
+        list.push(resolve);
+        pendingManualCompactByCid.set(cascadeId, list);
+      });
+      if (streamHook?.handledInStream && streamHook.result) {
+        return streamHook.result;
+      }
+    }
+
+    // Check if language_server itself is still finishing a tool step; if so, any subsequent
+    // GenerateContent turn will block on compactor.awaitInFlight() inside handleGenerateContent.
+    try {
+      await isCascadeBusy(cascadeId);
+    } catch {}
+
+    return await runCompactionAndEmit(cascadeId, flowCfg, { reason: 'manual' });
   }
 
   function clearCompaction(cascadeId) {
@@ -1723,6 +2025,7 @@ export function createFlowProxyController({
   getActiveMainSessions = () => [],
   resolveCascadeId = (id) => id,
   getContextWindow = () => 0,
+  isCascadeBusy = async () => false,
   sessionStore,
   compactionDir = '',
   onEvent = null,
@@ -1800,6 +2103,7 @@ export function createFlowProxyController({
         getActiveMainSessions,
         resolveCascadeId,
         getContextWindow,
+        isCascadeBusy,
         sessionStore,
         compactionDir,
         onEvent,

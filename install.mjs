@@ -401,7 +401,7 @@ async function runInstall() {
     }
   })();
 
-  const forceRestart = hasFlag('--force-restart') || hasFlag('--restart');
+  const forceRestart = hasFlag('--force-restart') || hasFlag('--restart') || Boolean(backupCreated);
   const runningPids = findRunningDaemonPids({ platform: process.platform });
   let relayListening = await probeTcpEndpoint(flowPort);
   const daemonHealthy = runningPids.length === 1 && (!currentCfg.modules?.flow || relayListening);

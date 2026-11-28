@@ -31,6 +31,32 @@
   color: var(--primary, #2B7FFF);
 }
 
+.ag-flow-mode-trigger[data-ag-flow-unpatched="1"] {
+  color: #D97706;
+  background-color: rgba(217, 119, 6, 0.1);
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark, html.dark body) .ag-flow-mode-trigger[data-ag-flow-unpatched="1"] {
+  color: #FBBF24;
+  background-color: rgba(251, 191, 36, 0.14);
+}
+
+.ag-flow-menu-badge-warn {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #D97706;
+  background-color: rgba(217, 119, 6, 0.12);
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark, html.dark body) .ag-flow-menu-badge-warn {
+  color: #FBBF24;
+  background-color: rgba(251, 191, 36, 0.16);
+}
+
 .ag-flow-icon-wrap {
   display: inline-flex;
   align-items: center;

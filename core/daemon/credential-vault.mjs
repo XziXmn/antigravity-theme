@@ -87,6 +87,37 @@ export function vaultTargetFor(accountId) {
   return `antigravity-theme:account:${id}`;
 }
 
+/**
+ * Normalizes legacy `auth_method: "oauth"` vault payloads to Antigravity 2.36+ `"consumer"` format
+ * so `agy.exe` / `language_server.exe` recognize the stored token instead of triggering browser OAuth.
+ */
+export function normalizeCredentialPayloadForHost(rawText) {
+  const text = String(rawText || '');
+  if (!text.trim().startsWith('{')) return { raw: text, changed: false };
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object') return { raw: text, changed: false };
+    let changed = false;
+    if (parsed.token && typeof parsed.token === 'object') {
+      if (parsed.auth_method === 'oauth' || !parsed.auth_method) {
+        parsed.auth_method = 'consumer';
+        changed = true;
+      }
+      if (!parsed.token.token_type) {
+        parsed.token.token_type = 'Bearer';
+        changed = true;
+      }
+      if (!parsed.token.expiry && Number.isFinite(Number(parsed.token.expiry_date)) && Number(parsed.token.expiry_date) > 0) {
+        parsed.token.expiry = new Date(Number(parsed.token.expiry_date)).toISOString();
+        changed = true;
+      }
+    }
+    return { raw: changed ? JSON.stringify(parsed) : text, changed };
+  } catch {
+    return { raw: text, changed: false };
+  }
+}
+
 function splitPosixTarget(target) {
   if (target === ACTIVE_TARGET) return { service: ACTIVE_SERVICE, account: ACTIVE_USERNAME };
   const prefix = 'antigravity-theme:account:';
@@ -698,13 +729,49 @@ export function createCredentialVault({ platform = process.platform } = {}) {
       if (!saved.exists || !saved.raw) {
         return { ok: false, missing: true, error: 'Saved credential not found in vault' };
       }
-      const actualEmail = extractCredentialEmail(saved.raw);
+      const normalized = normalizeCredentialPayloadForHost(saved.raw);
+      const effectiveRaw = normalized.raw;
+      if (normalized.changed) {
+        try {
+          writeTargetRaw(vaultTargetFor(accountId), effectiveRaw, accountId);
+        } catch {}
+      }
+      const actualEmail = extractCredentialEmail(effectiveRaw);
       const exp = normalizeCredEmail(expectedEmail);
       if (exp && actualEmail && actualEmail !== exp) {
         return mismatchResult(actualEmail, exp);
       }
-      writeTargetRaw(ACTIVE_TARGET, saved.raw, ACTIVE_USERNAME);
-      return { ok: true, email: actualEmail || exp, hash: shortCredentialHash(saved.raw), raw: saved.raw };
+      writeTargetRaw(ACTIVE_TARGET, effectiveRaw, ACTIVE_USERNAME);
+      return { ok: true, email: actualEmail || exp, hash: shortCredentialHash(effectiveRaw), raw: effectiveRaw };
+    },
+    repairLegacyCredentials(accountIds = []) {
+      const cap = getCapability();
+      if (!cap.supported) return { repaired: 0 };
+      let repaired = 0;
+      const active = readTargetRaw(ACTIVE_TARGET);
+      if (active.exists && active.raw) {
+        const norm = normalizeCredentialPayloadForHost(active.raw);
+        if (norm.changed) {
+          try {
+            writeTargetRaw(ACTIVE_TARGET, norm.raw, ACTIVE_USERNAME);
+            repaired += 1;
+          } catch {}
+        }
+      }
+      for (const id of Array.isArray(accountIds) ? accountIds : []) {
+        if (!ACCOUNT_ID_RE.test(String(id || ''))) continue;
+        const t = vaultTargetFor(id);
+        const saved = readTargetRaw(t);
+        if (!saved.exists || !saved.raw) continue;
+        const norm = normalizeCredentialPayloadForHost(saved.raw);
+        if (norm.changed) {
+          try {
+            writeTargetRaw(t, norm.raw, id);
+            repaired += 1;
+          } catch {}
+        }
+      }
+      return { repaired };
     },
     deleteSaved: (accountId) => deleteTargetRaw(vaultTargetFor(accountId))
   };

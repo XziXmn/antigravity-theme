@@ -29,6 +29,7 @@ import {
   SAFETY_NONE,
   assertSeatSafe,
   denumberText,
+  extractSseText,
   injectSafetyNone,
   narrowContext,
   rotateRequestIdentity,
@@ -292,4 +293,72 @@ test('hooks-sync strips UTF-8 BOM from existing hooks.json to prevent silent hoo
   } finally {
     fs.rmSync(fakeHome, { recursive: true, force: true });
   }
+});
+
+test('full-scene detection, judge-fallback guardrail, tool-pair-safe narrowContext/staging, and SSE blockReason parsing', async () => {
+  // 1. Full scene protects dialogue quotes while catching refusals with lecture lists or delayed openers
+  const novelInFull =
+    '夜雨打湿了廊檐，她停在石阶前，语气冷淡地说道：“抱歉，我无法协助你进入内阁，我也不能违反师门规矩。”\n\n' +
+    '话音未落，灯影一晃，两人却已默契地望向走廊尽头那扇半掩的木门。';
+  assert.equal(analyzeRefusal(novelInFull, { scene: 'full' }).isRefusal, false);
+
+  const lectureRefusal =
+    '非常理解你的创作构想，我们在这一阶段讨论了几种人物冲突的呈现方式，但为了保证整体内容合规，' +
+    '即便在虚构小说的语境下，我无法生成露骨色情描写与性暴力情节。\n\n如果你需要，可以改为以下方向：\n1. 心理博弈\n2. 门外对峙\n3. 书信暗线';
+  assert.equal(analyzeRefusal(lectureRefusal, { scene: 'full' }).isRefusal, true);
+
+  // 2. When judge throws or returns invalid verdict, createRecoverer must fall back to deterministic refusal outcome
+  const brokenJudge = createJudge({
+    call: async () => {
+      throw new Error('JUDGE_HTTP_404');
+    }
+  });
+  const rec = createRecoverer({
+    judge: brokenJudge,
+    maxContinuations: 2,
+    scene: 'full',
+    transport: async () => ({ text: '', finishReason: 'STOP' })
+  });
+  const recRes = await rec(
+    { messages: [{ role: 'user', content: '写番外' }] },
+    { text: '无法生成该番外短篇，这涉及露骨色情内容与安全限制。', finishReason: 'STOP' }
+  );
+  assert.equal(recRes.outcome, Outcome.REFUSED);
+  assert.ok(recRes.actions.some((a) => a.type === 'judge-fallback'));
+
+  // 3. narrowContext must never start on an orphan functionResponse turn
+  const toolPayload = {
+    request: {
+      contents: [
+        { role: 'user', parts: [{ text: '写一段剧情' }] },
+        { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { p: 'a.md' } } }] },
+        { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { ok: true } } }] },
+        { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { p: 'b.md' } } }] },
+        { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { ok: true } } }] }
+      ]
+    }
+  };
+  const nr = narrowContext(toolPayload, { keepTurns: 2, toolResultChars: 800, maxContents: 30 });
+  assert.equal(nr.aborted, false);
+  assert.equal(toolPayload.request.contents[0].role, 'user');
+  assert.equal(Boolean(toolPayload.request.contents[0].parts[0].functionResponse), false);
+
+  // 4. buildStagedGeminiContents preserves agentic tool-call pairs and cleans history when requested
+  const agenticStaged = buildStagedGeminiContents(toolPayload.request.contents, { lang: 'zh' });
+  assert.equal(agenticStaged[agenticStaged.length - 1].role, 'user');
+  assert.equal(agenticStaged[agenticStaged.length - 2].role, 'model');
+  assert.ok(agenticStaged.some((c) => c.parts?.some((p) => p.functionCall)));
+  assert.ok(agenticStaged.some((c) => c.parts?.some((p) => p.functionResponse)));
+
+  const cleanStaged = buildStagedGeminiContents(toolPayload.request.contents, { lang: 'zh', stripToolsHistory: true });
+  assert.equal(cleanStaged[0].role, 'user');
+  assert.equal(cleanStaged[cleanStaged.length - 1].role, 'user');
+  assert.equal(cleanStaged.some((c) => c.parts?.some((p) => p.functionCall || p.functionResponse)), false);
+
+  // 5. extractSseText captures promptFeedback.blockReason even when candidate has no finishReason
+  const sseBlocked = extractSseText(
+    'data: ' + JSON.stringify({ response: { promptFeedback: { blockReason: 'PROHIBITED_CONTENT' } } }) + '\r\n\r\n'
+  );
+  assert.equal(sseBlocked.blockReason, 'PROHIBITED_CONTENT');
+  assert.equal(sseBlocked.finish, 'PROHIBITED_CONTENT');
 });

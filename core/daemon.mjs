@@ -170,6 +170,18 @@ const accountsManager =
               }
             : null,
         openExternalUrl: openGoogleOAuthUrl,
+        onBeforeCredentialSwitch: async () => {
+          if (promptSuggester && typeof promptSuggester.stopAndWait === 'function') {
+            await promptSuggester.stopAndWait({ terminateAll: true, timeoutMs: 2500 });
+          } else if (promptSuggester && typeof promptSuggester.stop === 'function') {
+            promptSuggester.stop({ wantRestart: false, terminateAll: true });
+          }
+        },
+        onActiveAccountChanged: () => {
+          if (promptSuggester && typeof promptSuggester.stop === 'function') {
+            promptSuggester.stop({ wantRestart: true, terminateAll: true });
+          }
+        },
         log: (msg) => console.log(msg)
       })
     : null;
@@ -227,6 +239,15 @@ flowProxyCtrl =
           typeof metricsReader.getSessionContextLimit === 'function'
             ? metricsReader.getSessionContextLimit(cid)
             : 0,
+        isCascadeBusy: async (cid) => {
+          if (!lsClient || typeof lsClient.getCascadeExecutionStatus !== 'function') return false;
+          try {
+            const st = await lsClient.getCascadeExecutionStatus(cid);
+            return Boolean(st?.running);
+          } catch {
+            return false;
+          }
+        },
         sessionStore: flowSessionStore,
         compactionDir: path.join(USER_DIR, 'flow-compactions'),
         onEvent: (ev) => {

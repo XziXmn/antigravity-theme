@@ -1,32 +1,32 @@
 {
   "name": "antigravity-codex-theme",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "minNodeVersion": "22.13.0",
   "fullMetricsNodeVersion": "22.13.0",
   "files": {
     "daemon.mjs": {
-      "sha256": "5e018ec927499d452e9e5e72e8b80d04ce0487a0a32e3d61f46443f75176b689",
-      "bytes": 17958
+      "sha256": "6c2d0aaa632db8e37115bdbe5c1bcf7274c7203b6f628d628d9a54058c84cf1a",
+      "bytes": 18921
     },
     "daemon/account-oauth.mjs": {
-      "sha256": "d9be01b65ba427f2ae8d81882913230ae3802ffd75a2a1cfcfdc3f198ed54aa0",
-      "bytes": 17378
+      "sha256": "85fccf0807f2af9bf7865072670f313e177d2790ce28788b4d2153b536ec3ea5",
+      "bytes": 27931
     },
     "daemon/accounts.mjs": {
-      "sha256": "0c07b462e79ce0e9d35529f94b3b740a3e4dc6d91ae44187b283c1387c817157",
-      "bytes": 31960
+      "sha256": "d3493f2e2b0a4c0715ae4b48eeee20ceae20cbdd823b1b73af792c8bc2bb4d07",
+      "bytes": 37006
     },
     "daemon/cdp-bridge.mjs": {
-      "sha256": "993182b20cacd042a3daf206ee0e1d83682dd02843eec3e40807fe3efb08004b",
-      "bytes": 81736
+      "sha256": "370d03e83d1032b14b5caeba2a5402741a5d8c52e8acbb466f9b11ddfcf372e6",
+      "bytes": 81954
     },
     "daemon/cdp-relaunch.mjs": {
       "sha256": "a26fbdc61ea7ec95871e1d7ce1b25b78c3ecfcdbcc677cadbd3d59108897d8e3",
       "bytes": 17032
     },
     "daemon/credential-vault.mjs": {
-      "sha256": "3f3b4651fbfb6c40b64fc8e44ea8231b2e8795f8ecebc652199ce8224ed9d357",
-      "bytes": 27508
+      "sha256": "c4b7f0678e2c01b6939a9297b8198ec180f2ea79ff4167ba6d7b48e6a75f11c0",
+      "bytes": 30035
     },
     "daemon/flow-watchdog.mjs": {
       "sha256": "64b47e7139867d2d4151e35850c7cc380af14efb68b35e8ac74b88262c4ff5c2",
@@ -41,20 +41,20 @@
       "bytes": 11216
     },
     "daemon/ls-client.mjs": {
-      "sha256": "a92b7dced6d1e184d524b8b3497f6c0d4f839b25c3d165171b173544c7032d77",
-      "bytes": 18747
+      "sha256": "7d4b8a87d18aa6f3e7d8fa68d65bf10c0ad928a9a8c6b21c0074331bbe6cb4d8",
+      "bytes": 19652
     },
     "daemon/ls-log.mjs": {
       "sha256": "bc81e76d861392490903eede432ecc64913acb8617835cc7aa01b74fb0509834",
       "bytes": 2123
     },
     "daemon/paths.mjs": {
-      "sha256": "a4df61f2aa6bf1542a54a429f6ddeb01460feafc3d65876e43b42fd29ed5d41d",
+      "sha256": "b6a21f23081e34551699e968a401562ed8fc3349e72803923d6433e3228cc7ec",
       "bytes": 30655
     },
     "daemon/prompt-suggest.mjs": {
-      "sha256": "bbce7e0d912de2fdaedc374520efffe721b5d8173213b345661c17893ba365a1",
-      "bytes": 27333
+      "sha256": "3e9d5c4893f9dd74f94a6b06bc2edcb92c72ad1844c87eaf926810fe9ed8470f",
+      "bytes": 29371
     },
     "daemon/protobuf.mjs": {
       "sha256": "7f6a54e7d1c65c1f1c2dc35a9a21773fd4b8c95bcea085cccefa8218684b9725",
@@ -81,44 +81,44 @@
       "bytes": 15941
     },
     "daemon/usage-analytics.mjs": {
-      "sha256": "75ba2e65db7f0fee14a9a06c1f12d95a8eb673843cc9c7719a5fe6d5625a60d8",
-      "bytes": 68776
+      "sha256": "ffe3ca953c2e4ba93cc69ccf245fba31a558ab87e4508dcab89788b9ed7b36d3",
+      "bytes": 69094
     },
     "flow/asar-patch.mjs": {
       "sha256": "cec3f81cd32b9d4d8c893b70a8437770079eda130d3c9f7395b79b0e4e9c1fa0",
       "bytes": 10349
     },
     "flow/compactor.mjs": {
-      "sha256": "8792e8a1d8020da432ae4212eb83670fc120528bb402027035fd6f50f3f81b59",
-      "bytes": 31105
+      "sha256": "e4e63998cc306b0717da421241bb9cb02be910a832e0ad5b9271541350a37073",
+      "bytes": 32124
     },
     "flow/contract.mjs": {
       "sha256": "42df56c463b21b235ec8a4de387af6b8c8340fc1a1037945c30edd4f6814ef09",
       "bytes": 11408
     },
     "flow/detect.mjs": {
-      "sha256": "25488fb04de8ac46717be5e593e7686011887321f22fc593ac6f73d6bd3d4e2a",
-      "bytes": 13807
+      "sha256": "7f341189494d1d5329ee8c9eeacfd8aeebfa573b39c229075f938a47db780865",
+      "bytes": 14281
     },
     "flow/proxy.mjs": {
-      "sha256": "faa58e609f5d9041b3a9927a26c04e4d9d098384630b4f30f8e90f4bc625ac12",
-      "bytes": 69184
+      "sha256": "e0f3eb179d87dfaefe9c01e75e34dad7fdd8b570550a3be16ded6358ab422d0b",
+      "bytes": 81633
     },
     "flow/purify.mjs": {
-      "sha256": "b4659d07d39c855ff67452b23dc6cc937ca7c4a85907550e84ce925a2cf16c8a",
-      "bytes": 18423
+      "sha256": "dd584094cc4b37f537bd7127e7be790b75271fdee8d76dd15605d5d234c8309a",
+      "bytes": 21245
     },
     "flow/recover.mjs": {
-      "sha256": "aa06df27fbbee134d592e5ddb820402d26369b72c2d9425bb63e79918f98804f",
-      "bytes": 6024
+      "sha256": "6918e5eda584ef8ccd14f92bbbe1b86919ad48d234cc9643b55a1bdcc2a8d29d",
+      "bytes": 6437
     },
     "flow/sessions.mjs": {
       "sha256": "3c2106ff2b41f6a3b14515ed3c953cb57846cb7c4671b56eee27c753aacda0e2",
       "bytes": 10213
     },
     "flow/staging.mjs": {
-      "sha256": "0fbda91cf9b9b298f321ed1e5a4a2f2e9592a9980834009e59722e29bd550e73",
-      "bytes": 4749
+      "sha256": "193f26b2dc402d28ab89fff5a35ddf70813664377e9e5b94210c992e1fd57e0b",
+      "bytes": 7209
     },
     "flow/subagent-routing.mjs": {
       "sha256": "5e2225d7942fa6c7faa0422bf53c906b5234c1b5616fd29a2218def8e1fab7c2",
@@ -141,7 +141,7 @@
       "bytes": 217691
     },
     "installer/cdp-launch.mjs": {
-      "sha256": "783fbd3c41245fc385f00075fe0fdfe22149e53e5eeef94c91835f1ff739a5f2",
+      "sha256": "3a1fadb0804a750fe248985f024e17acc4d8b2e21c5d814d58adc9999c6180e4",
       "bytes": 31901
     },
     "installer/env.mjs": {
@@ -157,15 +157,15 @@
       "bytes": 5745
     },
     "installer/relaunch-worker.mjs": {
-      "sha256": "1446f113b38a6c1a5f76cded906b7516897e5f3c2885239a14b63aa6ab5b58d5",
-      "bytes": 6746
+      "sha256": "c68ff8faa3b757dea07c2fc5661cfe61c537f3b71e172a1566d3c92d9c060d7d",
+      "bytes": 7508
     },
     "installer/service.mjs": {
       "sha256": "5433f33bce24cfdef5e1073387a8affbd084e5fc4709f1c21c1e698a47027e96",
       "bytes": 20363
     },
     "runtime/00-head.js": {
-      "sha256": "d34823784d4c9001052445b9d4beb3f217f24eabb8868abef6f1c35f002e2b75",
+      "sha256": "7229d757ac4b98630a2f5e7aa46a1ad577fb50c2e9b69bdefee551d709286345",
       "bytes": 13751
     },
     "runtime/10-guards.js": {
@@ -181,12 +181,12 @@
       "bytes": 9141
     },
     "runtime/40-status-machine.js": {
-      "sha256": "412759d2c933d2ca535b70ad099274f53d3d6f19286b706ce5ca99162a131ab3",
-      "bytes": 14364
+      "sha256": "7e998d91e23065c45861ffdc205e954122ffe2ffc634b0bf26e91edec6c0acbc",
+      "bytes": 14564
     },
     "runtime/50-telemetry-ui.js": {
-      "sha256": "cf5b22180ac8258eeee5c3ae7b66b5429c9412a7a32a8de5bf24e27c3d8a1071",
-      "bytes": 86590
+      "sha256": "4715f0c93edc7dfd4776fd87484766ffa00f77b916d9356ac7487ef438b22ee1",
+      "bytes": 87477
     },
     "runtime/60-i18n-engine.js": {
       "sha256": "887e1730fc7e7e6f0ca1485979694fc44732fbf2ecb81ebc38cd3bdcb7978c24",
@@ -201,12 +201,12 @@
       "bytes": 188582
     },
     "runtime/78-flow-mode-picker.js": {
-      "sha256": "f60b551689e479a4f653df097c7325cd4a19d3d2763cc722e5595882534e5bdd",
-      "bytes": 47897
+      "sha256": "c0dc75cef5f60ab636e92a5893305d3502eeca89d13080b5738506fe0c377c72",
+      "bytes": 49039
     },
     "runtime/79-accounts-dashboard.js": {
-      "sha256": "cc4019623bae03da366b5841d610e605372b403faf8109424576aeaf2113de07",
-      "bytes": 117438
+      "sha256": "5291040aae24f1b10a4d32b58eca1356a830ae1291e55f665bca29a2424fe035",
+      "bytes": 121376
     },
     "runtime/90-tail.js": {
       "sha256": "c40e9777bb0b24b8a70f933414c8c1fe6813dba3370242241295321b99fdefc9",
@@ -229,8 +229,8 @@
       "bytes": 7466
     },
     "styles/30-telemetry.css": {
-      "sha256": "4a854f8ad34b20f8a07eb5b1b89624b3971293d2f01ff5a81bc78efc26c3abb2",
-      "bytes": 58561
+      "sha256": "2676ae6c5853915752c8d039fa850c0acfd67db5cc65555bf9f43d7eab3f6efc",
+      "bytes": 58772
     },
     "styles/40-prompt-suggestions.css": {
       "sha256": "e0c9a7d7e146e2771fd8c93dd8ccf8c6e7d9d8114743508b3712b2be77fe9206",
@@ -241,8 +241,8 @@
       "bytes": 35109
     },
     "styles/48-flow-mode-picker.css": {
-      "sha256": "750af303dfd5bf213bfe843924c97ef4e62e546904830197a8ee0d9ae353080b",
-      "bytes": 5463
+      "sha256": "0e81d5cc63068505e1ae584468907f91262b1af6bd0424a061ceb36637d32c3e",
+      "bytes": 6155
     },
     "styles/49-accounts-dashboard.css": {
       "sha256": "3b10f43e77193f9590ab0c94261f7222d140e5e90005eb3f7951ccefd294573c",

@@ -171,7 +171,7 @@ export function onlyConditional(text, re) {
 
 export function scoreRefusal(text, { scene = 'engineering' } = {}) {
   let t = maskFences(String(text || ''));
-  if (scene === 'writing') {
+  if (scene === 'writing' || scene === 'full') {
     t = maskDialogueQuotes(t);
   }
   const matched = [];
@@ -203,6 +203,10 @@ export function analyzeDeliverable(text, { scene = 'engineering' } = {}) {
   const fenced = fences >= 2;
   const steps = (t.match(/^\s*(?:\d+[.)]|[-*+])\s+\S/gm) || []).length;
   const commands = (t.match(CMD_RE) || []).length;
+  if (scene === 'full') {
+    const weight = (fenced ? 2 : 0) + (steps >= 3 && commands >= 1 ? 1 : 0) + (commands >= 2 ? 1 : 0);
+    return { hasDeliverable: weight >= 1, weight, fences, steps, commands };
+  }
   const weight = (fenced ? 2 : 0) + (steps >= 3 ? 1 : 0) + (commands >= 2 ? 1 : 0);
   return { hasDeliverable: weight >= 1, weight, fences, steps, commands };
 }
@@ -226,6 +230,7 @@ export function analyzeRefusal(text, { scene = 'engineering' } = {}) {
   const strongOpener = headOnly.matched.some((id) => STRONG.has(id) && !condOnly(id));
   const tokenDeliverable =
     scene !== 'writing' && deliverable.weight === 2 && deliverable.steps < 3 && deliverable.commands < 2;
+  const hasHardTechDeliverable = deliverable.fences >= 2 || deliverable.commands >= 2;
 
   let isRefusal = false;
   let why = null;
@@ -244,6 +249,9 @@ export function analyzeRefusal(text, { scene = 'engineering' } = {}) {
   } else if (strongOpener && t.length < 400) {
     isRefusal = true;
     why = 'short-refusal-opener';
+  } else if (strongUncond.length > 0 && !hasHardTechDeliverable && t.length < SHORT_REFUSAL_CHARS) {
+    isRefusal = true;
+    why = 'short-strong-refusal';
   }
 
   return {

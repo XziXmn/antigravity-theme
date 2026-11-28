@@ -85,6 +85,7 @@
     hasConversation = true,
     curModel = '',
     flowRecovery = null,
+    flowCompacting = false,
     limits = WAIT_DEFAULTS
   } = {}) {
     const cfg = Object.assign({}, WAIT_DEFAULTS, limits || {});
@@ -122,11 +123,16 @@
         : loadingRetryMatch || stopBtnActive
     );
 
+    const isFlowCompacting = Boolean(flowCompacting);
     let effKind = stKind;
-    if (effKind === 'idle' && liveBusy) {
+    if (isFlowCompacting && effKind === 'idle') {
+      effKind = 'compact';
+    } else if (effKind === 'idle' && liveBusy) {
       effKind = 'llm';
     }
-    const isExecuting = Boolean(!liveDefinitelyStopped && (effKind === 'llm' || effKind === 'compact' || effKind === 'tool'));
+    const isExecuting = Boolean(
+      isFlowCompacting || (!liveDefinitelyStopped && (effKind === 'llm' || effKind === 'compact' || effKind === 'tool'))
+    );
     if (!isExecuting) {
       effKind = 'idle';
     }

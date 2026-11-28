@@ -5,7 +5,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeCredEmail, syncDesktopAndCliCredentials, clearDesktopOAuthState } from './credential-vault.mjs';
-import { parseOAuthTokenPayload, startLoopbackOAuthFlow } from './account-oauth.mjs';
+import {
+  parseOAuthTokenPayload,
+  startLoopbackOAuthFlow,
+  fetchAccountCloudCodeQuota
+} from './account-oauth.mjs';
 import { syncOnboardingStorageFile } from '../installer/relaunch-worker.mjs';
 
 const MAX_TIMELINE_ENTRIES = 512;
@@ -99,6 +103,8 @@ export function createAccountsManager({
   lsClient = null,
   getDatabaseSync = null,
   relaunchHost = null,
+  onBeforeCredentialSwitch = null,
+  onActiveAccountChanged = null,
   openExternalUrl = null,
   nowFn = () => Date.now(),
   fetchImpl = globalThis.fetch,
@@ -112,6 +118,18 @@ export function createAccountsManager({
   let oauthInProgress = false;
   let lastAutoSwitchNotice = null;
   let lastRefreshAllAtMs = 0;
+  let lastRefreshActiveAtMs = 0;
+
+  if (vault && typeof vault.repairLegacyCredentials === 'function' && vault.getCapability?.().supported) {
+    try {
+      const initStore = readJsonSafe(accountsPath, {});
+      const ids = Array.isArray(initStore?.accounts) ? initStore.accounts.map((a) => a?.id).filter(Boolean) : [];
+      const rep = vault.repairLegacyCredentials(ids);
+      if (rep?.repaired > 0) {
+        log(`[Accounts] Upgraded ${rep.repaired} legacy oauth credential(s) to consumer format`);
+      }
+    } catch {}
+  }
 
   function loadStore() {
     const raw = readJsonSafe(accountsPath, {});
@@ -412,7 +430,7 @@ export function createAccountsManager({
     return { ok: true, account: acct, overview: getOverview() };
   }
 
-  async function refreshOneAccountQuota(store, acct, { activeEmail = '' } = {}) {
+  async function refreshOneAccountQuota(store, acct, { activeEmail = '', allowRemote = true, remoteMinIntervalMs = 0, force = false } = {}) {
     const norm = normalizeCredEmail(acct.email);
     const pending = sanitizePendingSwitch(store.pendingSwitch, nowFn());
     const isCurrent = pending
@@ -422,7 +440,8 @@ export function createAccountsManager({
       : acct.id === store.activeId;
     if (isCurrent && lsClient && typeof lsClient.getQuotaStatus === 'function') {
       const q = await lsClient.getQuotaStatus({ force: true }).catch(() => null);
-      if (q && q.ok) {
+      const qEmail = normalizeCredEmail(q?.accountEmail || '');
+      if (q && q.ok && (!qEmail || !norm || qEmail === norm)) {
         acct.lastQuota = q;
         if (q.planName) acct.planName = q.planName;
         acct.quotaSource = 'local-ls';
@@ -433,8 +452,54 @@ export function createAccountsManager({
       }
     }
 
-    // Never call external private CloudCode APIs for inactive accounts;
-    // preserve last official client snapshot and reconcile any elapsed reset windows offline.
+    const withinRemoteCooldown =
+      !isCurrent &&
+      !force &&
+      remoteMinIntervalMs > 0 &&
+      acct.updatedAt > 0 &&
+      Array.isArray(acct.lastQuota?.groups) &&
+      acct.lastQuota.groups.length > 0 &&
+      nowFn() - acct.updatedAt < remoteMinIntervalMs;
+
+    if (allowRemote && !withinRemoteCooldown && vault && typeof vault.readSavedRaw === 'function') {
+      const saved = vault.readSavedRaw(acct.id);
+      if (saved?.exists && saved.raw) {
+        const parsed = parseOAuthTokenPayload(saved.raw);
+        if (parsed && (parsed.refreshToken || parsed.accessToken)) {
+          const remoteRes = await fetchAccountCloudCodeQuota({
+            rawCredentialJson: saved.raw,
+            email: norm,
+            pairs: oauthPairs,
+            fetchImpl,
+            nowFn
+          }).catch((err) => ({ ok: false, error: err?.message || 'CloudCode quota failed' }));
+
+          if (remoteRes?.ok && remoteRes.quota) {
+            acct.lastQuota = remoteRes.quota;
+            if (remoteRes.planName) acct.planName = remoteRes.planName;
+            acct.quotaSource = 'cloudcode';
+            acct.quotaError = '';
+            acct.updatedAt = nowFn();
+            if (remoteRes.refreshedCredJson && typeof vault.writeSavedRaw === 'function') {
+              try {
+                const wr = vault.writeSavedRaw(acct.id, remoteRes.refreshedCredJson, { expectedEmail: acct.email });
+                if (wr?.ok && wr.hash) acct.credHash = wr.hash;
+              } catch {}
+            }
+            recordQuotaSamples(norm, remoteRes.quota);
+            return { ok: true, id: acct.id, source: 'cloudcode' };
+          }
+          if (remoteRes?.error) {
+            const rec = reconcileOfflineQuotaSnapshot(acct.lastQuota, nowFn(), acct.updatedAt || 0);
+            acct.lastQuota = rec ? rec.quota : null;
+            acct.quotaSource = 'cached';
+            acct.quotaError = String(remoteRes.error).slice(0, 180);
+            return { ok: false, id: acct.id, source: 'cached', error: acct.quotaError };
+          }
+        }
+      }
+    }
+
     const rec = reconcileOfflineQuotaSnapshot(acct.lastQuota, nowFn(), acct.updatedAt || 0);
     acct.lastQuota = rec ? rec.quota : null;
     acct.quotaSource = 'cached';
@@ -442,24 +507,44 @@ export function createAccountsManager({
     return { ok: true, id: acct.id, source: 'cached', offline: true };
   }
 
-  async function refreshQuota(accountId = 'all', { minIntervalMs = 0 } = {}) {
+  async function refreshQuota(accountId = 'all', { minIntervalMs = 0, force = false } = {}) {
     const now = nowFn();
-    if ((accountId === 'all' || accountId === 'active') && minIntervalMs > 0 && lastRefreshAllAtMs > 0 && now - lastRefreshAllAtMs < minIntervalMs) {
+    const isAll = accountId === 'all';
+    const isActiveOnly = accountId === 'active';
+    const effectiveMinMs = force ? 0 : Number(minIntervalMs) || 0;
+    const lastAt = isAll ? lastRefreshAllAtMs : isActiveOnly ? lastRefreshActiveAtMs : 0;
+    if ((isAll || isActiveOnly) && effectiveMinMs > 0 && lastAt > 0 && now - lastAt < effectiveMinMs) {
       return { ok: true, throttled: true, overview: getOverview() };
     }
     const liveEmail = await reconcileWithLiveIdentity({ force: true });
     const store = loadStore();
     const activeInfo = vault && vault.getCapability().supported ? vault.readActiveInfo() : { email: '' };
-    const targets =
-      accountId === 'all' || accountId === 'active'
-        ? store.accounts.filter((a) => !a.disabled)
-        : store.accounts.filter((a) => a.id === accountId);
+    const effectiveActiveEmail = normalizeCredEmail(liveEmail || activeInfo.email);
+    const targets = isAll
+      ? store.accounts.filter((a) => !a.disabled)
+      : isActiveOnly
+      ? store.accounts.filter((a) => !a.disabled && (a.id === store.activeId || (effectiveActiveEmail && normalizeCredEmail(a.email) === effectiveActiveEmail)))
+      : store.accounts.filter((a) => a.id === accountId);
 
-    const results = [];
-    for (const a of targets) {
-      results.push(await refreshOneAccountQuota(store, a, { activeEmail: liveEmail || activeInfo.email }));
-    }
-    if (accountId === 'all' || accountId === 'active') lastRefreshAllAtMs = nowFn();
+    const results = new Array(targets.length);
+    const concurrency = isAll ? 3 : 1;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(concurrency, Math.max(1, targets.length)) }, async () => {
+      while (cursor < targets.length) {
+        const idx = cursor;
+        cursor += 1;
+        results[idx] = await refreshOneAccountQuota(store, targets[idx], {
+          activeEmail: effectiveActiveEmail,
+          allowRemote: !isActiveOnly || targets[idx].id !== store.activeId || !lsClient,
+          remoteMinIntervalMs: isAll && !force ? effectiveMinMs : 0,
+          force
+        });
+      }
+    });
+    await Promise.all(workers);
+
+    if (isAll) lastRefreshAllAtMs = nowFn();
+    if (isActiveOnly) lastRefreshActiveAtMs = nowFn();
     saveStore(store);
     return { ok: true, results, overview: getOverview({ liveEmail }) };
   }
@@ -502,6 +587,12 @@ export function createAccountsManager({
       }
     }
 
+    if (typeof onBeforeCredentialSwitch === 'function') {
+      try {
+        await onBeforeCredentialSwitch({ reason: 'switch', targetId: target.id, targetEmail: target.email });
+      } catch {}
+    }
+
     const restored = vault.restoreToActive(target.id, { expectedEmail: target.email });
     if (!restored.ok) {
       if (restored.mismatch || restored.missing) {
@@ -539,13 +630,12 @@ export function createAccountsManager({
       });
     }
 
-    const onboardingSync =
-      target.onboardingAccepted || target.quotaSource === 'local-ls' || Boolean(target.lastQuota?.ok)
-        ? {
-            email: normalizeCredEmail(target.email),
-            isGcpTos: typeof target.isGcpTos === 'boolean' ? target.isGcpTos : null
-          }
-        : null;
+    const onboardingSync = target.hasCredential
+      ? {
+          email: normalizeCredEmail(target.email),
+          isGcpTos: typeof target.isGcpTos === 'boolean' ? target.isGcpTos : null
+        }
+      : null;
 
     let relaunched = false;
     let manualRestartRequired = false;
@@ -600,14 +690,39 @@ export function createAccountsManager({
       const saved = vault.writeSavedRaw(id, res.credJson, { expectedEmail: res.email });
       if (!saved.ok) throw new Error(saved.error || 'Failed to store credential');
 
+      let initQuota = null;
+      let initPlan = '';
+      let initSource = 'cached';
+      let initError = '';
+      try {
+        const qRes = await fetchAccountCloudCodeQuota({
+          rawCredentialJson: res.credJson,
+          accessToken: res.accessToken,
+          refreshToken: res.refreshToken,
+          email: res.email,
+          pairs: oauthPairs,
+          fetchImpl,
+          nowFn
+        });
+        if (qRes?.ok && qRes.quota) {
+          initQuota = qRes.quota;
+          initPlan = qRes.planName || '';
+          initSource = 'cloudcode';
+          recordQuotaSamples(res.email, qRes.quota);
+        } else if (qRes?.error) {
+          initError = String(qRes.error).slice(0, 180);
+        }
+      } catch {}
+
       const acct = upsertAccountRecord(store, {
         email: res.email,
-        planName: '',
+        planName: initPlan,
         credHash: saved.hash,
         hasCredential: true,
-        quota: null,
-        quotaSource: 'cached'
+        quota: initQuota,
+        quotaSource: initSource
       });
+      acct.quotaError = initError;
       saveStore(store);
       return { ok: true, account: acct, overview: getOverview() };
     } finally {
@@ -618,6 +733,12 @@ export function createAccountsManager({
   async function prepareNativeLoginAdd({ relaunch = true } = {}) {
     const cap = vault ? vault.getCapability() : { supported: false, reason: 'vault unavailable' };
     if (!cap.supported) throw new Error(cap.reason || 'OS credential vault unsupported');
+
+    if (typeof onBeforeCredentialSwitch === 'function') {
+      try {
+        await onBeforeCredentialSwitch({ reason: 'prepare_native_add' });
+      } catch {}
+    }
 
     const store = loadStore();
     const current = store.accounts.find((a) => a.id === store.activeId);
@@ -696,6 +817,7 @@ export function createAccountsManager({
       } catch {}
     } else if (acct) {
       let dirty = false;
+      const prevActiveId = store.activeId;
       if (store.activeId !== acct.id) {
         store.activeId = acct.id;
         dirty = true;
@@ -714,6 +836,7 @@ export function createAccountsManager({
       if (quota && quota.ok) {
         acct.lastQuota = quota;
         acct.quotaSource = 'local-ls';
+        acct.quotaError = '';
         acct.onboardingAccepted = true;
         if (quota.planName) acct.planName = quota.planName;
         acct.lastUsedAtMs = now;
@@ -723,6 +846,11 @@ export function createAccountsManager({
       if (dirty) {
         saveStore(store);
         changed = true;
+      }
+      if (prevActiveId && prevActiveId !== acct.id && typeof onActiveAccountChanged === 'function') {
+        try {
+          onActiveAccountChanged({ fromId: prevActiveId, toId: acct.id, email });
+        } catch {}
       }
     }
 
@@ -773,7 +901,10 @@ export function createAccountsManager({
       case 'prepare_native_add':
         return await prepareNativeLoginAdd({ relaunch: payload.relaunch !== false });
       case 'refresh_quota':
-        return await refreshQuota(payload.accountId || 'all', { minIntervalMs: Number(payload.minIntervalMs) || 0 });
+        return await refreshQuota(payload.accountId || 'all', {
+          minIntervalMs: Number(payload.minIntervalMs) || 0,
+          force: Boolean(payload.force)
+        });
       case 'switch_account':
         return await switchAccount(payload.accountId, {
           auto: false,

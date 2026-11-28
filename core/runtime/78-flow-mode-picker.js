@@ -413,6 +413,7 @@
         const btn = document.getElementById('ag-flow-mode-trigger-' + pk);
         if (!btn) return;
         const st = paneData[pk];
+        const copy = getCopy();
         const meta = getModeMeta(st.mode);
         const iconWrap = btn.querySelector('.ag-flow-icon-wrap');
         const lbl = btn.querySelector('.ag-flow-label');
@@ -420,8 +421,20 @@
           iconWrap.setAttribute('data-mode', st.mode);
           iconWrap.innerHTML = getModeIconSvg(st.mode, 14);
         }
-        if (lbl) lbl.textContent = meta.short;
+        const needsRelay = st.mode !== 'default' || Boolean(compactConfig.enabled);
+        const unpatched = needsRelay && (!proxyInfo.running || (asarInfo.found && !asarInfo.patched));
+        if (lbl) lbl.textContent = unpatched ? meta.short + ' · ' + copy.asarUnpatched : meta.short;
         btn.setAttribute('data-ag-flow-active', st.mode !== 'default' ? '1' : '0');
+        if (unpatched) {
+          btn.setAttribute('data-ag-flow-unpatched', '1');
+          btn.title =
+            getLocale() === 'en'
+              ? 'Flow relay not intercepting (app.asar unpatched or proxy off). Enable Traffic Redirect in Settings.'
+              : 'Flow 未接管（app.asar 未改道或代理未启动，客户端更新后需重新在「设置 → 代理与接管」开启接管）';
+        } else {
+          btn.removeAttribute('data-ag-flow-unpatched');
+          btn.removeAttribute('title');
+        }
         btn.setAttribute('aria-expanded', openPaneKey === pk ? 'true' : 'false');
       }
 
@@ -473,6 +486,12 @@
         const scopeSpan = document.createElement('span');
         scopeSpan.textContent = st.isDraft ? copy.scopeDraft : copy.scopeSession;
         head.appendChild(scopeSpan);
+        if (!proxyInfo.running || (asarInfo.found && !asarInfo.patched)) {
+          const warnBadge = document.createElement('span');
+          warnBadge.className = 'ag-flow-menu-badge-warn';
+          warnBadge.textContent = !proxyInfo.running ? copy.proxyOff : copy.asarUnpatched;
+          head.appendChild(warnBadge);
+        }
         menu.appendChild(head);
 
         for (const m of copy.modes) {

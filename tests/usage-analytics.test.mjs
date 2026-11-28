@@ -268,8 +268,12 @@ test('usage-analytics keeps unlinked historical errors at neighbor timestamps an
     fs.mkdirSync(convDir, { recursive: true });
     fs.mkdirSync(userDir, { recursive: true });
 
-    const tOld = Math.floor((Date.now() - 4 * 3600 * 1000) / 1000) * 1000;
-    const tNew = Math.floor((Date.now() - 5 * 60 * 1000) / 1000) * 1000;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayStartSec = Math.floor(todayStart.getTime() / 1000) * 1000;
+    const nowSec = Math.floor(Date.now() / 1000) * 1000;
+    const tOld = Math.max(todayStartSec + 1000, nowSec - 4 * 3600 * 1000);
+    const tNew = Math.max(tOld + 2000, nowSec - 5 * 60 * 1000);
     const db = new DatabaseSync(path.join(convDir, 'conv-err.db'));
     db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);');
     db.exec('CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB);');
@@ -433,4 +437,108 @@ test('sanitizePoolSeries filters cross-account glitches, detectWindowReset ignor
     weeklyResetTime: '2026-12-03T08:45:37Z'
   });
   assert.equal(preTlRes.weeklyResets, 1, 'pre-timeline usage before fresh 100% weekly cycle must count 1 weekly reset');
+});
+
+test('accountComparison includes weeklyRemainingPct, pre-timeline events do not leak false resets to new accounts, and low usage does not explode to 100%', async (t) => {
+  const sqlite = await import('node:sqlite').catch(() => null);
+  if (!sqlite || typeof sqlite.DatabaseSync !== 'function') {
+    t.skip('node:sqlite unavailable');
+    return;
+  }
+  const { DatabaseSync } = sqlite;
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-ua-new-acct-'));
+  try {
+    const convDir = path.join(tmpRoot, 'conversations');
+    const userDir = path.join(tmpRoot, 'user');
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(userDir, { recursive: true });
+
+    const nowMs = Date.parse('2026-11-28T16:25:00Z');
+    // Old pre-timeline usage belonged to old@test.com
+    const db = new DatabaseSync(path.join(convDir, 'conv-old.db'));
+    db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);');
+    db.exec('CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB);');
+    db.prepare('INSERT INTO steps VALUES (0, ?)').run(buildStepMetaBlob(Date.parse('2026-11-24T10:00:00Z')));
+    db.prepare('INSERT INTO gen_metadata VALUES (0, ?)').run(
+      buildGenMetaBlob({ inputTokens: 1000, cacheReadTokens: 2000, outputTokens: 500, modelName: 'Gemini 4 Neon (High)', stepIdx: 0 })
+    );
+    db.close();
+
+    fs.writeFileSync(
+      path.join(userDir, 'account-timeline.json'),
+      JSON.stringify([
+        { email: 'old@test.com', sinceMs: Date.parse('2026-11-26T08:00:00Z') },
+        { email: 'new@test.com', sinceMs: Date.parse('2026-11-28T15:50:00Z') }
+      ])
+    );
+    fs.writeFileSync(
+      path.join(userDir, 'accounts.json'),
+      JSON.stringify({
+        activeId: 'acc_new',
+        accounts: [
+          {
+            id: 'acc_old',
+            email: 'old@test.com',
+            lastQuota: { ok: true, groups: [{ key: 'gemini', fiveHour: { remainingPct: 100 }, weekly: { remainingPct: 12 } }] }
+          },
+          {
+            id: 'acc_new',
+            email: 'new@test.com',
+            lastQuota: {
+              ok: true,
+              groups: [
+                {
+                  key: 'gemini',
+                  fiveHour: { remainingPct: 95, resetTime: '2026-11-28T20:50:00Z' },
+                  weekly: { remainingPct: 97, resetTime: '2026-12-05T10:50:00Z' }
+                }
+              ]
+            }
+          }
+        ]
+      })
+    );
+    fs.writeFileSync(
+      path.join(userDir, 'quota-samples.json'),
+      JSON.stringify([
+        {
+          ts: Date.parse('2026-11-28T15:56:00Z'),
+          email: 'new@test.com',
+          key: 'gemini',
+          fiveHourPct: 100,
+          fiveHourReset: '2026-11-28T20:50:00Z',
+          weeklyPct: 99,
+          weeklyReset: '2026-12-05T10:50:00Z'
+        },
+        {
+          ts: Date.parse('2026-11-28T16:20:00Z'),
+          email: 'new@test.com',
+          key: 'gemini',
+          fiveHourPct: 95,
+          fiveHourReset: '2026-11-28T20:50:00Z',
+          weeklyPct: 97,
+          weeklyReset: '2026-12-05T10:50:00Z'
+        }
+      ])
+    );
+
+    const ua = createUsageAnalytics({
+      getDatabaseSync: () => DatabaseSync,
+      conversationsDir: convDir,
+      userDir,
+      nowFn: () => nowMs
+    });
+    const dash = ua.getDashboardData({ range: 'month', account: 'new@test.com', force: true });
+    const gem = dash.quotaByPool.find((p) => p.key === 'gemini');
+    assert.equal(gem.weeklyResets, 0, 'brand-new account must not inherit pre-timeline weekly resets from old account');
+    assert.equal(gem.fiveHourResets, 0);
+    assert.ok(gem.projection.weekProjectedPct < 80, `low 3% usage must not explode to 100% weekly projection (got ${gem.projection.weekProjectedPct}%)`);
+
+    const cmpOld = dash.accountComparison.find((a) => a.email === 'old@test.com');
+    const cmpNew = dash.accountComparison.find((a) => a.email === 'new@test.com');
+    assert.equal(cmpOld.weeklyRemainingPct, 12);
+    assert.equal(cmpNew.weeklyRemainingPct, 97);
+  } finally {
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5 }); } catch {}
+  }
 });

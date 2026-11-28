@@ -14,7 +14,8 @@ import {
   buildUnifiedOAuthTokenTopicBase64,
   parseUnifiedOAuthTokenTopicBase64,
   buildUnifiedUserStatusTopicBase64,
-  parseUnifiedUserStatusTopicBase64
+  parseUnifiedUserStatusTopicBase64,
+  normalizeCredentialPayloadForHost
 } from '../core/daemon/credential-vault.mjs';
 import {
   OFFICIAL_OAUTH_CLIENT_PAIRS,
@@ -85,31 +86,75 @@ test('scanAntigravityOAuthPairs matches official SHA-256 anchors without hardcod
   assert.equal(parsed.email, 'bob@example.com');
 });
 
-test('inactive account quota stays zero-network and offline reconciles elapsed resetTime windows to 100%', async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-acc-offline-'));
+test('active quota refresh stays local while full refresh syncs inactive accounts via official CloudCode API and falls back offline on failure', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-acc-cloudcode-'));
   try {
     let fetchCalls = 0;
-    const activeRaw = buildVaultCredentialJson({ accessToken: 'ya29.a', refreshToken: '1//rfa', email: 'active@test.com' });
-    const inactiveRaw = buildVaultCredentialJson({ accessToken: 'ya29.b', refreshToken: '1//rfb', email: 'backup@test.com' });
+    let shouldFailRemote = false;
+    let curTime = Date.parse('2026-11-26T10:00:00Z');
+    const activeRaw = buildVaultCredentialJson({
+      accessToken: 'ya29.a',
+      refreshToken: '1//rfa',
+      expiryDate: curTime + 3600_000,
+      email: 'active@test.com'
+    });
+    const inactiveRaw = buildVaultCredentialJson({
+      accessToken: 'ya29.b',
+      refreshToken: '1//rfb',
+      expiryDate: curTime + 3600_000,
+      email: 'backup@test.com'
+    });
     const savedSlots = new Map([
       ['acc_active', activeRaw],
       ['acc_backup', inactiveRaw]
     ]);
-    let curTime = Date.parse('2026-11-26T10:00:00Z');
     const mockVault = {
       getCapability: () => ({ supported: true, backend: 'mock' }),
       readActiveInfo: () => ({ exists: true, email: 'active@test.com', hash: shortCredentialHash(activeRaw) }),
       saveActiveTo: (id) => ({ ok: true, email: 'active@test.com', hash: shortCredentialHash(savedSlots.get(id) || activeRaw) }),
       readSavedRaw: (id) => ({ exists: savedSlots.has(id), raw: savedSlots.get(id) || '' }),
-      writeSavedRaw: (id, raw) => ({ ok: true, email: extractCredentialEmail(raw), hash: shortCredentialHash(raw) })
+      writeSavedRaw: (id, raw) => {
+        savedSlots.set(id, raw);
+        return { ok: true, email: extractCredentialEmail(raw), hash: shortCredentialHash(raw) };
+      }
     };
     const mgr = createAccountsManager({
       userDir: tmpDir,
       vault: mockVault,
       nowFn: () => curTime,
-      fetchImpl: async () => {
+      oauthPairs: [{ id: 'test', clientId: 'cid', clientSecret: 'csec' }],
+      fetchImpl: async (url) => {
         fetchCalls += 1;
-        throw new Error('Must not fetch private CloudCode APIs');
+        if (shouldFailRemote) {
+          return { ok: false, status: 503, text: async () => JSON.stringify({ error: { message: 'backend unavailable' } }) };
+        }
+        const u = String(url);
+        if (u.includes('loadCodeAssist')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ cloudaicompanionProject: 'aicode-consumers', paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' } })
+          };
+        }
+        if (u.includes('retrieveUserQuotaSummary')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                groups: [
+                  {
+                    displayName: 'Gemini',
+                    buckets: [
+                      { window: '5h', remainingFraction: 0.88, resetTime: '2026-11-26T15:00:00Z' },
+                      { window: 'weekly', remainingFraction: 0.72, resetTime: '2026-12-02T00:00:00Z' }
+                    ]
+                  }
+                ]
+              })
+          };
+        }
+        return { ok: false, status: 404, text: async () => '' };
       },
       lsClient: {
         getUserIdentity: async () => ({ email: 'active@test.com', planName: 'Pro' }),
@@ -128,7 +173,6 @@ test('inactive account quota stays zero-network and offline reconciles elapsed r
       }
     });
     await mgr.captureCurrentAccount();
-    // Seed backup account snapshot with a 5h resetTime expiring at 11:00Z
     fs.writeFileSync(
       path.join(tmpDir, 'accounts.json'),
       JSON.stringify({
@@ -144,6 +188,7 @@ test('inactive account quota stays zero-network and offline reconciles elapsed r
             id: 'acc_backup',
             email: 'backup@test.com',
             hasCredential: true,
+            updatedAt: curTime,
             lastQuota: {
               ok: true,
               groups: [
@@ -159,13 +204,83 @@ test('inactive account quota stays zero-network and offline reconciles elapsed r
         ]
       })
     );
-    curTime = Date.parse('2026-11-26T11:30:00Z');
-    const res = await mgr.refreshQuota('all');
-    assert.equal(res.ok, true);
-    assert.equal(fetchCalls, 0, 'Must never call remote fetch for CloudCode internal APIs');
-    const backup = res.overview.accounts.find((a) => a.id === 'acc_backup');
-    assert.equal(backup.lastQuota.groups[0].fiveHour.remainingPct, 100, 'Elapsed resetTime must reconcile offline to 100%');
-    assert.equal(backup.lastQuota.groups[0].weekly.remainingPct, 65);
+
+    // 1. Active-only refresh stays local via LS with zero external network calls
+    const activeOnly = await mgr.refreshQuota('active');
+    assert.equal(activeOnly.ok, true);
+    assert.equal(fetchCalls, 0, 'Active refresh must stay local when LS is healthy');
+
+    // 2. Full refresh queries official CloudCode API for inactive accounts
+    const allLive = await mgr.refreshQuota('all');
+    assert.equal(allLive.ok, true);
+    assert.ok(fetchCalls >= 2, 'Full refresh must query CloudCode loadCodeAssist + retrieveUserQuotaSummary');
+    const backupLive = allLive.overview.accounts.find((a) => a.id === 'acc_backup');
+    assert.equal(backupLive.planName, 'Pro');
+    assert.equal(backupLive.quotaSource, 'cloudcode');
+    assert.equal(backupLive.lastQuota.groups[0].fiveHour.remainingPct, 88);
+    assert.equal(backupLive.lastQuota.groups[0].weekly.remainingPct, 72);
+
+    // 3. When CloudCode is unreachable and 5h window elapsed, reconciles offline and surfaces quotaError
+    shouldFailRemote = true;
+    curTime = Date.parse('2026-11-26T16:00:00Z');
+    const allOffline = await mgr.refreshQuota('all');
+    const backupOff = allOffline.overview.accounts.find((a) => a.id === 'acc_backup');
+    assert.equal(backupOff.quotaSource, 'cached');
+    assert.equal(backupOff.lastQuota.groups[0].fiveHour.remainingPct, 100, 'Elapsed resetTime must reconcile offline to 100%');
+    assert.equal(backupOff.lastQuota.groups[0].weekly.remainingPct, 72);
+    assert.ok(backupOff.quotaError.length > 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('switchAccount fires onBeforeCredentialSwitch before touching OS credential and always passes onboardingSync', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-acc-hook-'));
+  try {
+    const events = [];
+    let activeRaw = buildVaultCredentialJson({ accessToken: 'ya29.a', refreshToken: '1//rfa', email: 'a@test.com' });
+    const targetRaw = buildVaultCredentialJson({ accessToken: 'ya29.b', refreshToken: '1//rfb', email: 'b@test.com' });
+    const saved = new Map([
+      ['acc_a', activeRaw],
+      ['acc_b', targetRaw]
+    ]);
+    const mockVault = {
+      getCapability: () => ({ supported: true, backend: 'mock' }),
+      readActiveInfo: () => ({ exists: true, email: extractCredentialEmail(activeRaw), hash: shortCredentialHash(activeRaw) }),
+      saveActiveTo: (id) => ({ ok: true, email: extractCredentialEmail(activeRaw), hash: shortCredentialHash(activeRaw) }),
+      readSavedRaw: (id) => ({ exists: saved.has(id), raw: saved.get(id) || '' }),
+      restoreToActive: (id) => {
+        events.push(`restore:${id}`);
+        activeRaw = saved.get(id);
+        return { ok: true, email: extractCredentialEmail(activeRaw), hash: shortCredentialHash(activeRaw), raw: activeRaw };
+      }
+    };
+    let seenOnboarding = null;
+    const mgr = createAccountsManager({
+      userDir: tmpDir,
+      vault: mockVault,
+      onBeforeCredentialSwitch: async () => {
+        events.push('before_switch');
+      },
+      relaunchHost: async (opts) => {
+        seenOnboarding = opts?.onboardingSync || null;
+        return { ok: true };
+      }
+    });
+    fs.writeFileSync(
+      path.join(tmpDir, 'accounts.json'),
+      JSON.stringify({
+        activeId: 'acc_a',
+        accounts: [
+          { id: 'acc_a', email: 'a@test.com', hasCredential: true },
+          { id: 'acc_b', email: 'b@test.com', hasCredential: true, lastQuota: null }
+        ]
+      })
+    );
+    const sw = await mgr.switchAccount('acc_b', { relaunch: true });
+    assert.equal(sw.ok, true);
+    assert.deepEqual(events, ['before_switch', 'restore:acc_b']);
+    assert.deepEqual(seenOnboarding, { email: 'b@test.com', isGcpTos: null });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -539,7 +654,8 @@ test('79-accounts-dashboard mounts below #ag-settings-nav-wrap inside .settings-
   assert.ok(!pop.innerHTML.includes('data-pop-close'), 'Dashboard header must not render close button');
   assert.ok(!pop.innerHTML.includes('data-pop-switch'), 'Dashboard filter bar must only have a single account selector');
   assert.ok(pop.innerHTML.includes('ag-acct-picker') && pop.innerHTML.includes('data-acct-trigger="1"'), 'Dashboard must render custom rounded account dropdown picker');
-  assert.ok(pop.innerHTML.includes('本周预估') && pop.innerHTML.includes('本月预估'), 'Dashboard must render weekly and monthly projection blocks');
+  assert.ok(pop.innerHTML.includes('7日窗口预估') && pop.innerHTML.includes('本月预估'), 'Dashboard must render weekly and monthly projection blocks');
+  assert.ok(code.includes('周额剩余') && code.includes('5h 剩余'), 'Account comparison table must include weekly remaining quota column');
 
   // Regression guard: repeated sync/refresh calls without state change must NOT rewrite innerHTML
   let paneWrites = 0;
@@ -1024,6 +1140,89 @@ test('offline account quota reconciles elapsed resetTime and fallback updatedAt+
     const persisted = JSON.parse(fs.readFileSync(storePath, 'utf8'));
     const persistedBak = persisted.accounts.find((a) => a.id === 'acc_expired_by_fallback');
     assert.equal(persistedBak.lastQuota.groups[0].fiveHour.remainingPct, 100);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('accounts dashboard sync hint renders refresh time only without source prefix', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'core/runtime/79-accounts-dashboard.js'), 'utf8');
+  assert.match(src, /刷新于 /);
+  assert.doesNotMatch(src, /官方同步/);
+});
+
+test('normalizeCredentialPayloadForHost upgrades legacy oauth auth_method to consumer', () => {
+  const legacy = JSON.stringify({
+    token: { access_token: 'tok', refresh_token: 'ref', expiry_date: 1800000000000 },
+    auth_method: 'oauth',
+    id_token_email: 'user@example.com'
+  });
+  const upgraded = normalizeCredentialPayloadForHost(legacy);
+  assert.equal(upgraded.changed, true);
+  const parsed = JSON.parse(upgraded.raw);
+  assert.equal(parsed.auth_method, 'consumer');
+  assert.equal(parsed.token.token_type, 'Bearer');
+  assert.match(parsed.token.expiry, /^\d{4}-\d{2}-\d{2}T/);
+
+  const already = normalizeCredentialPayloadForHost(upgraded.raw);
+  assert.equal(already.changed, false);
+});
+
+test('refreshQuota skips remote CloudCode calls for fresh background accounts unless force=true', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-bg-throttle-'));
+  try {
+    let curTime = Date.parse('2026-11-28T16:00:00Z');
+    let remoteCalls = 0;
+    const activeRaw = buildVaultCredentialJson({ accessToken: 'ya29.a', refreshToken: '1//rfa', expiryDate: curTime + 3600_000, email: 'active@test.com' });
+    const bgRaw = buildVaultCredentialJson({ accessToken: 'ya29.b', refreshToken: '1//rfb', expiryDate: curTime + 3600_000, email: 'bg@test.com' });
+    const mockVault = {
+      getCapability: () => ({ supported: true, backend: 'mock' }),
+      readActiveInfo: () => ({ exists: true, email: 'active@test.com', hash: 'H1' }),
+      readSavedRaw: (id) => ({ exists: id === 'acc_bg', raw: id === 'acc_bg' ? bgRaw : activeRaw }),
+      saveActiveTo: () => ({ ok: true, email: 'active@test.com', hash: 'H1' })
+    };
+    const mgr = createAccountsManager({
+      userDir: tmpDir,
+      vault: mockVault,
+      nowFn: () => curTime,
+      oauthPairs: [{ key: 'antigravity_default', clientId: 'cid', clientSecret: 'csec' }],
+      fetchImpl: async (url) => {
+        remoteCalls += 1;
+        if (String(url).includes('loadCodeAssist')) return { ok: true, status: 200, json: async () => ({ currentTier: { id: 'pro' } }) };
+        if (String(url).includes('retrieveUserQuotaSummary')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              groups: [{ modelGroup: 'GEMINI', windows: [{ window: '5h', remainingFraction: 0.9, resetTime: '2026-11-28T20:00:00Z' }, { window: 'weekly', remainingFraction: 0.8, resetTime: '2026-12-05T00:00:00Z' }] }]
+            })
+          };
+        }
+        return { ok: false, status: 404, text: async () => '' };
+      },
+      lsClient: {
+        getUserIdentity: async () => ({ email: 'active@test.com', planName: 'Pro' }),
+        getQuotaStatus: async () => ({ ok: true, planName: 'Pro', groups: [{ key: 'gemini', label: 'Gemini', fiveHour: { remainingPct: 70 }, weekly: { remainingPct: 80 } }] })
+      }
+    });
+    fs.writeFileSync(
+      path.join(tmpDir, 'accounts.json'),
+      JSON.stringify({
+        activeId: 'acc_active',
+        accounts: [
+          { id: 'acc_active', email: 'active@test.com', hasCredential: true, updatedAt: curTime, lastQuota: { ok: true, groups: [{ key: 'gemini', fiveHour: { remainingPct: 70 }, weekly: { remainingPct: 80 } }] } },
+          { id: 'acc_bg', email: 'bg@test.com', hasCredential: true, updatedAt: curTime - 60_000, lastQuota: { ok: true, groups: [{ key: 'gemini', fiveHour: { remainingPct: 90 }, weekly: { remainingPct: 80 } }] } }
+        ]
+      })
+    );
+
+    // 1. Background auto-refresh within 10m cooldown skips remote CloudCode call
+    await mgr.refreshQuota('all', { minIntervalMs: 600_000 });
+    assert.equal(remoteCalls, 0, 'recent background account must skip remote CloudCode within minIntervalMs');
+
+    // 2. Manual force=true bypasses cooldown and refreshes remote CloudCode immediately
+    await mgr.refreshQuota('all', { minIntervalMs: 600_000, force: true });
+    assert.ok(remoteCalls >= 2, 'manual force=true must refresh remote CloudCode immediately');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

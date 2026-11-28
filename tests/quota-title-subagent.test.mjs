@@ -330,3 +330,36 @@ test('subagent-routing supports custom third-party models, builds authorization 
   assert.equal(r2.targetModel, 'gemini-3.8-flash-low');
   assert.equal(r2.reason, 'tier-fallback:fast');
 });
+
+test('ls-client recovers immediately after empty hub candidates without deadlocking inFlightQuota', async () => {
+  let hubs = [];
+  let now = 1000;
+  const client = createLanguageServerClient({
+    nowFn: () => now,
+    discoverCandidatesFn: () => hubs,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          response: {
+            groups: [
+              { displayName: 'Gemini', buckets: [{ window: '5h', remainingFraction: 0.91 }] }
+            ]
+          },
+          userStatus: { email: 'live@test.com', planStatus: { planInfo: { planName: 'Pro' } } }
+        })
+    })
+  });
+
+  const qMiss = await client.getQuotaStatus({ force: true });
+  assert.equal(qMiss.ok, false);
+  assert.equal(qMiss.error, 'hub not found');
+
+  // Hub comes online 5s later: must NOT stay stuck on frozen 'hub not found' promise
+  now += 5000;
+  hubs = [{ host: '127.0.0.1', port: 19999, address: '127.0.0.1:19999', csrfToken: 'tok', pid: 42 }];
+  const qOk = await client.getQuotaStatus({ force: true });
+  assert.equal(qOk.ok, true);
+  assert.equal(qOk.groups[0].fiveHour.remainingPct, 91);
+});

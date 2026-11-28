@@ -323,6 +323,8 @@ export function createPromptSuggestionEngine({
   let modelsCache = null;
   let modelsCacheAt = 0;
   let modelsInFlight = null;
+  let consecutiveWarmupFails = 0;
+  let authBlockedUntil = 0;
   const stoppingProcs = new Set();
   const stoppingKillTimers = new Map();
   const queue = [];
@@ -473,6 +475,31 @@ export function createPromptSuggestionEngine({
     }
   }
 
+  async function stopAndWait({ terminateAll = true, timeoutMs = 2500 } = {}) {
+    stop({ wantRestart: false, terminateAll });
+    const deadline = Date.now() + Math.max(200, Number(timeoutMs) || 2500);
+    while (stoppingProcs.size > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    if (stoppingProcs.size > 0) {
+      for (const lingering of [...stoppingProcs]) {
+        try {
+          if (process.platform === 'win32' && lingering.pid > 0) {
+            spawnSync('taskkill', ['/F', '/PID', String(lingering.pid), '/T'], {
+              windowsHide: true,
+              stdio: 'ignore',
+              timeout: 2000
+            });
+          } else {
+            lingering.kill('SIGKILL');
+          }
+        } catch {}
+        clearStoppingChild(lingering);
+      }
+    }
+    return { stopped: true, remaining: stoppingProcs.size };
+  }
+
   function scheduleStart(delayMs) {
     if (restartTimer) clearTimeout(restartTimer);
     restartTimer = setTimeout(() => {
@@ -483,7 +510,18 @@ export function createPromptSuggestionEngine({
   }
 
   function restart() {
+    authBlockedUntil = 0;
+    consecutiveWarmupFails = 0;
     stop({ wantRestart: isEnabled() });
+  }
+
+  function recordWarmupFailure({ authError = false } = {}) {
+    consecutiveWarmupFails += 1;
+    const backoffMs = authError
+      ? 10 * 60_000
+      : Math.min(30 * 60_000, 30_000 * 2 ** Math.min(consecutiveWarmupFails - 1, 6));
+    authBlockedUntil = Date.now() + backoffMs;
+    stop({ wantRestart: false });
   }
 
   function sendWarmup() {
@@ -494,7 +532,7 @@ export function createPromptSuggestionEngine({
       if (proc !== owner) return;
       if (pending && pending.isWarmup && pending.owner === owner) {
         pending = null;
-        restart();
+        recordWarmupFailure();
       }
     }, WARMUP_TIMEOUT_MS);
 
@@ -558,6 +596,7 @@ export function createPromptSuggestionEngine({
 
   function ensureStarted() {
     if (!isEnabled()) return false;
+    if (Date.now() < authBlockedUntil) return false;
     const model = getTargetModel();
     if (proc && !proc.killed && proc.exitCode === null) {
       if (activeModel === model) return true;
@@ -624,7 +663,15 @@ export function createPromptSuggestionEngine({
     proc = child;
     starting = false;
     let childBuf = '';
-    if (child.stderr && typeof child.stderr.resume === 'function') {
+    if (child.stderr && typeof child.stderr.on === 'function') {
+      child.stderr.on('data', (chunk) => {
+        if (proc !== child) return;
+        const txt = chunk ? chunk.toString('utf8') : '';
+        if (/You are not logged into Antigravity|triggering interactive OAuth|Unknown auth method|starting OAuth flow/i.test(txt)) {
+          recordWarmupFailure({ authError: true });
+        }
+      });
+    } else if (child.stderr && typeof child.stderr.resume === 'function') {
       child.stderr.resume();
     }
 
@@ -667,6 +714,8 @@ export function createPromptSuggestionEngine({
           }
           if (!warmed) {
             warmed = true;
+            consecutiveWarmupFails = 0;
+            authBlockedUntil = 0;
           } else {
             turns += 1;
           }
@@ -686,6 +735,7 @@ export function createPromptSuggestionEngine({
     child.on('exit', () => {
       destroyChildStreams(child);
       if (proc !== child) return;
+      const wasWarmed = warmed;
       ready = false;
       warmed = false;
       proc = null;
@@ -698,7 +748,11 @@ export function createPromptSuggestionEngine({
           cur.resolve('');
         }
       }
-      if (queue.length > 0 && isEnabled()) {
+      if (!wasWarmed) {
+        recordWarmupFailure();
+        return;
+      }
+      if (queue.length > 0 && isEnabled() && Date.now() >= authBlockedUntil) {
         scheduleStart(800);
       }
     });
@@ -914,6 +968,7 @@ export function createPromptSuggestionEngine({
     suggest,
     runUtilityPrompt,
     stop,
+    stopAndWait,
     listModels,
     getStatus: () => ({
       available: Boolean(getAgyBin()),

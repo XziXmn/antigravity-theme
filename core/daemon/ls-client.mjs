@@ -369,12 +369,13 @@ export function createLanguageServerClient({
     ) {
       return cachedQuota;
     }
+    if (candidates.length === 0) {
+      return { ok: false, error: 'hub not found', groups: [], buckets: [], fetchedAt: now };
+    }
     if (inFlightQuota) return await inFlightQuota;
-    inFlightQuota = (async () => {
+    let settled = false;
+    const promise = (async () => {
       try {
-        if (candidates.length === 0) {
-          return { ok: false, error: 'hub not found', groups: [], buckets: [], fetchedAt: now };
-        }
         let lastErr = '';
         for (const hub of candidates) {
           const hKey = hubKeyOf(hub);
@@ -432,10 +433,12 @@ export function createLanguageServerClient({
           fetchedAt: now
         };
       } finally {
-        inFlightQuota = null;
+        settled = true;
+        if (inFlightQuota === promise) inFlightQuota = null;
       }
     })();
-    return await inFlightQuota;
+    if (!settled) inFlightQuota = promise;
+    return await promise;
   }
 
   async function getConversation(conversationId) {
@@ -499,12 +502,27 @@ export function createLanguageServerClient({
     return cachedIdentity && (!primaryHubKey || cachedIdentity.hubKey === primaryHubKey) ? cachedIdentity : null;
   }
 
+  async function getCascadeExecutionStatus(cascadeId) {
+    const cid = String(cascadeId || '').trim();
+    if (!cid) return { ok: false, running: false };
+    const hub = resolveHub();
+    if (!hub) return { ok: false, running: false };
+    const res = await postLs(hub, '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories', {}, { timeoutMs: 2500 });
+    if (!res.ok || !res.data) return { ok: false, running: false };
+    const summaries = res.data.trajectorySummaries || res.data.trajectory_summaries || {};
+    const entry = summaries[cid] || null;
+    const rawStatus = String(entry?.status || '').toUpperCase();
+    const running = rawStatus.includes('RUNNING') || rawStatus === '2';
+    return { ok: true, running, status: rawStatus };
+  }
+
   return {
     resolveHub,
     getQuotaStatus,
     getUserIdentity,
     getCachedQuota: () => cachedQuota,
     getConversation,
-    updateConversationTitle
+    updateConversationTitle,
+    getCascadeExecutionStatus
   };
 }

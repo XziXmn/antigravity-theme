@@ -143,6 +143,18 @@ export function runWindowsRelaunchJob(job) {
     }
   }
 
+  // 2b. Clean up orphaned language_server.exe processes from the same Antigravity install dir
+  // so stale processes cannot linger and overwrite OS credentials after account switch.
+  try {
+    const installDirEsc = path.dirname(targetExe).replace(/'/g, "''");
+    const psCleanLs = `Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${installDirEsc}', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+    spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCleanLs], {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 4000
+    });
+  } catch {}
+
   sleepSync(450);
 
   // 3. Sync onboarding state in app_storage.json atomically

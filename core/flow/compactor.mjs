@@ -454,7 +454,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
   const compactionsByCid = new Map();
   const lastCheckByCid = new Map();
   const lastErrorByCid = new Map();
-  const inFlightByCid = new Set();
+  const inFlightByCid = new Map();
 
   function getSnapshotPath(cid) {
     const safe = sanitizeCid(cid);
@@ -688,67 +688,95 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
       return summaryText;
     };
 
-    inFlightByCid.add(safe);
-    try {
-      const primaryModel = compactModel || snap.model || 'gemini-3.8-flash-low';
-      let summaryText = '';
+    let settled = false;
+    const promise = (async () => {
       try {
-        summaryText = await requestSummary(primaryModel);
-      } catch (primaryErr) {
-        if (!compactModel && !/gemini-3\.8-flash-low/i.test(primaryModel)) {
-          log(`[FlowCompactor] Primary summary failed (${primaryErr.message}), falling back to gemini-3.8-flash-low`);
-          summaryText = await requestSummary('gemini-3.8-flash-low');
-        } else {
-          throw primaryErr;
-        }
-      }
-
-      const summaryTokens = estimateTextTokens(summaryText) + 40;
-      const beforeTokensEst = split.headTokens + split.tailTokens;
-      const afterTokensEst = summaryTokens + split.tailTokens;
-      const savedTokensEst = Math.max(0, beforeTokensEst - afterTokensEst);
-
-      let realSplitIdx = split.splitIdx;
-      if (split.anchorFingerprint) {
-        for (let i = origContents.length - 1; i >= 2; i -= 1) {
-          if (contentFingerprint(origContents[i]) === split.anchorFingerprint) {
-            realSplitIdx = i;
-            break;
+        const primaryModel = compactModel || snap.model || 'gemini-3.8-flash-low';
+        let summaryText = '';
+        try {
+          summaryText = await requestSummary(primaryModel);
+        } catch (primaryErr) {
+          if (!compactModel && !/gemini-3\.8-flash-low/i.test(primaryModel)) {
+            log(`[FlowCompactor] Primary summary failed (${primaryErr.message}), falling back to gemini-3.8-flash-low`);
+            summaryText = await requestSummary('gemini-3.8-flash-low');
+          } else {
+            throw primaryErr;
           }
         }
-      }
 
-      const nextState = {
-        version: 1,
-        cascadeId: safe,
-        count: (prevState?.count || 0) + 1,
-        hijackCount: Number(prevState?.hijackCount || 0),
-        compactedAt: Date.now(),
-        reason,
-        splitIdx: realSplitIdx,
-        anchorMode: split.anchorMode || 'user',
-        anchorFingerprint: split.anchorFingerprint,
-        totalTurnsAtCompact: origContents.length,
-        beforeTokensEst,
-        afterTokensEst,
-        savedTokensEst,
-        summaryText
-      };
-      persistState(safe, nextState);
-      lastErrorByCid.delete(safe);
-      log(
-        `[FlowCompactor] Compacted ${safe.slice(0, 8)} (${reason}): ${beforeTokensEst} -> ${afterTokensEst} est tokens (saved ${savedTokensEst})`
-      );
-      return { ok: true, status: getStatus(safe) };
-    } catch (err) {
-      // Atomic rollback: keep prevState intact
-      if (prevState) compactionsByCid.set(safe, prevState);
-      const msg = err?.message || String(err || 'compaction_failed');
-      recordFailure(msg);
-      log(`[FlowCompactor] Rollback for ${safe.slice(0, 8)}: ${msg}`);
-      return { ok: false, error: msg, status: getStatus(safe) };
+        const summaryTokens = estimateTextTokens(summaryText) + 40;
+        const beforeTokensEst = split.headTokens + split.tailTokens;
+        const afterTokensEst = summaryTokens + split.tailTokens;
+        const savedTokensEst = Math.max(0, beforeTokensEst - afterTokensEst);
+
+        let realSplitIdx = split.splitIdx;
+        if (split.anchorFingerprint) {
+          for (let i = origContents.length - 1; i >= 2; i -= 1) {
+            if (contentFingerprint(origContents[i]) === split.anchorFingerprint) {
+              realSplitIdx = i;
+              break;
+            }
+          }
+        }
+
+        const nextState = {
+          version: 1,
+          cascadeId: safe,
+          count: (prevState?.count || 0) + 1,
+          hijackCount: Number(prevState?.hijackCount || 0),
+          compactedAt: Date.now(),
+          reason,
+          splitIdx: realSplitIdx,
+          anchorMode: split.anchorMode || 'user',
+          anchorFingerprint: split.anchorFingerprint,
+          totalTurnsAtCompact: origContents.length,
+          beforeTokensEst,
+          afterTokensEst,
+          savedTokensEst,
+          summaryText
+        };
+        persistState(safe, nextState);
+        lastErrorByCid.delete(safe);
+        log(
+          `[FlowCompactor] Compacted ${safe.slice(0, 8)} (${reason}): ${beforeTokensEst} -> ${afterTokensEst} est tokens (saved ${savedTokensEst})`
+        );
+        return { ok: true, status: getStatus(safe) };
+      } catch (err) {
+        // Atomic rollback: keep prevState intact
+        if (prevState) compactionsByCid.set(safe, prevState);
+        const msg = err?.message || String(err || 'compaction_failed');
+        recordFailure(msg);
+        log(`[FlowCompactor] Rollback for ${safe.slice(0, 8)}: ${msg}`);
+        return { ok: false, error: msg, status: getStatus(safe) };
+      } finally {
+        settled = true;
+        if (inFlightByCid.get(safe) === promise) {
+          inFlightByCid.delete(safe);
+        }
+      }
+    })();
+    if (!settled) inFlightByCid.set(safe, promise);
+    return await promise;
+  }
+
+  async function awaitInFlight(cid, { timeoutMs = 45000 } = {}) {
+    const safe = sanitizeCid(cid);
+    if (!safe) return { waited: false };
+    const p = inFlightByCid.get(safe);
+    if (!p) return { waited: false };
+    const capMs = Math.max(500, Number(timeoutMs) || 45000);
+    let timer = null;
+    try {
+      await Promise.race([
+        p.catch(() => null),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, capMs);
+          if (typeof timer.unref === 'function') timer.unref();
+        })
+      ]);
+      return { waited: true, timedOut: inFlightByCid.get(safe) === p };
     } finally {
-      inFlightByCid.delete(safe);
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -793,7 +821,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
 
   function listTrackedCids() {
     return Array.from(
-      new Set([...latestTurnByCid.keys(), ...compactionsByCid.keys(), ...lastErrorByCid.keys(), ...inFlightByCid])
+      new Set([...latestTurnByCid.keys(), ...compactionsByCid.keys(), ...lastErrorByCid.keys(), ...inFlightByCid.keys()])
     );
   }
 
@@ -803,6 +831,7 @@ export function createFlowCompactor({ compactionDir = '', log = () => {} } = {})
     recordNativeHijack,
     shouldAutoCompact,
     runCompaction,
+    awaitInFlight,
     clearCompaction,
     getStatus,
     listTrackedCids

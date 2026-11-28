@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -24,7 +25,8 @@ import {
 } from '../core/flow/compactor.mjs';
 import { createMetricsReader } from '../core/daemon/sqlite-metrics.mjs';
 import { buildInlineTelemetryHtml, buildMetricsTooltipHtml } from '../core/daemon/telemetry-renderer.mjs';
-import { detectSubagentRequest } from '../core/flow/proxy.mjs';
+import { detectSubagentRequest, createFlowProxyServer } from '../core/flow/proxy.mjs';
+import { createFlowSessionStore } from '../core/flow/sessions.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
 function makeTurn(role, text, extraParts = []) {
@@ -665,7 +667,7 @@ test('proxy tool-pass fast-return still invokes maybeScheduleAutoCompact', () =>
   const proxySrc = fs.readFileSync(path.join(process.cwd(), 'core/flow/proxy.mjs'), 'utf8');
   const toolPassIdx = proxySrc.indexOf("detail: 'tool'");
   assert.ok(toolPassIdx > 0);
-  const slice = proxySrc.slice(toolPassIdx, toolPassIdx + 500);
+  const slice = proxySrc.slice(toolPassIdx, toolPassIdx + 700);
   assert.match(slice, /maybeScheduleAutoCompact\(/);
 });
 
@@ -743,4 +745,274 @@ test('sqlite-metrics includes flowCompSig in cache signature and cdp-bridge push
   assert.match(metricsSrc, /flowCompactedPending/);
   assert.match(bridgeSrc, /ev\.type === 'compact-cleared'/);
   assert.match(bridgeSrc, /syncMetricsForSession\(true\)/);
+});
+
+test('compactor awaitInFlight blocks until running compaction completes and proxy gates next turn on it', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-compact-wait-'));
+  try {
+    const compactor = createFlowCompactor({ compactionDir: tmpDir });
+    const cid = 'wait-session-1234';
+    const contents = [];
+    for (let i = 0; i < 8; i += 1) {
+      contents.push({ role: 'user', parts: [{ text: `User step ${i}: ` + 'x'.repeat(300) }] });
+      contents.push({ role: 'model', parts: [{ text: `Model step ${i}: ` + 'y'.repeat(300) }] });
+    }
+    compactor.captureTurnPayload(cid, { model: 'gemini-4-neon-high', request: { contents } });
+
+    let releaseSummary = null;
+    const summaryGate = new Promise((resolve) => {
+      releaseSummary = resolve;
+    });
+    const compactPromise = compactor.runCompaction(cid, {
+      upstream: 'https://example.invalid',
+      authHeaders: { authorization: 'Bearer test' },
+      keepTailTokens: 200,
+      reason: 'auto',
+      sendUpstream: async () => {
+        await summaryGate;
+        const summary = '- **当前目标与用户约束**：继续测试压缩门控。\n- **已验证事实与完成进度**：已捕获前序轮次。\n- **待完成下一步**：等待总结完成后再放行下一轮请求。';
+        return {
+          status: 200,
+          body: `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: summary }] }, finishReason: 'STOP' }] } })}\n\n`
+        };
+      }
+    });
+
+    assert.equal(compactor.getStatus(cid).inFlight, true);
+    let waiterResolved = false;
+    const waitPromise = compactor.awaitInFlight(cid, { timeoutMs: 5000 }).then((r) => {
+      waiterResolved = true;
+      return r;
+    });
+
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(waiterResolved, false, 'session turn must wait while compaction is still running');
+
+    releaseSummary();
+    const [cRes, wRes] = await Promise.all([compactPromise, waitPromise]);
+    assert.equal(cRes.ok, true);
+    assert.equal(wRes.waited, true);
+    assert.equal(wRes.timedOut, false);
+    assert.equal(compactor.getStatus(cid).inFlight, false);
+
+    const nextPayload = { request: { contents: structuredClone(contents) } };
+    const applied = compactor.applyToPayload(cid, nextPayload);
+    assert.equal(applied.applied, true);
+
+    const proxySrc = fs.readFileSync(path.join(process.cwd(), 'core/flow/proxy.mjs'), 'utf8');
+    assert.match(proxySrc, /compactor\.awaitInFlight/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('proxy holds passthrough SSE stream open until auto-compaction finishes and serializes manual compactNow during active turn', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-stream-gate-'));
+  let releaseTurn = null;
+  let releaseCompact = null;
+  let compactRequests = 0;
+  let turnRequests = 0;
+
+  const mockUpstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', async () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const isCompactReq = raw.includes('ag-codex-compact-') || raw.includes('高密度工程上下文交接摘要生成器');
+      if (isCompactReq) {
+        compactRequests += 1;
+        await new Promise((r) => {
+          releaseCompact = r;
+        });
+        const summary = '- **当前目标与用户约束**：保持流内串行。\n- **已验证事实与完成进度**：已完成前置步骤。\n- **待完成下一步**：继续执行。';
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+        res.end(`data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: summary }] }, finishReason: 'STOP' }] } })}\n\n`);
+        return;
+      }
+      turnRequests += 1;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+      res.write(`data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: 'First chunk' }] } }] } })}\n\n`);
+      if (releaseTurn) {
+        await new Promise((r) => {
+          releaseTurn = r;
+        });
+      }
+      res.end(
+        `data: ${JSON.stringify({
+          response: {
+            candidates: [{ content: { parts: [{ text: ' done' }] }, finishReason: 'STOP' }],
+            usageMetadata: { promptTokenCount: 7000, candidatesTokenCount: 10 }
+          }
+        })}\n\n`
+      );
+    });
+  });
+
+  await new Promise((r) => mockUpstream.listen(0, '127.0.0.1', r));
+  const upPort = mockUpstream.address().port;
+
+  const events = [];
+  const { server, compactNow } = createFlowProxyServer({
+    getConfig: () => ({
+      enabled: true,
+      defaultMode: 'default',
+      upstream: `http://127.0.0.1:${upPort}`,
+      compactEnabled: true,
+      compactThresholdPct: 75,
+      compactKeepTailTokens: 4000
+    }),
+    getContextWindow: () => 8000,
+    getActiveMainSessions: () => ['gate-cid-00112233'],
+    sessionStore: createFlowSessionStore({ storePath: path.join(tmpDir, 'flow-sessions.json') }),
+    compactionDir: path.join(tmpDir, 'compactions'),
+    onEvent: (ev) => events.push(ev)
+  });
+
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const proxyPort = server.address().port;
+
+  try {
+    const cid = 'gate-cid-00112233';
+    const contents = [];
+    for (let i = 0; i < 8; i += 1) {
+      contents.push({ role: 'user', parts: [{ text: `Turn ${i}: ` + 'a'.repeat(1800) }] });
+      contents.push({ role: 'model', parts: [{ text: `Resp ${i}: ` + 'b'.repeat(1800) }] });
+    }
+
+    // 1. Auto-compaction holds passthrough SSE stream open until summary completes
+    const payload1 = JSON.stringify({
+      model: 'gemini-4-neon-high',
+      request: {
+        labels: { trajectory_id: cid },
+        contents
+      }
+    });
+    let stream1Ended = false;
+    const req1Promise = new Promise((resolve, reject) => {
+      const creq = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: proxyPort,
+          method: 'POST',
+          path: '/v1internal:streamGenerateContent?alt=sse',
+          headers: { 'Content-Type': 'application/json', authorization: 'Bearer test-token' }
+        },
+        (cres) => {
+          const bufs = [];
+          cres.on('data', (d) => bufs.push(d));
+          cres.on('end', () => {
+            stream1Ended = true;
+            resolve(Buffer.concat(bufs).toString('utf8'));
+          });
+        }
+      );
+      creq.on('error', reject);
+      creq.end(payload1);
+    });
+
+    // Wait until upstream compaction call has started while client SSE is still open
+    for (let i = 0; i < 40 && compactRequests === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(turnRequests, 1);
+    assert.equal(compactRequests, 1);
+    assert.equal(stream1Ended, false, 'client SSE response must stay open until auto-compaction completes');
+
+    releaseCompact();
+    const body1 = await req1Promise;
+    assert.equal(stream1Ended, true);
+    assert.match(body1, /First chunk/);
+    assert.ok(events.some((e) => e.type === 'compact' && e.ok === true));
+
+    // 2. Manual compactNow during active turn queues into the active turn's stream gate (never concurrent)
+    let resolveTurnGate = null;
+    releaseTurn = () => {}; // non-null sentinel triggers pause inside mockUpstream
+    const origListenHandler = mockUpstream.listeners('request')[0];
+    assert.ok(origListenHandler);
+    // Replace releaseTurn setup cleanly for turn 2
+    let manualTurnStarted = false;
+    let manualTurnRelease = null;
+    mockUpstream.removeAllListeners('request');
+    mockUpstream.on('request', (req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', async () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if (raw.includes('ag-codex-compact-') || raw.includes('高密度工程上下文交接摘要生成器')) {
+          compactRequests += 1;
+          await new Promise((r) => {
+            releaseCompact = r;
+          });
+          const summary = '- **当前目标与用户约束**：手动压缩排队验证。\n- **已验证事实与完成进度**：活跃流结束后执行。\n- **待完成下一步**：完成并返回。';
+          res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+          res.end(`data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: summary }] }, finishReason: 'STOP' }] } })}\n\n`);
+          return;
+        }
+        manualTurnStarted = true;
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+        res.write(`data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: 'Active turn' }] } }] } })}\n\n`);
+        await new Promise((r) => {
+          manualTurnRelease = r;
+        });
+        res.end(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [{ content: { parts: [{ text: ' finished' }] }, finishReason: 'STOP' }],
+              usageMetadata: { promptTokenCount: 200, candidatesTokenCount: 10 }
+            }
+          })}\n\n`
+        );
+      });
+    });
+
+    let stream2Ended = false;
+    const req2Promise = new Promise((resolve, reject) => {
+      const creq = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: proxyPort,
+          method: 'POST',
+          path: '/v1internal:streamGenerateContent?alt=sse',
+          headers: { 'Content-Type': 'application/json', authorization: 'Bearer test-token' }
+        },
+        (cres) => {
+          const bufs = [];
+          cres.on('data', (d) => bufs.push(d));
+          cres.on('end', () => {
+            stream2Ended = true;
+            resolve(Buffer.concat(bufs).toString('utf8'));
+          });
+        }
+      );
+      creq.on('error', reject);
+      creq.end(payload1);
+    });
+
+    for (let i = 0; i < 40 && !manualTurnStarted; i += 1) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(manualTurnStarted, true);
+
+    const compact2Promise = compactNow(cid);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(compactRequests, 1, 'compactNow must NOT run concurrently while active turn stream is still generating');
+
+    manualTurnRelease();
+    for (let i = 0; i < 40 && compactRequests < 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(compactRequests, 2, 'queued manual compactNow runs once active turn stream finishes');
+    assert.equal(stream2Ended, false, 'client SSE response remains held open during queued manual compaction');
+
+    releaseCompact();
+    const [c2Res, body2] = await Promise.all([compact2Promise, req2Promise]);
+    assert.equal(c2Res.ok, true);
+    assert.equal(stream2Ended, true);
+    assert.match(body2, /Active turn/);
+    void resolveTurnGate;
+  } finally {
+    await new Promise((r) => server.close(r));
+    await new Promise((r) => mockUpstream.close(r));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
